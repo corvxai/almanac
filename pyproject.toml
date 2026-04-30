@@ -1,0 +1,20 @@
+[project]
+name = "forecasting-prototype"
+version = "0.1.0"
+description = "Decentralised AI forecasting — validator-agent execution loop prototype"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "live: exercises real external APIs (run with `pytest --live`; requires credentials)",
+    "provider(provider_id): gateway provider under test (filter with `pytest --provider <id>`)",
+]

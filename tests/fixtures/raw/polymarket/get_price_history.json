@@ -1,0 +1,8 @@
+{
+  "market_slug": "example-fed-rate-market",
+  "price_history": [
+    {"timestamp": "2026-03-25T00:00:00+00:00", "price": 0.42},
+    {"timestamp": "2026-03-26T00:00:00+00:00", "price": 0.45},
+    {"timestamp": "2026-03-27T00:00:00+00:00", "price": 0.51}
+  ]
+}

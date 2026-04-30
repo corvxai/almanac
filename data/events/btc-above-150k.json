@@ -1,0 +1,13 @@
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "title": "Bitcoin above $150k by end of 2026",
+  "description": "Will the price of Bitcoin (BTC/USD) close above $150,000 on any single day before December 31, 2026?",
+  "category": "economic",
+  "subcategory": "crypto",
+  "resolution_criteria": "Resolves YES if Bitcoin's daily closing price on CoinGecko exceeds $150,000 USD on any day before the deadline. Closing price defined as the 00:00 UTC price.",
+  "resolution_deadline": "2026-12-31T23:59:59Z",
+  "created_at": "2026-03-10T08:30:00Z",
+  "source": "polymarket",
+  "source_url": "https://polymarket.com/event/btc-150k-2026",
+  "tags": ["bitcoin", "crypto", "price-prediction"]
+}

@@ -1,0 +1,5 @@
+{
+  "latency_ms": 120,
+  "record_count": 7,
+  "note": "unknown provider id → generic extractor uses top-level numerics only"
+}

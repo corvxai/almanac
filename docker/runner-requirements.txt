@@ -1,0 +1,18 @@
+# Curated agent-runner deps. The agent sandbox can ONLY import these — and
+# only the modules baked into the runner image can be called. This list is
+# intentionally minimal; expand only when there is a concrete agent need.
+#
+# IMPORTANT: do NOT add `bittensor`, `substrate-interface`, `web3`, or any
+# chain library here. The runner image is the agent's untrusted side; the
+# validator's hotkey + signing logic lives only in the validator container.
+#
+# IMPORTANT: do NOT add model-provider SDKs (`anthropic`, `openai`,
+# `google-generativeai`, `cohere`, etc.). All inference goes through
+# `ctx.gateway.call_provider(...)` → UDS → local proxy → central gateway,
+# which is what holds the API keys. The sandbox has `--network=none` and no
+# DNS, so calling those SDKs directly would fail anyway; not shipping them
+# removes attack surface (subdeps, code-reuse gadgets) and forces every
+# inference call through the audited path.
+httpx==0.27.2
+pydantic==2.9.2
+python-dotenv==1.0.1

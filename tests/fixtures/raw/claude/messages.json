@@ -1,0 +1,29 @@
+{
+  "id": "msg_fixture_001",
+  "model": "claude-sonnet-4-20250514",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "PREDICTION: 0.54\nREASONING: Mixed prints leave markets near fair value versus priors.",
+      "citations": [
+        {
+          "type": "web_search_result_location",
+          "url": "https://example.com/cited-span",
+          "cited_text": "Committee remains data dependent"
+        }
+      ]
+    },
+    {
+      "type": "web_search_tool_result",
+      "content": [
+        {
+          "type": "web_search_result",
+          "url": "https://example.org/search-hit",
+          "title": "Policy preview"
+        }
+      ]
+    }
+  ],
+  "stop_reason": "end_turn"
+}

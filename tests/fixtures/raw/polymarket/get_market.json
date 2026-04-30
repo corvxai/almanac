@@ -1,0 +1,9 @@
+{
+  "market_slug": "example-fed-rate-market",
+  "price": 0.5825,
+  "probability": 0.5825,
+  "volume_24h": 1250000.5,
+  "total_volume": 12000000.0,
+  "liquidity": 890000.25,
+  "last_updated": "2026-04-01T12:00:00+00:00"
+}

@@ -1,0 +1,30 @@
+{
+  "id": "resp_fixture_001",
+  "object": "response",
+  "model": "gpt-5-mini",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_fixture",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "PREDICTION: 0.72\nREASONING: Consensus points to a cut with dispersion around timing.",
+          "annotations": [
+            {
+              "type": "url_citation",
+              "url": "https://example.com/fed-survey",
+              "title": "Fed survey"
+            },
+            {
+              "type": "url_citation",
+              "url": "https://example.org/markets",
+              "title": "Markets desk"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

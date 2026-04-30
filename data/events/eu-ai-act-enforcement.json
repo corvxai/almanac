@@ -1,0 +1,13 @@
+{
+  "event_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+  "title": "EU AI Act full enforcement by August 2026",
+  "description": "Will all provisions of the EU AI Act be actively enforced by EU member states by August 1, 2026?",
+  "category": "regulatory",
+  "subcategory": "ai_governance",
+  "resolution_criteria": "Resolves YES if the European Commission confirms that all AI Act provisions including high-risk system requirements are enforceable and at least 20 of 27 member states have established national competent authorities by August 1, 2026.",
+  "resolution_deadline": "2026-08-01T23:59:59Z",
+  "created_at": "2026-02-01T10:00:00Z",
+  "source": "polymarket",
+  "source_url": "https://polymarket.com/event/eu-ai-act-enforcement",
+  "tags": ["eu", "ai", "regulation", "tech-policy"]
+}

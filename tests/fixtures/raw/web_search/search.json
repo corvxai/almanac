@@ -1,0 +1,21 @@
+{
+  "query": "fed rate decision outlook",
+  "result_count": 125000,
+  "search_timestamp": "2026-04-01T12:00:00+00:00",
+  "results": [
+    {
+      "title": "Markets lean toward a hold",
+      "url": "https://example.com/news/1",
+      "snippet": "Futures markets imply a low chance of an immediate cut, with attention on forward guidance.",
+      "published": "2026-03-30T10:00:00+00:00",
+      "source": "example.com"
+    },
+    {
+      "title": "Analyst note: policy path",
+      "url": "https://example.org/analysis/2",
+      "snippet": "Several desks raised year-end cut probabilities after the latest labor print.",
+      "published": "2026-03-29T08:00:00+00:00",
+      "source": "example.org"
+    }
+  ]
+}

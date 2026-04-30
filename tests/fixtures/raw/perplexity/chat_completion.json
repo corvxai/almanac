@@ -1,0 +1,22 @@
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "PREDICTION: 0.58\nREASONING: Snippets from multiple outlets converge on a mid-year cut as the modal case."
+      }
+    }
+  ],
+  "search_results": [
+    {
+      "title": "Central bank watch",
+      "url": "https://example.com/cbw/1",
+      "snippet": "Desk surveys show a 58% implied probability of at least one cut before September."
+    },
+    {
+      "title": "Macro dashboard",
+      "url": "https://example.org/macro/dash",
+      "snippet": "Inflation breakevens moved slightly lower week over week."
+    }
+  ]
+}

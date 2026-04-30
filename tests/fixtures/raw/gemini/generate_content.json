@@ -1,0 +1,23 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "PREDICTION: 0.49\nREASONING: Grounding snippets show competing narratives on growth versus inflation."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "groundingMetadata": {
+        "webSearchQueries": ["fed decision probability april 2026"],
+        "groundingChunks": [
+          {"web": {"uri": "https://example.com/reuters-fed", "title": "Reuters: Fed"}},
+          {"web": {"uri": "https://example.org/wiki-ffr", "title": "Wikipedia: FFR"}}
+        ]
+      }
+    }
+  ],
+  "modelVersion": "gemini-2.5-flash"
+}

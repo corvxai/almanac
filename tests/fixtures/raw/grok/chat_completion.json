@@ -1,0 +1,15 @@
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "PREDICTION: 0.61\nREASONING: Search results emphasize a gradual easing path rather than an abrupt pivot.",
+        "reasoning_content": "Step 1: review macro prints. Step 2: compare to prior meeting language."
+      }
+    }
+  ],
+  "citations": [
+    "https://example.com/fed-outlook",
+    "https://example.org/labor-market"
+  ]
+}

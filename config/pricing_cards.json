@@ -1,0 +1,68 @@
+{
+  "claude/__default__": {
+    "input_per_mtoken": 3.0,
+    "output_per_mtoken": 15.0,
+    "cache_read_input_per_mtoken": 0.3,
+    "cache_creation_input_per_mtoken": 3.75
+  },
+  "claude/__default_opus__": {
+    "input_per_mtoken": 5.0,
+    "output_per_mtoken": 25.0,
+    "cache_read_input_per_mtoken": 0.5,
+    "cache_creation_input_per_mtoken": 6.25
+  },
+  "claude/__default_sonnet__": {
+    "input_per_mtoken": 3.0,
+    "output_per_mtoken": 15.0,
+    "cache_read_input_per_mtoken": 0.3,
+    "cache_creation_input_per_mtoken": 3.75
+  },
+  "claude/__default_haiku__": {
+    "input_per_mtoken": 1.0,
+    "output_per_mtoken": 5.0,
+    "cache_read_input_per_mtoken": 0.1,
+    "cache_creation_input_per_mtoken": 1.25
+  },
+  "claude/claude-opus-4-7": {
+    "input_per_mtoken": 5.0,
+    "output_per_mtoken": 25.0,
+    "cache_read_input_per_mtoken": 0.5,
+    "cache_creation_input_per_mtoken": 6.25
+  },
+  "claude/claude-opus-4-6": {
+    "input_per_mtoken": 5.0,
+    "output_per_mtoken": 25.0,
+    "cache_read_input_per_mtoken": 0.5,
+    "cache_creation_input_per_mtoken": 6.25
+  },
+  "claude/claude-opus-4-5": {
+    "input_per_mtoken": 5.0,
+    "output_per_mtoken": 25.0,
+    "cache_read_input_per_mtoken": 0.5,
+    "cache_creation_input_per_mtoken": 6.25
+  },
+  "claude/claude-sonnet-4-6": {
+    "input_per_mtoken": 3.0,
+    "output_per_mtoken": 15.0,
+    "cache_read_input_per_mtoken": 0.3,
+    "cache_creation_input_per_mtoken": 3.75
+  },
+  "claude/claude-sonnet-4-5": {
+    "input_per_mtoken": 3.0,
+    "output_per_mtoken": 15.0,
+    "cache_read_input_per_mtoken": 0.3,
+    "cache_creation_input_per_mtoken": 3.75
+  },
+  "claude/claude-sonnet-4": {
+    "input_per_mtoken": 3.0,
+    "output_per_mtoken": 15.0,
+    "cache_read_input_per_mtoken": 0.3,
+    "cache_creation_input_per_mtoken": 3.75
+  },
+  "claude/claude-haiku-4-5": {
+    "input_per_mtoken": 1.0,
+    "output_per_mtoken": 5.0,
+    "cache_read_input_per_mtoken": 0.1,
+    "cache_creation_input_per_mtoken": 1.25
+  }
+}

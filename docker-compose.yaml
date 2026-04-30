@@ -1,0 +1,71 @@
+# Arcratio validator stack.
+#
+# `validator`         — orchestrator + signing proxy + Bittensor wallet.
+# `agent-runner`      — built once, referenced by tag. Spawned per agent run
+#                       by `validator` via /var/run/docker.sock.
+#
+# Run order:
+#   1. Build agent-runner: `docker compose build agent-runner`
+#   2. Local gateway on host: `python scripts/run_gateway.py` (separate terminal)
+#   3. Start validator (host URL, not localhost — see README Docker section):
+#        GATEWAY_SERVICE_URL=http://host.docker.internal:8077 docker compose up validator
+#
+# The `agent-runner` service exists only to provide a `build:` target — it
+# is never `up`'d. The validator launches sibling containers from its image
+# tag at runtime. Do not add validator `depends_on: [agent-runner]`: with
+# `profiles: [build-only]` on agent-runner, Compose omits it from the default
+# project and that dependency makes the file invalid.
+
+services:
+  agent-runner:
+    image: arcratio/agent-runner:latest
+    build:
+      context: .
+      dockerfile: docker/agent-runner.Dockerfile
+    # Sibling containers are spawned by the validator at runtime.
+    profiles: ["build-only"]
+
+  validator:
+    image: arcratio/validator:latest
+    build:
+      context: .
+      dockerfile: docker/validator.Dockerfile
+    environment:
+      # Bittensor wallet (mounted read-only below)
+      BITTENSOR_WALLET_PATH: /root/.bittensor/wallets
+      BITTENSOR_WALLET_NAME: ${BITTENSOR_WALLET_NAME:-default}
+      BITTENSOR_WALLET_HOTKEY: ${BITTENSOR_WALLET_HOTKEY:-default}
+      BITTENSOR_NETUID: ${BITTENSOR_NETUID:-0}
+      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK:-finney}
+      BITTENSOR_SIGNING_REQUIRED: ${BITTENSOR_SIGNING_REQUIRED:-true}
+      # Central provider gateway target
+      GATEWAY_SERVICE_URL: ${GATEWAY_SERVICE_URL:-https://gateway.arcratio.ai}
+      # Sandbox knobs
+      SANDBOX_TYPE: ${SANDBOX_TYPE:-docker_runc}
+      SANDBOX_IMAGE: arcratio/agent-runner:latest
+      SANDBOX_SOCKET_DIR: /var/run/arcratio
+      # Optional absolute host path for sibling bind (see README). Usually unset;
+      # the validator resolves the compose bind source from /proc/self/mountinfo.
+      SANDBOX_BIND_SRC: ${SANDBOX_BIND_SRC:-}
+      # Omit agent-runner log tails after each exit (default is print).
+      ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET: ${ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET:-}
+      # Agent provider keys passed through to the central gateway are NOT
+      # set here — secrets live with the central gateway, not the validator.
+    volumes:
+      # Sibling-container spawn. Documented privilege risk.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Bittensor wallet, read-only. Numinous-compatible host path.
+      - ${HOME}/.bittensor:/root/.bittensor:ro
+      # UDS directory: the validator-local proxy creates proxy.sock here,
+      # and the validator uses docker.sock to bind-mount this same host dir
+      # into each sibling agent-runner container as read-only.
+      - ${ARCRATIO_RUN_DIR:-./var/run/arcratio}:/var/run/arcratio
+      # Trace storage and config
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    # So GATEWAY_SERVICE_URL=http://host.docker.internal:… reaches the host
+    # (e.g. run_gateway.py on WSL) from bridge-networked containers.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The validator container itself does NOT need the host network, but
+    # does need outbound HTTPS to the central gateway. Default bridge is fine.
