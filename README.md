@@ -19,6 +19,12 @@ python3 scripts/run_forecast.py --event fed
 
 Traces are saved to `data/traces/` as JSON files conforming to the Evidence Digest schema.
 
+## For Miners
+
+Miner-specific onboarding and planned CLI workflows live in `miner/README.md`.
+Use this path for building an agent, uploading it to the orchestrator, and
+listing published agents.
+
 ## Cost estimation
 
 Provider usage/cost handling is documented in `docs/pricing_cards.md`.
