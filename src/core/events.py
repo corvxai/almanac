@@ -23,5 +23,6 @@ class Event(BaseModel):
     resolution_deadline: datetime
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     source: Optional[str] = None
+    source_id: Optional[str] = None
     source_url: Optional[str] = None
     tags: list[str] = Field(default_factory=list)

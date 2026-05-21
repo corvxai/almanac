@@ -139,3 +139,26 @@ def test_assemble_trace_omits_usage_totals_when_no_provider_usage() -> None:
     )
 
     assert digest.trace_integrity.usage_totals is None
+
+
+def test_assemble_trace_carries_prediction_metadata() -> None:
+    baseline = {
+        "provider": "polymarket",
+        "market_slug": "will-x-happen",
+        "yes_price": 0.42,
+        "no_price": 0.58,
+        "as_of": "2026-04-24T00:00:00Z",
+    }
+    digest = assemble_trace(
+        execution_context=_execution_context(),
+        event=_event(),
+        provider_calls=[],
+        agent_result=AgentResult(
+            prediction=0.5,
+            reasoning="test",
+            metadata={"market_baseline": baseline},
+        ),
+    )
+
+    assert digest.prediction_output.metadata is not None
+    assert digest.prediction_output.metadata["market_baseline"] == baseline

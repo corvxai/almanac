@@ -113,6 +113,8 @@ def _build_prediction_output(
     if market_price is not None:
         contrarian = abs(result.prediction - market_price) > 0.10
 
+    metadata = dict(result.metadata) if result.metadata else None
+
     return PredictionOutput(
         final_probability=result.prediction,
         confidence=result.confidence,
@@ -121,6 +123,7 @@ def _build_prediction_output(
         key_drivers=key_drivers,
         key_uncertainties=key_uncertainties,
         contrarian_flag=contrarian,
+        metadata=metadata,
     )
 
 

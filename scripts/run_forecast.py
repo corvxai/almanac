@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -29,6 +31,38 @@ from src.storage.json_store import JsonTraceStore
 from src.validator.orchestrator import Orchestrator
 
 
+@dataclass(frozen=True)
+class LoadedEvent:
+    filename_stem: str
+    event: Event
+
+
+def _prepare_proxy_socket_path(config) -> Path:
+    """Return a writable proxy socket path, falling back if stale root-owned file exists."""
+    socket_dir = config.validator.sandbox_socket_dir
+    socket_path = socket_dir / "proxy.sock"
+    socket_dir.mkdir(parents=True, exist_ok=True)
+
+    if not socket_path.exists():
+        return socket_path
+
+    try:
+        socket_path.unlink()
+        return socket_path
+    except PermissionError:
+        fallback_dir = Path("/tmp") / "arcratio" / str(os.getuid())
+        fallback_dir.mkdir(parents=True, exist_ok=True)
+        fallback_socket_path = fallback_dir / "proxy.sock"
+        if fallback_socket_path.exists():
+            fallback_socket_path.unlink(missing_ok=True)
+        config.validator.sandbox_socket_dir = fallback_dir
+        print(
+            "  WARNING: Cannot remove existing proxy socket at "
+            f"{socket_path} (permission denied). Falling back to {fallback_dir}."
+        )
+        return fallback_socket_path
+
+
 def _start_local_proxy(config):
     """Start the validator-local signing proxy in a daemon thread.
 
@@ -43,10 +77,7 @@ def _start_local_proxy(config):
 
     from src.gateway.local_proxy import create_app, LocalProxyState
 
-    socket_path = config.validator.sandbox_socket_dir / "proxy.sock"
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    if socket_path.exists():
-        socket_path.unlink()
+    socket_path = _prepare_proxy_socket_path(config)
 
     app = create_app(config)
     state: LocalProxyState = app.state.proxy
@@ -76,12 +107,12 @@ def _start_local_proxy(config):
     return state
 
 
-def load_events(data_dir: Path) -> list[Event]:
+def load_events(data_dir: Path) -> list[LoadedEvent]:
     events_dir = data_dir / "events"
-    events = []
+    events: list[LoadedEvent] = []
     for path in sorted(events_dir.glob("*.json")):
         raw = json.loads(path.read_text())
-        events.append(Event.model_validate(raw))
+        events.append(LoadedEvent(filename_stem=path.stem, event=Event.model_validate(raw)))
     return events
 
 
@@ -252,13 +283,14 @@ def main() -> None:
         sys.exit(1)
 
     if args.event:
-        all_events = [e for e in all_events if args.event in e.title.lower().replace(" ", "-")]
+        needle = args.event.lower()
+        all_events = [e for e in all_events if needle in e.filename_stem.lower()]
         if not all_events:
             print(f"No events matching '{args.event}'")
             sys.exit(1)
     elif not args.all_events:
         chosen = random.choice(all_events)
-        print(f"  Randomly selected event: {chosen.title}")
+        print(f"  Randomly selected event: {chosen.event.title}")
         all_events = [chosen]
 
     print()
@@ -267,9 +299,21 @@ def main() -> None:
     print(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
 
     trace_idx = 0
-    for event in all_events:
+    for loaded_event in all_events:
+        event = loaded_event.event
         for agent in agents:
+            print(
+                "  Baseline: gathering validator-side market signal "
+                f"(source={event.source or 'n/a'}, source_id={event.source_id or 'n/a'}) ..."
+            )
             digest = orchestrator.run_agent(event, agent)
+            baseline = None
+            if digest.prediction_output.metadata:
+                baseline = digest.prediction_output.metadata.get("market_baseline")
+            if baseline is None:
+                print("  Baseline: unavailable for this run.")
+            else:
+                print("  Baseline: attached to trace metadata.")
             print_summary(digest, trace_idx)
             trace_idx += 1
 

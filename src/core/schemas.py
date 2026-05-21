@@ -196,6 +196,7 @@ class PredictionOutput(BaseModel):
     key_uncertainties: list[str] = Field(default_factory=list)
     contrarian_flag: bool = False
     ensemble_at_prediction: Optional[float] = Field(default=None, ge=0, le=1)
+    metadata: Optional[dict[str, Any]] = None
 
     @field_validator("confidence_interval")
     @classmethod
