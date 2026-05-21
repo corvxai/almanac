@@ -30,7 +30,7 @@ class PolymarketProvider(BaseProvider):
         return handler(params)
 
     def summarise_params(self, call_type: str, params: dict[str, Any]) -> str:
-        market = params.get("market_slug", params.get("event_id", "unknown"))
+        market = params.get("source_id", params.get("market_slug", params.get("event_id", "unknown")))
         return f"polymarket.{call_type}(market={market})"
 
     # -- mock handlers --------------------------------------------------------

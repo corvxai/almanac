@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from src.agent.base import BaseAgent
@@ -33,6 +33,7 @@ from src.core.schemas import (
 from src.gateway.gateway import ProviderGateway
 from src.gateway.providers.base import BaseProvider
 from src.storage.store import TraceStore
+from src.validator.polymarket_baseline import fetch_polymarket_baseline
 from src.validator.sandbox import execute_agent
 from src.validator.trace_assembler import assemble_trace
 
@@ -97,6 +98,10 @@ class Orchestrator:
         # call log lives on the proxy; we drain it post-run instead.
         if not is_docker:
             self._gateway.reset()
+
+        # Baseline metadata for scoring: pull the latest market signal up-front
+        # in a validator-controlled lookup, independent of agent behavior.
+        market_baseline = self._collect_market_baseline(event)
 
         if is_docker:
             self._local_proxy_state.register_run(execution_id, self._track)  # type: ignore[union-attr]
@@ -165,6 +170,11 @@ class Orchestrator:
             provider_calls = self._gateway.call_log
             agent_steps = ctx.reasoning_chain or None
 
+        if market_baseline is not None:
+            metadata = dict(agent_result.metadata or {})
+            metadata["market_baseline"] = market_baseline
+            agent_result = agent_result.model_copy(update={"metadata": metadata})
+
         digest = assemble_trace(
             execution_context=exec_ctx,
             event=event,
@@ -183,3 +193,16 @@ class Orchestrator:
     ) -> list[EvidenceDigest]:
         """Run multiple agents on the same event, returning all traces."""
         return [self.run_agent(event, agent) for agent in agents]
+
+    def _collect_market_baseline(self, event: Event) -> dict[str, Any] | None:
+        """Fetch latest YES/NO baseline prices from direct Polymarket lookup."""
+        try:
+            return fetch_polymarket_baseline(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "market baseline fetch failed for event=%s source_id=%s: %s",
+                event.event_id,
+                event.source_id,
+                exc,
+            )
+            return None
