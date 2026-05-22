@@ -10,14 +10,41 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# Run all example events
+# Run all example events (dev harness — no chain interaction)
 python3 scripts/run_forecast.py
 
-# Run a specific event
+# Run a specific event (dev harness)
 python3 scripts/run_forecast.py --event fed
+
+# Run the production Bittensor validator loop (scores + set_weights)
+python3 scripts/run_validator.py
 ```
 
 Traces are saved to `data/traces/` as JSON files conforming to the Evidence Digest schema.
+
+## Validator loop
+
+`scripts/run_validator.py` is the production entrypoint and the Dockerfile `CMD`. It runs a long-lived loop that, once per hour:
+
+1. Syncs the metagraph for the configured `src/core/constants.py` subnet settings.
+2. Optionally scores miners under the **Almanac** incentive mechanism.
+3. Optionally scores miners under the **arcratio** mechanism.
+4. Blends the two score vectors (configurable weight shares) and emits one `set_weights` call.
+
+Each mechanism is independently toggleable via code constants in `src/core/constants.py`:
+
+- `VALIDATOR_LOOP.loop_enabled` — master switch.
+- `VALIDATOR_LOOP.almanac_enabled`, `VALIDATOR_LOOP.arcratio_enabled` — per-mechanism toggles.
+- `VALIDATOR_LOOP.almanac_weight_share`, `VALIDATOR_LOOP.arcratio_weight_share` — blend shares.
+
+`scripts/run_forecast.py` is now an explicit dev harness for the agent orchestrator path (runs an agent against an event in a Docker sandbox and writes a trace); it does not interact with the chain.
+
+For Almanac API traders, run the CLI to submit your EVM EOA wallet address:
+
+```bash
+pip install -r requirements-miner.txt
+python3 scripts/run_almanac_miner.py
+```
 
 ## For Miners
 
@@ -243,18 +270,18 @@ GATEWAY_SERVICE_URL=http://host.docker.internal:8077 docker compose up validator
 
 Shell-set `GATEWAY_SERVICE_URL` overrides the value from project `.env` for that command, so you can keep `localhost` in `.env` for host-only tools like `scripts/run_forecast.py`.
 
-**Sibling agent containers:** The validator process bind-mounts the proxy UDS directory into each agent-runner container using the **Docker host** path for the source (the daemon does not interpret paths relative to the validator container). The code resolves that host path from `/proc/self/mountinfo` by default. If sibling runs still cannot reach the proxy, set an absolute host path explicitly: `SANDBOX_BIND_SRC` in `.env` (same directory Compose maps onto `/var/run/arcratio` in the validator).
+**Sibling agent containers:** The validator process bind-mounts the proxy UDS directory into each agent-runner container using the **Docker host** path for the source (the daemon does not interpret paths relative to the validator container). The code resolves that host path from `/proc/self/mountinfo` by default. If sibling runs still cannot reach the proxy, set `VALIDATOR.sandbox_socket_host_bind` in `src/core/constants.py` to an absolute host path matching the Compose bind.
 
 **Debugging agent-runner:** By default, `docker compose logs validator` only shows the validator process. Each agent run is a **separate** container. The validator waits with **`docker wait`** (CLI subprocess), resolving the binary at **`/usr/bin/docker`** / **`/bin/docker`** before ``PATH`` (slim images often lack ``docker`` on ``PATH``). The agent JSON is passed as a **file on the shared UDS bind mount** (`ARCRATIO_RUNNER_INPUT_FILE`), not stdin, because Docker stdin EOF is unreliable. After each run finishes, the validator prints **log tails** unless `ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET=1`. Follow a live run on the host: `docker logs -f <container_id>` from the spawn line. Provider calls from the agent go **UDS → validator local proxy → gateway**, so the gateway tab shows upstream HTTP from the **validator** (or your host), not a separate “agent” client identity.
 
 **Wallet mount:** `docker-compose.yaml` bind-mounts `~/.bittensor` into the
-validator container read-only. Set the wallet name / hotkey / netuid in `.env`
-(see `.env.example`). The wallet is reachable **only** inside the validator
-container — agent sandboxes never see it.
+validator container read-only. Set wallet name / hotkey / netuid defaults in
+`src/core/constants.py` (`BITTENSOR.*`). The wallet is reachable **only** inside
+the validator container — agent sandboxes never see it.
 
 **No wallet on disk?** Pass `--unsafe-no-signing` to either entry point
 (`scripts/run_forecast.py` or `scripts/run_local_proxy.py`), or set
-`BITTENSOR_SIGNING_REQUIRED=false` in `.env`. The proxy will forward
+`BITTENSOR.signing_required=False` in `src/core/constants.py`. The proxy will forward
 unsigned requests; the central gateway logs the absence. Dev/contributor use
 only — never run production this way.
 

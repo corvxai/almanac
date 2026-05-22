@@ -1,20 +1,14 @@
-"""Configuration management for the forecasting prototype."""
+"""Configuration models for the forecasting prototype."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 from uuid import UUID, uuid4
 
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_ENV_FILE = _PROJECT_ROOT / ".env"
-
-
+from src.core import constants
 # Sandbox type literal — kept as a str so legacy values like "in_process" still
 # round-trip through ValidatorConfig and the SandboxEnvironment enum.
 SandboxType = Literal[
@@ -28,26 +22,27 @@ SandboxType = Literal[
 
 class ValidatorConfig(BaseModel):
     validator_id: UUID = Field(default_factory=uuid4)
-    available_providers: list[str] = Field(default_factory=lambda: ["polymarket", "web_search"])
+    available_providers: list[str] = Field(
+        default_factory=lambda: list(constants.VALIDATOR.available_providers)
+    )
 
-    sandbox_type: SandboxType = "docker_runc"
-    sandbox_image: str = "arcratio/agent-runner:latest"
-    sandbox_timeout_seconds: int = 240
-    sandbox_max_concurrent: int = 8
-    sandbox_memory_mb: int = 1024
-    sandbox_cpus: float = 1.0
-    sandbox_pids_limit: int = 256
+    sandbox_type: SandboxType = constants.VALIDATOR.sandbox_type  # type: ignore[assignment]
+    sandbox_image: str = constants.VALIDATOR.sandbox_image
+    sandbox_timeout_seconds: int = constants.VALIDATOR.sandbox_timeout_seconds
+    sandbox_max_concurrent: int = constants.VALIDATOR.sandbox_max_concurrent
+    sandbox_memory_mb: int = constants.VALIDATOR.sandbox_memory_mb
+    sandbox_cpus: float = constants.VALIDATOR.sandbox_cpus
+    sandbox_pids_limit: int = constants.VALIDATOR.sandbox_pids_limit
     # Default under the repo so host runs (e.g. ``run_forecast.py``) need no
-    # root; Docker Compose still sets ``SANDBOX_SOCKET_DIR=/var/run/arcratio``
-    # inside the validator container where that path is volume-mounted.
+    # root privileges.
     sandbox_socket_dir: Path = Field(
-        default_factory=lambda: _PROJECT_ROOT / "var/run/arcratio",
+        default_factory=lambda: constants.VALIDATOR.sandbox_socket_dir,
     )
     # Host path for the proxy UDS bind into *sibling* agent containers. When the
     # validator runs inside Docker, the Docker API resolves bind sources on the
     # host — not inside this container — so in-container paths are wrong unless
     # this is set or auto-resolved (see sandbox_docker.mountinfo helper).
-    sandbox_socket_host_bind: str | None = None
+    sandbox_socket_host_bind: str | None = constants.VALIDATOR.sandbox_socket_host_bind
 
 
 class BittensorConfig(BaseModel):
@@ -58,22 +53,45 @@ class BittensorConfig(BaseModel):
     validator container only — the agent sandbox never sees them.
     """
 
-    wallet_path: Path = Path("/root/.bittensor/wallets")
-    wallet_name: str = "default"
-    wallet_hotkey: str = "default"
-    netuid: int = 0
-    subtensor_network: str = "finney"
-    signing_required: bool = True
+    wallet_path: Path = constants.BITTENSOR.wallet_path
+    wallet_name: str = constants.BITTENSOR.wallet_name
+    wallet_hotkey: str = constants.BITTENSOR.wallet_hotkey
+    netuid: int = constants.BITTENSOR.netuid
+    subtensor_network: str = constants.BITTENSOR.subtensor_network
+    signing_required: bool = constants.BITTENSOR.signing_required
 
 
 class StorageConfig(BaseModel):
-    backend: str = "json"
-    data_dir: Path = _PROJECT_ROOT / "data"
+    backend: str = constants.STORAGE.backend
+    data_dir: Path = constants.STORAGE.data_dir
 
 
 class GatewayConfig(BaseModel):
-    default_timeout_ms: int = 30_000
-    max_retries: int = 2
+    default_timeout_ms: int = constants.GATEWAY.default_timeout_ms
+    max_retries: int = constants.GATEWAY.max_retries
+
+
+class ValidatorLoopConfig(BaseModel):
+    """Long-running Bittensor validator configuration.
+
+    Controls the per-mechanism enable toggles and weight shares that the
+    main ``Validator`` reads at each epoch. When ``loop_enabled`` is false,
+    the entrypoint runs only the local signing proxy + agent orchestrator
+    daemon for dev use.
+    """
+
+    loop_enabled: bool = constants.VALIDATOR_LOOP.loop_enabled
+    almanac_enabled: bool = constants.VALIDATOR_LOOP.almanac_enabled
+    arcratio_enabled: bool = constants.VALIDATOR_LOOP.arcratio_enabled
+    metadata_manager_enabled: bool = constants.VALIDATOR_LOOP.metadata_manager_enabled
+    almanac_weight_share: float = constants.VALIDATOR_LOOP.almanac_weight_share
+    arcratio_weight_share: float = constants.VALIDATOR_LOOP.arcratio_weight_share
+    almanac_api_url: Optional[str] = constants.VALIDATOR_LOOP.almanac_api_url
+    use_synthetic_trading_data: bool = constants.VALIDATOR_LOOP.use_synthetic_trading_data
+    write_trading_history: bool = constants.VALIDATOR_LOOP.write_trading_history
+    db_score_logging: bool = constants.VALIDATOR_LOOP.db_score_logging
+    wandb_enabled: bool = constants.VALIDATOR_LOOP.wandb_enabled
+    rolling_window_days: int = constants.VALIDATOR_LOOP.rolling_window_days
 
 
 class AppConfig(BaseModel):
@@ -81,45 +99,15 @@ class AppConfig(BaseModel):
     bittensor: BittensorConfig = Field(default_factory=BittensorConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
-    log_level: str = "INFO"
+    loop: ValidatorLoopConfig = Field(default_factory=ValidatorLoopConfig)
+    log_level: str = constants.LOG_LEVEL
 
     @classmethod
     def load_default(cls) -> "AppConfig":
-        """Build a config with .env-aware Bittensor + sandbox overrides applied.
+        """Build config from code defaults in :mod:`src.core.constants`.
 
-        Mirrors how `src.gateway.constants` loads `.env` with `override=False`,
-        so a shell-set variable always wins over the `.env` file.
+        Runtime settings are intentionally code-driven. Environment variables are
+        reserved for sensitive provider credentials and are read in gateway
+        provider clients, not here.
         """
-        if _ENV_FILE.is_file():
-            load_dotenv(_ENV_FILE, override=False)
-
-        cfg = cls()
-
-        # Bittensor wallet/netuid overrides
-        if (v := os.environ.get("BITTENSOR_WALLET_PATH", "").strip()):
-            cfg.bittensor.wallet_path = Path(v)
-        if (v := os.environ.get("BITTENSOR_WALLET_NAME", "").strip()):
-            cfg.bittensor.wallet_name = v
-        if (v := os.environ.get("BITTENSOR_WALLET_HOTKEY", "").strip()):
-            cfg.bittensor.wallet_hotkey = v
-        if (v := os.environ.get("BITTENSOR_NETUID", "").strip()):
-            try:
-                cfg.bittensor.netuid = int(v)
-            except ValueError:
-                pass
-        if (v := os.environ.get("BITTENSOR_NETWORK", "").strip()):
-            cfg.bittensor.subtensor_network = v
-        if (v := os.environ.get("BITTENSOR_SIGNING_REQUIRED", "").strip()):
-            cfg.bittensor.signing_required = v.lower() in {"1", "true", "yes", "on"}
-
-        # Sandbox overrides
-        if (v := os.environ.get("SANDBOX_TYPE", "").strip()):
-            cfg.validator.sandbox_type = v  # type: ignore[assignment]
-        if (v := os.environ.get("SANDBOX_IMAGE", "").strip()):
-            cfg.validator.sandbox_image = v
-        if (v := os.environ.get("SANDBOX_SOCKET_DIR", "").strip()):
-            cfg.validator.sandbox_socket_dir = Path(v)
-        if (v := os.environ.get("SANDBOX_BIND_SRC", "").strip()):
-            cfg.validator.sandbox_socket_host_bind = v
-
-        return cfg
+        return cls()
