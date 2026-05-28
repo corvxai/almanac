@@ -71,6 +71,11 @@ class ValidatorLoopDefaults:
     db_score_logging: bool = False
     wandb_enabled: bool = False
     rolling_window_days: int = 30
+    metadata_update_interval_seconds: int = 3600
+    metadata_batch_size: int = 10
+    metadata_batch_delay_seconds: float = 2.0
+    metadata_per_uid_delay_seconds: float = 0.1
+    metadata_use_bulk_commitments: bool = True
 
 
 VALIDATOR = ValidatorDefaults()

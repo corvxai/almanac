@@ -1,10 +1,11 @@
 import json
 import os
-import time
 import threading
-from typing import Dict, List, Optional, Set
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+
 import bittensor as bt
-from datetime import datetime, timedelta, timezone
 
 
 class MetadataManager:
@@ -13,7 +14,17 @@ class MetadataManager:
     Runs in a background thread to avoid blocking the main validator loop.
     """
     
-    def __init__(self, netuid: int, network: str, state_file: str = "validator_state.json"):
+    def __init__(
+        self,
+        netuid: int,
+        network: str,
+        state_file: str = "validator_state.json",
+        update_interval_seconds: int = 3600,
+        batch_size: int = 10,
+        batch_delay_seconds: float = 2.0,
+        per_uid_delay_seconds: float = 0.1,
+        use_bulk_commitments: bool = True,
+    ):
         self.netuid = netuid
         self.network = network
         self.state_file = state_file
@@ -21,9 +32,11 @@ class MetadataManager:
         self.metagraph = None
         
         # Configuration
-        self.update_interval = 3600  # 1 hour in seconds
-        self.batch_size = 10  # Query 10 UIDs at a time
-        self.batch_delay = 2  # 2 seconds between batches
+        self.update_interval = max(1, int(update_interval_seconds))
+        self.batch_size = max(1, int(batch_size))
+        self.batch_delay = max(0.0, float(batch_delay_seconds))
+        self.per_uid_delay = max(0.0, float(per_uid_delay_seconds))
+        self.use_bulk_commitments = bool(use_bulk_commitments)
         
         # Threading
         self.running = False
@@ -197,11 +210,54 @@ class MetadataManager:
         bt.logging.debug(f"Found {len(uids_to_update)} UIDs to update out of {len(all_uids)} total miners")
         return uids_to_update
     
-    def process_batch(self, uid_batch: List[int], current_block: int):
+    def _normalize_commitment(self, commitment: Optional[str]) -> Optional[str]:
+        if commitment is None:
+            return None
+        if isinstance(commitment, str):
+            commitment = commitment.strip()
+            return commitment or None
+        return None
+
+    def _get_bulk_commitments(self) -> Optional[Dict[int, Optional[str]]]:
+        """Fetch all subnet commitments and map by UID in one chain call."""
+        if self.metagraph is None:
+            return None
+        try:
+            commitments_by_hotkey = self.subtensor.get_all_commitments(netuid=self.netuid)
+            if not isinstance(commitments_by_hotkey, dict):
+                bt.logging.warning("Bulk commitment fetch returned unexpected payload; falling back to per-UID fetch.")
+                return None
+
+            uid_commitments: Dict[int, Optional[str]] = {}
+            hotkeys = list(self.metagraph.hotkeys)
+            for uid in self.metagraph.uids.tolist():
+                uid_int = int(uid)
+                if uid_int < 0 or uid_int >= len(hotkeys):
+                    uid_commitments[uid_int] = None
+                    continue
+                commitment = commitments_by_hotkey.get(hotkeys[uid_int])
+                uid_commitments[uid_int] = self._normalize_commitment(commitment)
+
+            bt.logging.debug(f"Fetched {len(commitments_by_hotkey)} commitments with bulk chain query.")
+            return uid_commitments
+        except Exception as e:
+            bt.logging.warning(f"Bulk commitment fetch failed; falling back to per-UID fetch: {e}")
+            return None
+
+    def process_batch(
+        self,
+        uid_batch: List[int],
+        current_block: int,
+        bulk_commitments: Optional[Dict[int, Optional[str]]] = None,
+    ):
         """Process a batch of UIDs for metadata updates."""
         for uid in uid_batch:
             try:
-                metadata = self.get_uid_metadata(uid)
+                metadata = (
+                    bulk_commitments.get(uid)
+                    if bulk_commitments is not None
+                    else self.get_uid_metadata(uid)
+                )
                 # Always update the entry, even if metadata is None
                 self.update_uid_metadata(uid, metadata, current_block)
                 
@@ -210,8 +266,9 @@ class MetadataManager:
                 else:
                     bt.logging.debug(f"No metadata found for UID {uid} (stored as None)")
                 
-                # Small delay between individual queries
-                time.sleep(0.1)
+                if bulk_commitments is None and self.per_uid_delay > 0:
+                    # Small delay only for per-UID chain queries to avoid burst load.
+                    time.sleep(self.per_uid_delay)
                 
             except Exception as e:
                 bt.logging.warning(f"Error processing UID {uid}: {e}")
@@ -231,13 +288,15 @@ class MetadataManager:
             if not uids_to_update:
                 bt.logging.debug("No UIDs need metadata updates")
                 return
+
+            bulk_commitments = self._get_bulk_commitments() if self.use_bulk_commitments else None
             
             # Process in batches
             for i in range(0, len(uids_to_update), self.batch_size):
                 batch = uids_to_update[i:i + self.batch_size]
                 bt.logging.info(f"Processing metadata batch {i//self.batch_size + 1}: UIDs {batch}")
                 
-                self.process_batch(batch, current_block)
+                self.process_batch(batch, current_block, bulk_commitments=bulk_commitments)
                 
                 # Save state after each batch
                 self.save_state()
@@ -321,5 +380,8 @@ class MetadataManager:
                 "last_full_sync": last_sync,
                 "update_interval_seconds": self.update_interval,
                 "batch_size": self.batch_size,
+                "batch_delay_seconds": self.batch_delay,
+                "per_uid_delay_seconds": self.per_uid_delay,
+                "use_bulk_commitments": self.use_bulk_commitments,
                 "running": self.running
             }

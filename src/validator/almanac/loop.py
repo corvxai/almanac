@@ -30,7 +30,8 @@ logger = logging.getLogger("arcratio.almanac")
 
 
 _DEFAULT_TRADING_HISTORY_ENDPOINT_PROD = "https://api.almanac.market/api/v1/trading/trading-history"
-_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "https://test-api.almanac.market/api/v1/trading/trading-history"
+#_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "https://test-api.almanac.market/api/v1/trading/trading-history"
+_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "http://localhost:3001/api/v1/trading/trading-history"
 _DEFAULT_TRADING_HISTORY_BATCH_LIMIT = 1000
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 _TAO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"

@@ -92,6 +92,11 @@ class ValidatorLoopConfig(BaseModel):
     db_score_logging: bool = constants.VALIDATOR_LOOP.db_score_logging
     wandb_enabled: bool = constants.VALIDATOR_LOOP.wandb_enabled
     rolling_window_days: int = constants.VALIDATOR_LOOP.rolling_window_days
+    metadata_update_interval_seconds: int = constants.VALIDATOR_LOOP.metadata_update_interval_seconds
+    metadata_batch_size: int = constants.VALIDATOR_LOOP.metadata_batch_size
+    metadata_batch_delay_seconds: float = constants.VALIDATOR_LOOP.metadata_batch_delay_seconds
+    metadata_per_uid_delay_seconds: float = constants.VALIDATOR_LOOP.metadata_per_uid_delay_seconds
+    metadata_use_bulk_commitments: bool = constants.VALIDATOR_LOOP.metadata_use_bulk_commitments
 
 
 class AppConfig(BaseModel):

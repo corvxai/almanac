@@ -481,4 +481,9 @@ def _build_metadata_manager(config: AppConfig):
         netuid=config.bittensor.netuid,
         network=config.bittensor.subtensor_network,
         state_file=state_file,
+        update_interval_seconds=config.loop.metadata_update_interval_seconds,
+        batch_size=config.loop.metadata_batch_size,
+        batch_delay_seconds=config.loop.metadata_batch_delay_seconds,
+        per_uid_delay_seconds=config.loop.metadata_per_uid_delay_seconds,
+        use_bulk_commitments=config.loop.metadata_use_bulk_commitments,
     )
