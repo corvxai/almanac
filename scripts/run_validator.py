@@ -21,17 +21,162 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from tabulate import tabulate
+
 from src.core.config import AppConfig
 from src.storage.json_store import JsonTraceStore
 from src.validator.validator import Validator, start_local_proxy
 
 
-def _setup_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s  %(name)-28s  %(levelname)-5s  %(message)s",
-        datefmt="%H:%M:%S",
-    )
+_ASCII_BANNER = r"""
+
+    _________________________________________________________________________________________________________________________________________________
+
+_____╱╲╲╲╲╲╲╲╲╲_______╱╲╲╲╲╲╲╲╲╲____________╱╲╲╲╲╲╲╲╲╲____╱╲╲╲╲╲╲╲╲╲_________╱╲╲╲╲╲╲╲╲╲_____╱╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲__╱╲╲╲╲╲╲╲╲╲╲╲_______╱╲╲╲╲╲______        
+ ___╱╲╲╲╲╲╲╲╲╲╲╲╲╲___╱╲╲╲╱╱╱╱╱╱╱╲╲╲_______╱╲╲╲╱╱╱╱╱╱╱╱___╱╲╲╲╱╱╱╱╱╱╱╲╲╲_____╱╲╲╲╲╲╲╲╲╲╲╲╲╲__╲╱╱╱╱╱╱╱╲╲╲╱╱╱╱╱__╲╱╱╱╱╱╲╲╲╱╱╱______╱╲╲╲╱╱╱╲╲╲____       
+  __╱╲╲╲╱╱╱╱╱╱╱╱╱╲╲╲_╲╱╲╲╲_____╲╱╲╲╲_____╱╲╲╲╱___________╲╱╲╲╲_____╲╱╲╲╲____╱╲╲╲╱╱╱╱╱╱╱╱╱╲╲╲_______╲╱╲╲╲___________╲╱╲╲╲_______╱╲╲╲╱__╲╱╱╱╲╲╲__      
+   _╲╱╲╲╲_______╲╱╲╲╲_╲╱╲╲╲╲╲╲╲╲╲╲╲╱_____╱╲╲╲_____________╲╱╲╲╲╲╲╲╲╲╲╲╲╱____╲╱╲╲╲_______╲╱╲╲╲_______╲╱╲╲╲___________╲╱╲╲╲______╱╲╲╲______╲╱╱╲╲╲_     
+    _╲╱╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲_╲╱╲╲╲╱╱╱╱╱╱╲╲╲____╲╱╲╲╲_____________╲╱╲╲╲╱╱╱╱╱╱╲╲╲____╲╱╲╲╲╲╲╲╲╲╲╲╲╲╲╲╲_______╲╱╲╲╲___________╲╱╲╲╲_____╲╱╲╲╲_______╲╱╲╲╲_    
+     _╲╱╲╲╲╱╱╱╱╱╱╱╱╱╲╲╲_╲╱╲╲╲____╲╱╱╲╲╲___╲╱╱╲╲╲____________╲╱╲╲╲____╲╱╱╲╲╲___╲╱╲╲╲╱╱╱╱╱╱╱╱╱╲╲╲_______╲╱╲╲╲___________╲╱╲╲╲_____╲╱╱╲╲╲______╱╲╲╲__   
+      _╲╱╲╲╲_______╲╱╲╲╲_╲╱╲╲╲_____╲╱╱╲╲╲___╲╱╱╱╲╲╲__________╲╱╲╲╲_____╲╱╱╲╲╲__╲╱╲╲╲_______╲╱╲╲╲_______╲╱╲╲╲___________╲╱╲╲╲______╲╱╱╱╲╲╲__╱╲╲╲____  
+       _╲╱╲╲╲_______╲╱╲╲╲_╲╱╲╲╲______╲╱╱╲╲╲____╲╱╱╱╱╲╲╲╲╲╲╲╲╲_╲╱╲╲╲______╲╱╱╲╲╲_╲╱╲╲╲_______╲╱╲╲╲_______╲╱╲╲╲________╱╲╲╲╲╲╲╲╲╲╲╲____╲╱╱╱╲╲╲╲╲╱_____ 
+        _╲╱╱╱________╲╱╱╱__╲╱╱╱________╲╱╱╱________╲╱╱╱╱╱╱╱╱╱__╲╱╱╱________╲╱╱╱__╲╱╱╱________╲╱╱╱________╲╱╱╱________╲╱╱╱╱╱╱╱╱╱╱╱_______╲╱╱╱╱╱_______                                                                                  
+
+    _________________________________________________________________________________________________________________________________________________
+"""
+
+
+class _ColumnFormatter(logging.Formatter):
+    """Formatter with compact, centered level/logger columns."""
+
+    LEVEL_COL_WIDTH = 8
+    LOGGER_COL_WIDTH = 24
+
+    @staticmethod
+    def _center(value: str, width: int) -> str:
+        if len(value) >= width:
+            return value
+        return value.center(width)
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.asctime_col = self.formatTime(record, self.datefmt)
+        record.level_col = self._center(record.levelname, self.LEVEL_COL_WIDTH)
+        record.name_col = self._center(record.name, self.LOGGER_COL_WIDTH)
+        return super().format(record)
+
+
+class _ColorColumnFormatter(_ColumnFormatter):
+    """Colorized variant:
+    - timestamp always blue
+    - levelname only is colorized (INFO = bold white)
+    """
+
+    _RESET = "\033[0m"
+    _BLUE = "\033[34m"
+    _LEVEL_COLORS = {
+        logging.DEBUG: "\033[36m",    # cyan
+        logging.INFO: "\033[1;37m",   # bold white
+        logging.WARNING: "\033[33m",  # yellow
+        logging.ERROR: "\033[31m",    # red
+        logging.CRITICAL: "\033[35m", # magenta
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.asctime_col = f"{self._BLUE}{self.formatTime(record, self.datefmt)}{self._RESET}"
+        centered_level = self._center(record.levelname, self.LEVEL_COL_WIDTH)
+        level_color = self._LEVEL_COLORS.get(record.levelno, "")
+        if level_color:
+            record.level_col = f"{level_color}{centered_level}{self._RESET}"
+        else:
+            record.level_col = centered_level
+        record.name_col = self._center(record.name, self.LOGGER_COL_WIDTH)
+        return logging.Formatter.format(self, record)
+
+
+def _setup_logging(level: str, *, wire_debug: bool = False, color: bool = False) -> None:
+    root_level = getattr(logging, level.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(root_level)
+
+    stream = logging.StreamHandler(sys.stdout)
+    fmt = "%(asctime_col)s | %(level_col)s | %(name_col)s | %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    formatter: logging.Formatter
+    if color and hasattr(stream.stream, "isatty") and stream.stream.isatty():
+        formatter = _ColorColumnFormatter(fmt=fmt, datefmt=datefmt)
+    else:
+        formatter = _ColumnFormatter(fmt=fmt, datefmt=datefmt)
+    stream.setFormatter(formatter)
+    root_logger.addHandler(stream)
+
+    # Keep bittensor's internal listener active (it manages state transitions),
+    # but prevent duplicate propagation into root and align formatter/style.
+    bt_logger = logging.getLogger("bittensor")
+    bt_logger.setLevel(root_level)
+    bt_logger.propagate = False
+    try:
+        import bittensor as bt  # type: ignore
+
+        listener = getattr(bt.logging, "_listener", None)
+        if listener is not None:
+            for h in getattr(listener, "handlers", ()):
+                try:
+                    h.setFormatter(formatter)
+                    h.setLevel(root_level)
+                except Exception:
+                    pass
+    except Exception:
+        # If bittensor is not importable yet, we still have sane root logging.
+        pass
+
+    wire_level = logging.DEBUG if wire_debug else logging.WARNING
+    for noisy in (
+        "async_substrate_interface",
+        "websockets",
+        "websockets.client",
+        "websockets.server",
+        "httpx",
+        "httpcore",
+    ):
+        logging.getLogger(noisy).setLevel(wire_level)
+
+
+def _log_startup_config_table(log: logging.Logger, config: AppConfig, args: argparse.Namespace) -> None:
+    """Emit one concise startup configuration table (no duplicated params)."""
+    logging_flags = {
+        "trace": bool(args.logging_trace),
+        "debug": bool(args.logging_debug or args.logging_trace),
+        "info": bool(args.logging_info or (not args.logging_debug and not args.logging_trace)),
+        "color": bool(args.logging_color),
+    }
+    rows = [
+        ("bittensor", "netuid", config.bittensor.netuid),
+        ("bittensor", "subtensor.network", config.bittensor.subtensor_network),
+        ("bittensor", "wallet.name", config.bittensor.wallet_name),
+        ("bittensor", "wallet.hotkey", config.bittensor.wallet_hotkey),
+        ("bittensor", "wallet.path", str(config.bittensor.wallet_path)),
+        ("bittensor", "signing_required", config.bittensor.signing_required),
+        ("logging", "trace", logging_flags["trace"]),
+        ("logging", "debug", logging_flags["debug"]),
+        ("logging", "info", logging_flags["info"]),
+        ("logging", "color", logging_flags["color"]),
+        ("logging", "wire.debug", bool(args.wire_debug)),
+        ("validator_loop", "enabled", config.loop.loop_enabled),
+        ("validator_loop", "almanac_enabled", config.loop.almanac_enabled),
+        ("validator_loop", "arcratio_enabled", config.loop.arcratio_enabled),
+        ("validator_loop", "metadata_manager_enabled", config.loop.metadata_manager_enabled),
+        ("validator_loop", "almanac_weight_share", config.loop.almanac_weight_share),
+        ("validator_loop", "arcratio_weight_share", config.loop.arcratio_weight_share),
+        ("validator_loop", "rolling_window_days", config.loop.rolling_window_days),
+        ("validator_loop", "write_trading_history", config.loop.write_trading_history),
+        ("validator_loop", "db_score_logging", config.loop.db_score_logging),
+        ("validator_loop", "wandb_enabled", config.loop.wandb_enabled),
+        ("runtime", "proxy_enabled", not args.no_proxy),
+        ("runtime", "data_dir", str(config.storage.data_dir)),
+    ]
+    table = tabulate(rows, headers=("section", "key", "value"), tablefmt="simple_outline")
+    log.info("Startup config:\n%s", table)
 
 
 def main() -> None:
@@ -91,7 +236,25 @@ def main() -> None:
         action="store_true",
         help="Disable Almanac metadata manager thread for this run.",
     )
+    parser.add_argument(
+        "--wire.debug",
+        dest="wire_debug",
+        action="store_true",
+        help="Enable DEBUG logs for substrate/websocket/http transport internals.",
+    )
+    parser.add_argument(
+        "--logging.color",
+        dest="logging_color",
+        action="store_true",
+        help="Enable colorized log output for terminal runs.",
+    )
     logging_group = parser.add_mutually_exclusive_group()
+    logging_group.add_argument(
+        "--logging.trace",
+        dest="logging_trace",
+        action="store_true",
+        help="Set validator log level to TRACE-equivalent (DEBUG) and enable wire debug logs.",
+    )
     logging_group.add_argument(
         "--logging.debug",
         dest="logging_debug",
@@ -141,7 +304,10 @@ def main() -> None:
         config.bittensor.wallet_path = args.wallet_path
     if args.subtensor_network:
         config.bittensor.subtensor_network = args.subtensor_network
-    if args.logging_debug:
+    if args.logging_trace:
+        config.log_level = "DEBUG"
+        args.wire_debug = True
+    elif args.logging_debug:
         config.log_level = "DEBUG"
     elif args.logging_info:
         config.log_level = "INFO"
@@ -158,7 +324,12 @@ def main() -> None:
     if args.unsafe_no_signing:
         config.bittensor.signing_required = False
 
-    _setup_logging(config.log_level)
+    _setup_logging(
+        config.log_level,
+        wire_debug=args.wire_debug,
+        color=args.logging_color,
+    )
+    print(_ASCII_BANNER, flush=True)
     log = logging.getLogger("arcratio.run_validator")
 
     log.info("Bittensor netuid=%d network=%s", config.bittensor.netuid, config.bittensor.subtensor_network)
@@ -170,6 +341,7 @@ def main() -> None:
         config.loop.arcratio_enabled,
         config.loop.arcratio_weight_share,
     )
+    _log_startup_config_table(log, config, args)
 
     if not args.no_proxy:
         state = start_local_proxy(config)
