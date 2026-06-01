@@ -476,7 +476,9 @@ def _build_metadata_manager(config: AppConfig):
     """Construct the Almanac ``MetadataManager`` against ``config.bittensor``."""
     from src.validator.almanac.metadata_manager import MetadataManager
 
-    state_file = f"validator_state_{config.bittensor.netuid}.json"
+    state_dir = config.storage.data_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_file = str(state_dir / f"validator_state_{config.bittensor.netuid}.json")
     return MetadataManager(
         netuid=config.bittensor.netuid,
         network=config.bittensor.subtensor_network,

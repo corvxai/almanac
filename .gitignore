@@ -12,5 +12,4 @@ var/run/
 # Data directories for the prototype.
 data/results/
 data/traces/
-
-validator_state_*.json
+data/validator_state_*.json

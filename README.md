@@ -82,25 +82,59 @@ python3 scripts/run_almanac_miner.py
 
 - Python 3.10+
 - `pip`
-- Access to a registered Bittensor validator wallet/hotkey
+- Docker Engine + Docker Compose plugin
+- A registered Bittensor validator wallet/hotkey setup (via btcli)
 
-### Setup
+### Production: Docker required
+
+When Forecasting IM is enabled, the validator must spawn sandboxed agent-runner
+child containers. In this repo, that means running the validator with Docker
+access (`docker.sock`) via Compose.
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+# Build both images once (runner + validator)
+docker compose build agent-runner validator
 ```
 
-### Run
+```bash
+docker compose run --rm validator \
+  python scripts/run_validator.py \
+  --netuid 41 \
+  --wallet.name almanac-vali \
+  --wallet.hotkey almanac-vali-hot \
+  --logging.info
+```
+
+### PM2 (commonly used to continuously run/supervise a validator)
 
 ```bash
-python3 scripts/run_validator.py \
-  --netuid 172 \
-  --wallet.name st-vali \
-  --wallet.hotkey st-vali-hot \
-  --subtensor.network test \
-  --logging.debug
+# Recommended
+pm2 start --name almanac-validator --interpreter bash -- -lc '
+docker compose run --rm validator \
+  python scripts/run_validator.py \
+    --netuid 41 \
+    --wallet.name almanac-vali \
+    --wallet.hotkey almanac-vali-hot \
+    --logging.info
+'
+
+# Alternative: supervise the compose service directly (best when args are wired in compose command/env)
+pm2 start "docker compose up validator" --name almanac-validator-compose-up
+```
+
+Tip: build images separately on deploy/update (avoid `--build` in PM2 commands
+so restart loops stay fast and predictable):
+
+```bash
+docker compose build agent-runner validator
+```
+
+Persist and enable restart on reboot:
+
+```bash
+pm2 save
+pm2 startup
+pm2 logs almanac-validator
 ```
 
 ## For Miners
