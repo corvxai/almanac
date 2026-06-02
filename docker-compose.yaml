@@ -31,22 +31,8 @@ services:
       context: .
       dockerfile: docker/validator.Dockerfile
     environment:
-      # Bittensor wallet (mounted read-only below)
-      BITTENSOR_WALLET_PATH: /root/.bittensor/wallets
-      BITTENSOR_WALLET_NAME: ${BITTENSOR_WALLET_NAME:-default}
-      BITTENSOR_WALLET_HOTKEY: ${BITTENSOR_WALLET_HOTKEY:-default}
-      BITTENSOR_NETUID: ${BITTENSOR_NETUID:-0}
-      BITTENSOR_NETWORK: ${BITTENSOR_NETWORK:-finney}
-      BITTENSOR_SIGNING_REQUIRED: ${BITTENSOR_SIGNING_REQUIRED:-true}
       # Central provider gateway target
       GATEWAY_SERVICE_URL: ${GATEWAY_SERVICE_URL:-https://gateway.arcratio.ai}
-      # Sandbox knobs
-      SANDBOX_TYPE: ${SANDBOX_TYPE:-docker_runc}
-      SANDBOX_IMAGE: arcratio/agent-runner:latest
-      SANDBOX_SOCKET_DIR: /var/run/arcratio
-      # Optional absolute host path for sibling bind (see README). Usually unset;
-      # the validator resolves the compose bind source from /proc/self/mountinfo.
-      SANDBOX_BIND_SRC: ${SANDBOX_BIND_SRC:-}
       # Omit agent-runner log tails after each exit (default is print).
       ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET: ${ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET:-}
       # Agent provider keys passed through to the central gateway are NOT
@@ -60,9 +46,8 @@ services:
       # and the validator uses docker.sock to bind-mount this same host dir
       # into each sibling agent-runner container as read-only.
       - ${ARCRATIO_RUN_DIR:-./var/run/arcratio}:/var/run/arcratio
-      # Trace storage and config
+      # Trace storage
       - ./data:/app/data
-      - ./.env:/app/.env:ro
     # So GATEWAY_SERVICE_URL=http://host.docker.internal:… reaches the host
     # (e.g. run_gateway.py on WSL) from bridge-networked containers.
     extra_hosts:

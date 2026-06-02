@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
@@ -29,82 +27,13 @@ from src.agent.examples.openrouter_agent import OpenRouterAgent
 from src.agent.examples.claude_agent import ClaudeAgent
 from src.storage.json_store import JsonTraceStore
 from src.validator.orchestrator import Orchestrator
+from src.validator.validator import start_local_proxy as _start_local_proxy
 
 
 @dataclass(frozen=True)
 class LoadedEvent:
     filename_stem: str
     event: Event
-
-
-def _prepare_proxy_socket_path(config) -> Path:
-    """Return a writable proxy socket path, falling back if stale root-owned file exists."""
-    socket_dir = config.validator.sandbox_socket_dir
-    socket_path = socket_dir / "proxy.sock"
-    socket_dir.mkdir(parents=True, exist_ok=True)
-
-    if not socket_path.exists():
-        return socket_path
-
-    try:
-        socket_path.unlink()
-        return socket_path
-    except PermissionError:
-        fallback_dir = Path("/tmp") / "arcratio" / str(os.getuid())
-        fallback_dir.mkdir(parents=True, exist_ok=True)
-        fallback_socket_path = fallback_dir / "proxy.sock"
-        if fallback_socket_path.exists():
-            fallback_socket_path.unlink(missing_ok=True)
-        config.validator.sandbox_socket_dir = fallback_dir
-        print(
-            "  WARNING: Cannot remove existing proxy socket at "
-            f"{socket_path} (permission denied). Falling back to {fallback_dir}."
-        )
-        return fallback_socket_path
-
-
-def _start_local_proxy(config):
-    """Start the validator-local signing proxy in a daemon thread.
-
-    Returns the `LocalProxyState` so the orchestrator can register/drain runs
-    without going through HTTP. This keeps the orchestrator and proxy in a
-    single process for simplicity; production deployments can split them
-    across processes once the admin HTTP endpoints land.
-    """
-    import threading
-
-    import uvicorn
-
-    from src.gateway.local_proxy import create_app, LocalProxyState
-
-    socket_path = _prepare_proxy_socket_path(config)
-
-    app = create_app(config)
-    state: LocalProxyState = app.state.proxy
-    state.load_hotkey()
-
-    uvicorn_config = uvicorn.Config(
-        app,
-        uds=str(socket_path),
-        log_level="warning",
-        lifespan="off",
-    )
-    server = uvicorn.Server(uvicorn_config)
-
-    thread = threading.Thread(
-        target=server.run,
-        name="arcratio-local-proxy",
-        daemon=True,
-    )
-    thread.start()
-
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if socket_path.exists():
-            break
-        time.sleep(0.05)
-
-    return state
 
 
 def load_events(data_dir: Path) -> list[LoadedEvent]:

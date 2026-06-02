@@ -8,6 +8,7 @@ on the validator/dev side.
 
 from __future__ import annotations
 
+import base64
 import time
 
 import pytest
@@ -18,6 +19,7 @@ from src.gateway.providers.base import BaseProvider
 from src.gateway.signing import (
     AUTH_VERSION,
     HEADER_AUTH_VERSION,
+    HEADER_AUTHORIZATION,
     HEADER_HOTKEY,
     HEADER_NETUID,
     HEADER_NONCE,
@@ -93,6 +95,13 @@ class TestSignRequest:
         assert int(headers[HEADER_TIMESTAMP]) > 0
         assert len(headers[HEADER_NONCE]) >= 8
         assert len(headers[HEADER_SIGNATURE]) > 32  # hex of 64-byte sig
+        assert headers[HEADER_AUTHORIZATION].startswith("Basic ")
+
+        token = headers[HEADER_AUTHORIZATION].split(" ", 1)[1]
+        raw = base64.b64decode(token).decode("utf-8")
+        username, password = raw.split(":", 1)
+        assert username == loaded.hotkey_ss58
+        assert password == headers[HEADER_SIGNATURE]
 
     def test_no_signing_returns_empty(self):
         # When signing is disabled we want a clean empty header dict — no

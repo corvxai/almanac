@@ -41,8 +41,9 @@ COPY . /app
 # socket file read-only.
 RUN mkdir -p /var/run/arcratio
 
-# Default command runs the orchestrator's CLI which in turn launches the
-# local proxy in a daemon thread (single-process v1). For production
-# multi-process layouts, override with `supervisord -c /app/docker/supervisord.conf`
-# once that config lands.
-CMD ["python", "scripts/run_forecast.py"]
+# Default command runs the Bittensor validator loop. It starts
+# the local signing proxy + agent orchestrator on a daemon thread internally
+# (single-process v1), then drives the per-epoch scoring + set_weights flow.
+# For dev/ad-hoc agent runs without chain interaction, override with
+# `python scripts/run_forecast.py`.
+CMD ["python", "scripts/run_validator.py"]
