@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import os
+import secrets
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -17,6 +20,13 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_AGENT_FILE_BYTES = 2 * 1024 * 1024  # 2MB
 LIST_AGENTS_ENDPOINT = "v1/agents/list-agents"
 UPLOAD_AGENT_ENDPOINT = "v1/agents/submit-agent"
+AUTH_DOMAIN = "sub41-agent-v1"
+
+
+@dataclass(frozen=True)
+class SignedHeaders:
+    headers: dict[str, str]
+    path_and_query: str
 
 
 def _resolve_orchestrator_url(args: argparse.Namespace) -> str:
@@ -40,22 +50,13 @@ def _resolve_timeout(args: argparse.Namespace) -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
-def _resolve_token(args: argparse.Namespace) -> str | None:
-    return args.api_token or os.getenv("ARCRATIO_API_TOKEN")
-
-
 def _url(base_url: str, endpoint: str) -> str:
     return f"{base_url}/{endpoint.lstrip('/')}"
 
 
-def _headers(token: str | None) -> dict[str, str]:
-    if not token:
-        return {}
-    return {"Authorization": f"Bearer {token}"}
-
-
 def _resolve_wallet_path(args: argparse.Namespace) -> Path:
-    return args.wallet_path or Path(os.getenv("ARCRATIO_WALLET_PATH", "~/.bittensor/wallets")).expanduser()
+    value = args.wallet_path or os.getenv("ARCRATIO_WALLET_PATH") or "~/.bittensor/wallets"
+    return Path(value).expanduser()
 
 
 def _resolve_wallet_name(args: argparse.Namespace) -> str:
@@ -66,32 +67,71 @@ def _resolve_wallet_hotkey_name(args: argparse.Namespace) -> str:
     return args.wallet_hotkey_name or os.getenv("ARCRATIO_WALLET_HOTKEY", "default")
 
 
-def _resolve_subtensor_network(args: argparse.Namespace) -> str:
-    return args.subtensor_network or os.getenv("ARCRATIO_SUBTENSOR_NETWORK", "finney")
+def _canonical_message(
+    *,
+    method: str,
+    path_and_query: str,
+    subject_hotkey: str,
+    nonce: str,
+    timestamp_ms: int,
+    body: bytes,
+) -> bytes:
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    message = "\n".join(
+        [
+            AUTH_DOMAIN,
+            method.upper(),
+            path_and_query,
+            subject_hotkey,
+            nonce,
+            str(timestamp_ms),
+            body_sha256,
+        ]
+    )
+    return message.encode("utf-8")
 
 
-def _resolve_netuid(args: argparse.Namespace) -> int | None:
-    if args.netuid is not None:
-        return args.netuid
-    raw = os.getenv("ARCRATIO_NETUID")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
+def _sign_headers(
+    *,
+    role: str,
+    keypair: Any,
+    method: str,
+    path_and_query: str,
+    subject_hotkey: str,
+    body: bytes,
+) -> SignedHeaders:
+    nonce = secrets.token_hex(12)
+    timestamp_ms = int(time.time() * 1000)
+    message = _canonical_message(
+        method=method,
+        path_and_query=path_and_query,
+        subject_hotkey=subject_hotkey,
+        nonce=nonce,
+        timestamp_ms=timestamp_ms,
+        body=body,
+    )
+    signature_hex = "0x" + keypair.sign(message).hex()
+    return SignedHeaders(
+        path_and_query=path_and_query,
+        headers={
+            f"x-{role}-hotkey": keypair.ss58_address,
+            f"x-{role}-signature": signature_hex,
+            f"x-{role}-nonce": nonce,
+            f"x-{role}-timestamp": str(timestamp_ms),
+        },
+    )
 
 
 def _load_hotkey_keypair(args: argparse.Namespace):
-    try:
-        import bittensor  # type: ignore
-    except Exception:
-        print("bittensor is required for wallet signature auth but is not available.")
-        return None
-
     wallet_path = _resolve_wallet_path(args)
     wallet_name = _resolve_wallet_name(args)
     hotkey_name = _resolve_wallet_hotkey_name(args)
+
+    try:
+        bittensor = __import__("bittensor")
+    except Exception as exc:
+        print(f"bittensor is required for wallet signature auth but is not available: {exc}")
+        return None
 
     try:
         wallet_ctor = getattr(bittensor, "wallet", None) or getattr(bittensor, "Wallet", None)
@@ -99,7 +139,6 @@ def _load_hotkey_keypair(args: argparse.Namespace):
             print("failed to load bittensor wallet: module has no wallet constructor.")
             return None
         wallet = wallet_ctor(name=wallet_name, hotkey=hotkey_name, path=str(wallet_path))
-        # Accessing hotkey may throw if keyfile is missing/unreadable.
         return wallet.hotkey
     except Exception as exc:
         hotkeys_dir = wallet_path / wallet_name / "hotkeys"
@@ -120,56 +159,6 @@ def _load_hotkey_keypair(args: argparse.Namespace):
         return None
 
 
-def _build_upload_signature_headers(keypair, file_bytes: bytes) -> dict[str, str]:
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
-    payload = f"{keypair.ss58_address}:{file_hash}"
-    signature = keypair.sign(payload.encode("utf-8"))
-    token = base64.b64encode(signature).decode("utf-8")
-    return {
-        "Authorization": f"Bearer {token}",
-        "Miner-Public-Key": keypair.public_key.hex(),
-        "Miner": keypair.ss58_address,
-        "X-Payload": payload,
-    }
-
-
-def _resolve_miner_uid(args: argparse.Namespace, miner_hotkey: str) -> int | None:
-    if args.miner_uid is not None:
-        return args.miner_uid
-
-    netuid = _resolve_netuid(args)
-    if netuid is None:
-        print("miner UID was not provided and ARCRATIO_NETUID/--netuid is not set.")
-        print("pass --miner-uid explicitly or configure --netuid for auto lookup.")
-        return None
-
-    try:
-        import bittensor  # type: ignore
-    except Exception:
-        print("bittensor is required for miner UID lookup but is not available.")
-        return None
-
-    network = _resolve_subtensor_network(args)
-    try:
-        subtensor_ctor = getattr(bittensor, "subtensor", None) or getattr(bittensor, "Subtensor", None)
-        if subtensor_ctor is None:
-            print("failed to initialize subtensor: module has no subtensor constructor.")
-            return None
-        subtensor = subtensor_ctor(network=network)
-        metagraph = subtensor.metagraph(netuid=netuid)
-        hotkeys = list(metagraph.hotkeys)
-    except Exception as exc:
-        print(f"failed to query metagraph for network={network} netuid={netuid}: {exc}")
-        return None
-
-    if miner_hotkey not in hotkeys:
-        print(
-            f"hotkey {miner_hotkey} is not registered on network={network} netuid={netuid}."
-        )
-        return None
-    return hotkeys.index(miner_hotkey)
-
-
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -180,17 +169,13 @@ def _request(
     endpoint: str,
     args: argparse.Namespace,
     params: dict[str, object] | None = None,
-    data: dict[str, object] | None = None,
-    files: dict[str, tuple[str, object, str]] | None = None,
+    data: object | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> httpx.Response | None:
     base_url = _resolve_orchestrator_url(args)
-    token = _resolve_token(args)
     timeout = _resolve_timeout(args)
     target = _url(base_url, endpoint)
-    headers = _headers(token)
-    if extra_headers:
-        headers.update(extra_headers)
+    headers = extra_headers or {}
     try:
         with httpx.Client(timeout=timeout) as client:
             response = client.request(
@@ -198,7 +183,6 @@ def _request(
                 url=target,
                 params=params,
                 data=data,
-                files=files,
                 headers=headers,
             )
         response.raise_for_status()
@@ -207,7 +191,10 @@ def _request(
         print(f"request failed with status {exc.response.status_code}: {exc.request.url}")
         body = exc.response.text.strip()
         if body:
-            print(body)
+            try:
+                _print_json(exc.response.json())
+            except ValueError:
+                print(body)
         return None
     except httpx.HTTPError as exc:
         print(f"network error calling orchestrator: {exc}")
@@ -231,37 +218,38 @@ def _handle_upload_agent(args: argparse.Namespace) -> int:
         )
         return 2
 
-    with args.agent_file.open("rb") as handle:
-        file_bytes = handle.read()
-
-    keypair = _load_hotkey_keypair(args)
-    if keypair is None:
+    body = args.agent_file.read_bytes()
+    miner = _load_hotkey_keypair(args)
+    if miner is None:
         return 2
+    miner_hotkey = args.miner_hotkey or miner.ss58_address
+    signed = _sign_headers(
+        role="miner",
+        keypair=miner,
+        method="POST",
+        path_and_query=f"/{UPLOAD_AGENT_ENDPOINT}",
+        subject_hotkey=miner_hotkey,
+        body=body,
+    )
+    headers = {
+        **signed.headers,
+        "content-type": "application/octet-stream",
+        "x-agent-filename": args.agent_file.name or "agent.py",
+    }
 
-    miner_hotkey = args.miner_hotkey or keypair.ss58_address
-    miner_uid = _resolve_miner_uid(args, miner_hotkey)
-    if miner_uid is None:
-        return 2
-
-    signature_headers = _build_upload_signature_headers(keypair, file_bytes)
-
-    with args.agent_file.open("rb") as handle:
-        files = {"agentFile": (args.agent_file.name, handle, "text/x-python")}
-        response = _request(
-            method="POST",
-            endpoint=UPLOAD_AGENT_ENDPOINT,
-            args=args,
-            data={"minerHotkey": miner_hotkey, "minerUid": str(miner_uid)},
-            files=files,
-            extra_headers=signature_headers,
-        )
+    response = _request(
+        method="POST",
+        endpoint=UPLOAD_AGENT_ENDPOINT,
+        args=args,
+        data=body,
+        extra_headers=headers,
+    )
 
     if response is None:
         return 1
 
     print(f"uploaded agent file: {args.agent_file}")
     print(f"minerHotkey: {miner_hotkey}")
-    print(f"minerUid: {miner_uid}")
     try:
         _print_json(response.json())
     except ValueError:
@@ -305,11 +293,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--api-token",
-        default=None,
-        help="Optional bearer token for endpoints that use token auth.",
-    )
-    parser.add_argument(
         "--timeout-seconds",
         type=float,
         default=None,
@@ -322,8 +305,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     upload_parser = subparsers.add_parser(
-        "upload-agent",
-        help="Upload a miner agent artifact to the orchestrator.",
+        "submit-agent",
+        aliases=["upload-agent"],
+        help="Submit a miner agent .py file to the orchestrator.",
     )
     upload_parser.add_argument("agent_file", type=Path, help="Path to the .py agent file.")
     upload_parser.add_argument(
@@ -335,7 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--miner-uid",
         type=int,
         default=None,
-        help="Miner UID. If omitted, looked up via metagraph from hotkey.",
+        help="Miner UID (retained for CLI compatibility; ignored by submit-agent API).",
     )
     upload_parser.add_argument(
         "--wallet-name",
@@ -356,13 +340,13 @@ def build_parser() -> argparse.ArgumentParser:
     upload_parser.add_argument(
         "--subtensor-network",
         default=None,
-        help="Bittensor subtensor network for UID lookup (default: ARCRATIO_SUBTENSOR_NETWORK or finney).",
+        help="Retained for CLI compatibility; not used by submit-agent API.",
     )
     upload_parser.add_argument(
         "--netuid",
         type=int,
         default=None,
-        help="Netuid for UID lookup (default: ARCRATIO_NETUID). Required when --miner-uid is omitted.",
+        help="Retained for CLI compatibility; not used by submit-agent API.",
     )
     upload_parser.set_defaults(handler=_handle_upload_agent)
 
