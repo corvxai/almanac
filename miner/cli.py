@@ -15,7 +15,9 @@ from typing import Any
 
 import httpx
 
-DEFAULT_ORCHESTRATOR_URL = "http://localhost:4000"
+from src.core.constants import ORCHESTRATOR_API_URL
+
+DEFAULT_ORCHESTRATOR_URL = ORCHESTRATOR_API_URL
 DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_AGENT_FILE_BYTES = 2 * 1024 * 1024  # 2MB
 LIST_AGENTS_ENDPOINT = "v1/agents/list-agents"
@@ -30,11 +32,7 @@ class SignedHeaders:
 
 
 def _resolve_orchestrator_url(args: argparse.Namespace) -> str:
-    return (
-        args.orchestrator_url
-        or os.getenv("ARCRATIO_ORCHESTRATOR_URL")
-        or DEFAULT_ORCHESTRATOR_URL
-    ).rstrip("/")
+    return (args.orchestrator_url or DEFAULT_ORCHESTRATOR_URL).rstrip("/")
 
 
 def _resolve_timeout(args: argparse.Namespace) -> float:
@@ -288,8 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--orchestrator-url",
         default=None,
         help=(
-            "Override orchestrator base URL. Defaults to ARCRATIO_ORCHESTRATOR_URL "
-            f"or {DEFAULT_ORCHESTRATOR_URL}."
+            "Override orchestrator base URL. Defaults to "
+            f"{DEFAULT_ORCHESTRATOR_URL}."
         ),
     )
     parser.add_argument(

@@ -16,9 +16,9 @@ This is the entrypoint of the validator container's main process.
   share one implementation.
 
 The dev orchestrator + signing-proxy daemon stays running on a daemon
-thread (it's needed by anything that spawns agent containers). In v1 it is
-not auto-driven by this loop — that wiring comes later when miner agents
-start submitting.
+thread (it's needed by anything that spawns agent containers). The validator
+loop now also polls orchestrator assignment availability when the arcratio
+mechanism is enabled.
 """
 
 from __future__ import annotations
@@ -37,7 +37,12 @@ from typing import Optional
 import numpy as np
 
 from src.core.config import AppConfig
+from src.gateway.signing import load_hotkey
 from src.storage.json_store import JsonTraceStore
+from src.validator.orchestrator_api import (
+    OrchestratorAssignment,
+    fetch_agent_event_assignment,
+)
 from src.validator import scoring as arcratio_scoring
 
 logger = logging.getLogger("arcratio.validator")
@@ -240,6 +245,9 @@ class Validator:
 
         self._scoring_minute = random.randint(10, 25)
         self._stopped = False
+        self._orchestrator_hotkey = Validator._AUTO
+        self._orchestrator_poll_config_warned = False
+        self._orchestrator_poll_signing_warned = False
 
         if self._metadata_manager is not None and self._metadata_owned:
             self._metadata_manager.start()
@@ -287,6 +295,8 @@ class Validator:
         while not self._stopped:
             try:
                 current_time = self._clock()
+                if self._config.loop.arcratio_enabled:
+                    self._poll_orchestrator_assignment()
                 if self._should_score(current_time):
                     self.run_scoring_step()
                 elif current_time.minute % 10 == 0:
@@ -326,6 +336,57 @@ class Validator:
             return
         stats = self._metadata_manager.get_stats()
         logger.info("Metadata Manager Stats: %s", stats)
+
+    def _poll_orchestrator_assignment(self) -> None:
+        base_url = self._config.validator.orchestrator_api_url.strip()
+        if not base_url:
+            if not self._orchestrator_poll_config_warned:
+                logger.info(
+                    "Arcratio assignment polling disabled: set validator.orchestrator_api_url "
+                    "in src/core/constants.py."
+                )
+                self._orchestrator_poll_config_warned = True
+            return
+
+        if self._orchestrator_hotkey is Validator._AUTO:
+            self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
+        if self._orchestrator_hotkey is None:
+            if not self._orchestrator_poll_signing_warned:
+                logger.warning(
+                    "Arcratio assignment polling disabled: validator hotkey signing is unavailable."
+                )
+                self._orchestrator_poll_signing_warned = True
+            return
+
+        try:
+            response = fetch_agent_event_assignment(
+                base_url=base_url,
+                loaded_hotkey=self._orchestrator_hotkey,
+            )
+        except Exception:
+            logger.exception("Failed to fetch /v1/validators/agent-and-event assignment.")
+            return
+
+        if response.assignment is None:
+            logger.debug(
+                "No orchestrator assignment available (reason=%s).",
+                response.reason or "none_available",
+            )
+            return
+
+        self._handle_orchestrator_assignment(response.assignment)
+
+    def _handle_orchestrator_assignment(self, assignment: OrchestratorAssignment) -> None:
+        logger.info(
+            "Received orchestrator assignment id=%s status=%s miner_uid=%s source=%s "
+            "agent_upload_id=%s. Validator execution wiring is pending and will be "
+            "attached in the next integration step.",
+            assignment.agentPredictionId,
+            assignment.status,
+            assignment.miner.minerUid,
+            assignment.event.source,
+            assignment.agent.agentUploadId,
+        )
 
     # ------------------------------------------------------------------
     # Per-epoch tick

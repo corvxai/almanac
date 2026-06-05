@@ -41,9 +41,11 @@ python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> -
 
 ## Configuration
 
-You can configure the CLI with flags or environment variables.
+The CLI uses the shared orchestrator constant from `src/core/constants.py`:
+`ORCHESTRATOR_API_URL` (default: `http://localhost:4000`).
 
-- `ARCRATIO_ORCHESTRATOR_URL` (default: `http://localhost:4000`)
+You can still override the URL per command with `--orchestrator-url`.
+
 - `ARCRATIO_TIMEOUT_SECONDS` (default: `20.0`)
 - `ARCRATIO_WALLET_PATH` (default: `~/.bittensor/wallets`)
 - `ARCRATIO_WALLET_NAME` (default: `default`)
@@ -120,6 +122,6 @@ python3 miner/cli.py buy-credits 25
 
 ## Troubleshooting
 
-- **Connection errors**: verify `ARCRATIO_ORCHESTRATOR_URL` or `--orchestrator-url`.
+- **Connection errors**: verify `ORCHESTRATOR_API_URL` in `src/core/constants.py` or use `--orchestrator-url`.
 - **Wallet load errors**: verify wallet path/name/hotkey name and that hotkey files exist.
 - **Upload file errors**: confirm the file path exists and points to a `.py` file.

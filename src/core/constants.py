@@ -83,5 +83,6 @@ BITTENSOR = BittensorDefaults()
 STORAGE = StorageDefaults()
 GATEWAY = GatewayDefaults()
 VALIDATOR_LOOP = ValidatorLoopDefaults()
+ORCHESTRATOR_API_URL = "http://localhost:4000"
 LOG_LEVEL = "INFO"
 
