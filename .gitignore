@@ -13,3 +13,5 @@ var/run/
 data/results/
 data/traces/
 data/validator_state_*.json
+
+scripts/tests/agent_predictions.json
