@@ -16,6 +16,7 @@ from src.gateway.signing import LoadedKeypair
 
 AGENT_AND_EVENT_ENDPOINT = "/v1/validators/agent-and-event"
 PREDICTION_ENDPOINT = "/v1/validators/prediction"
+SCORED_PREDICTIONS_ENDPOINT = "/v1/validators/scored-predictions"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 AUTH_DOMAIN = "sub41-gateway-v1"
 
@@ -67,6 +68,39 @@ class SubmitPredictionResponse(BaseModel):
     ok: bool
     agentPredictionId: str
     status: str
+
+
+class PredictionValidation(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    isValid: bool
+    reasons: list[str] = Field(default_factory=list)
+    rawObserved: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScoredPredictionItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    agentPredictionId: str
+    minerHotkey: str
+    minerUid: int | None = None
+    marketId: str
+    sourceMarketId: str
+    predictedOutcomeId: str | None = None
+    confidence: float | None = None
+    outcomeProbabilities: dict[str, float] | None = None
+    resolvedOutcomeId: str | None = None
+    finalOutcomePrices: dict[str, float] | None = None
+    predictionIsInvalid: bool | None = None
+    predictionInvalidReason: str | None = None
+    predictionValidation: PredictionValidation | None = None
+    scoredAt: datetime
+    resolutionStatus: str
+    traceSummary: dict[str, Any] | None = None
+
+
+class ScoredPredictionsPage(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    items: list[ScoredPredictionItem]
+    nextCursor: str | None = None
 
 
 def build_assignment_auth_headers(
@@ -218,3 +252,81 @@ def _canonical_json(value: Any) -> str:
             parts.append(f"{json.dumps(str(key), ensure_ascii=False)}:{_canonical_json(value[key])}")
         return "{" + ",".join(parts) + "}"
     raise TypeError(f"unsupported value for canonical JSON: {type(value).__name__}")
+
+
+def fetch_scored_predictions_page(
+    *,
+    base_url: str,
+    loaded_hotkey: LoadedKeypair,
+    days: int = 30,
+    limit: int = 1000,
+    cursor: str | None = None,
+    include_trace_summary: bool = True,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    http_client: httpx.Client | None = None,
+) -> ScoredPredictionsPage:
+    """Fetch one page from ``GET /v1/validators/scored-predictions``."""
+    query_items: list[tuple[str, str]] = [("days", str(days)), ("limit", str(limit))]
+    if cursor:
+        query_items.append(("cursor", cursor))
+    if include_trace_summary:
+        query_items.append(("includeTraceSummary", "1"))
+    query_str = "&".join(f"{k}={v}" for k, v in query_items)
+    path_and_query = (
+        f"{SCORED_PREDICTIONS_ENDPOINT}?{query_str}"
+        if query_str
+        else SCORED_PREDICTIONS_ENDPOINT
+    )
+    headers = build_assignment_auth_headers(
+        loaded_hotkey=loaded_hotkey,
+        method="GET",
+        path_and_query=path_and_query,
+        body=b"",
+    )
+    target = f"{base_url.rstrip('/')}{SCORED_PREDICTIONS_ENDPOINT}"
+    params = {k: v for k, v in query_items}
+
+    if http_client is not None:
+        resp = http_client.get(target, headers=headers, params=params, timeout=timeout_seconds)
+    else:
+        with httpx.Client(timeout=timeout_seconds) as client:
+            resp = client.get(target, headers=headers, params=params)
+    resp.raise_for_status()
+    raw = resp.json()
+    if not isinstance(raw, dict):
+        raise RuntimeError("scored predictions page response must be a JSON object")
+    try:
+        return ScoredPredictionsPage.model_validate(raw)
+    except ValidationError as exc:
+        raise RuntimeError(f"invalid scored predictions page payload: {exc}") from exc
+
+
+def fetch_all_scored_predictions(
+    *,
+    base_url: str,
+    loaded_hotkey: LoadedKeypair,
+    days: int = 30,
+    page_limit: int = 50,
+    include_trace_summary: bool = True,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    http_client: httpx.Client | None = None,
+) -> list[ScoredPredictionItem]:
+    """Fetch all pages from ``GET /v1/validators/scored-predictions``."""
+    all_items: list[ScoredPredictionItem] = []
+    cursor: str | None = None
+    while True:
+        page = fetch_scored_predictions_page(
+            base_url=base_url,
+            loaded_hotkey=loaded_hotkey,
+            days=days,
+            limit=page_limit,
+            cursor=cursor,
+            include_trace_summary=include_trace_summary,
+            timeout_seconds=timeout_seconds,
+            http_client=http_client,
+        )
+        all_items.extend(page.items)
+        if not page.nextCursor:
+            break
+        cursor = page.nextCursor
+    return all_items

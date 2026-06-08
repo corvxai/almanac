@@ -3,7 +3,7 @@
 
 Run from repo root:
 
-    python3 scripts/test_orchestrator_agent_event.py \\
+    python3 scripts/tests/test_orchestrator_agent_event.py \\
       --wallet.name <wallet-name> \\
       --wallet.hotkey <wallet-hotkey> \\
       --wallet.path <wallet-path>
@@ -21,7 +21,7 @@ import json
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.config import AppConfig

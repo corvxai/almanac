@@ -48,6 +48,7 @@ from src.storage.json_store import JsonTraceStore
 from src.validator.orchestrator import Orchestrator
 from src.validator.orchestrator_api import (
     OrchestratorAssignment,
+    fetch_all_scored_predictions,
     fetch_agent_event_assignment,
     submit_validator_prediction,
 )
@@ -766,7 +767,7 @@ class Validator:
 
         weights_arcratio: Optional[np.ndarray] = None
         if loop_cfg.arcratio_enabled:
-            weights_arcratio = self._score_arcratio()
+            weights_arcratio = self._score_agent_predictions()
 
         blend_cfg = BlendConfig(
             almanac_enabled=loop_cfg.almanac_enabled,
@@ -811,12 +812,30 @@ class Validator:
             logger.exception("Almanac scoring failed for this epoch.")
             return None
 
-    def _score_arcratio(self) -> Optional[np.ndarray]:
+    def _score_agent_predictions(self) -> Optional[np.ndarray]:
+        base_url = self._config.validator.orchestrator_api_url.strip()
+        if not base_url:
+            logger.warning("Arcratio scoring disabled: validator.orchestrator_api_url is empty.")
+            return None
+
+        if self._orchestrator_hotkey is Validator._AUTO:
+            self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
+        if self._orchestrator_hotkey is None:
+            logger.warning("Arcratio scoring disabled: validator hotkey signing is unavailable.")
+            return None
+
         try:
-            return arcratio_scoring.score_arcratio(
+            scored_predictions = fetch_all_scored_predictions(
+                base_url=base_url,
+                loaded_hotkey=self._orchestrator_hotkey,
+                days=self._config.loop.rolling_window_days,
+                include_trace_summary=False,
+            )
+            return arcratio_scoring.score_agent_predictions(
                 metagraph=self._bt.metagraph,
-                trace_store=self._store,
+                scored_predictions=scored_predictions,
                 rolling_window_days=self._config.loop.rolling_window_days,
+                now=self._clock(),
             )
         except Exception:
             logger.exception("Arcratio scoring failed for this epoch.")
