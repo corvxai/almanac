@@ -218,13 +218,22 @@ runs.
 
 ### C1. Storage layer is not crash-safe or concurrency-safe
 
-`src/storage/json_store.py:31-33` writes traces with bare
-`path.write_text(digest.model_dump_json(...))`. No `os.fsync`, no atomic
-`os.replace` from a tempfile, no file lock, no per-key serialisation. Two
-concurrent writers on the same `execution_id` race; a power loss mid-write
-yields a half-written JSON file that `model_validate_json` rejects and
-that `_iter_all_traces` (line 65) silently skips via
-`except Exception: continue`. The "swappable interface" comment at the top
+**Status (2026-06-08): torn-write half addressed this pass.**
+`save_trace`/`save_resolution` now write atomically via
+`_atomic_write_text` (`src/storage/json_store.py`): temp file in the same
+directory → `flush` + `os.fsync` → `os.replace`, so a power loss mid-write
+leaves either the old or the new file, never a half-written JSON. Verified
+by a functional round-trip + overwrite test. Still open: there is no
+file lock / per-key serialisation, so two writers on the same
+`execution_id` still race (last writer wins, but each write is now whole),
+and `_iter_all_traces` still swallows corruption via
+`except Exception: continue`.
+
+Original finding (for the record): `path.write_text(...)` with no
+`os.fsync`, no atomic `os.replace`, no lock. Two concurrent writers on the
+same `execution_id` race; a power loss mid-write yielded a half-written
+JSON file that `model_validate_json` rejects and that `_iter_all_traces`
+silently skips. The "swappable interface" comment at the top
 is true at the type level, but list operations
 (`list_traces_by_event`, `list_traces_by_agent`) glob the entire
 `traces/` directory and parse every file in memory — that's not swappable
@@ -236,15 +245,24 @@ incomplete data.
 
 ### C2. Trace integrity model is half-realised
 
-`EvidenceDigest.seal()` (`src/core/schemas.py:280-289`) computes a SHA-256
+**Status (2026-06-08): read-time verification added this pass.**
+`JsonTraceStore.get_trace` now calls `digest.verify_integrity()` on read
+and logs a warning when a loaded trace's sealed hash does not match its
+contents (tampered on disk or mutated after seal). It is intentionally
+non-fatal — the digest is still returned so callers choose how to react —
+so it is a detection signal, not yet enforcement. Verified by a
+tamper-on-disk test. Remaining open items below.
+
+`EvidenceDigest.seal()` (`src/core/schemas.py:281-290`) computes a SHA-256
 over the digest with `trace_hash` zeroed, but:
 
 - The model is **not frozen** (`model_config` omitted) — `resolution_record`
   and any other field can be mutated in memory after seal, silently
-  invalidating the hash.
-- Verification is never automatic. `JsonTraceStore.get_trace`
-  (`src/storage/json_store.py:35`) does not call `verify_integrity()` on
-  read, so a tampered file on disk loads cleanly.
+  invalidating the hash. (Freezing is deferred: resolution is written to
+  the digest after seal in places, so `frozen=True` needs a resolution-flow
+  change to avoid breakage — see the resolution-duality point below.)
+- Read-time verification now *detects* mismatches (above) but does not
+  *reject* them; a tampered file still loads (with a warning).
 - `resolution_record` is **inside** the sealed digest with a default
   factory, but resolution is persisted **separately** at
   `results/{event_id}.json` (`src/storage/json_store.py:53`). Two sources
@@ -279,6 +297,16 @@ signed request can be reused for 5 minutes — at the operator's
 upstream-API expense.
 
 ### C5. Validator container is effectively host-root
+
+**Status (2026-06-08): one defence-in-depth flag added; core risk unchanged.**
+`security_opt: ["no-new-privileges:true"]` was added to the validator
+service in `docker-compose.yaml` (validated with `docker compose config`).
+This blocks setuid-based escalation inside the container but does **not**
+close the load-bearing risk: the read-write `docker.sock` mount still gives
+the validator process full control of the host Docker daemon. The
+remaining items below (userns-remap, read-only rootfs, AppArmor) are
+unchanged and still recommended.
+
 
 `docker-compose.yaml:56` mounts `/var/run/docker.sock` into the validator
 read-write so it can spawn sibling agent containers. This is the
@@ -392,6 +420,16 @@ singleton holding a single long-lived connection literally named
 Because this store holds epoch scores and miner-pool weights that feed the
 IM, the same "payout integrity" framing as C1 applies: torn or lost writes
 here translate directly into mis-weighting on chain.
+
+**Status (2026-06-08): deliberately deferred, not fixed this pass.** The
+write methods already use `contextlib.closing(self._create_connection())`,
+and psycopg2 rolls back an uncommitted transaction on connection close, so
+the immediate torn-commit risk is partially mitigated. The real fixes
+(connection pool, explicit rollback, migrations) touch payout-critical
+code that **cannot be runtime-tested in this environment** (the module
+imports `bittensor` and needs a live Postgres). Rather than ship a
+compile-only-verified re-indent of large SQL blocks, this is left for a
+dedicated change with a Postgres integration harness.
 
 ---
 
@@ -605,6 +643,12 @@ operator doesn't hand-install it. `bittensor>=9.0,<11` is also a wide
 range across a major version. Pin these (ideally via a lockfile /
 `pip-compile`) and declare `psycopg2-binary` as an extra.
 
+**Status (2026-06-08): `psycopg2-binary` now declared** in a dedicated
+optional `requirements-almanac-postgres.txt` (additive — keeps it off the
+default install since the Postgres path is import-guarded). Pinning the
+`cvxpy`/`ecos`/`scipy` stack is still open: it needs a full resolve + smoke
+test that this environment cannot run, so it is left for a lockfile pass.
+
 ---
 
 ## 8. Cross-cutting risks
@@ -741,17 +785,17 @@ current.
 
 | # | Finding | Status | Current anchor |
 |---|---------|--------|----------------|
-| C1 | Storage not crash/concurrency-safe | STILL VALID | `json_store.py:33,55,68` |
-| C2 | Trace integrity half-realised | IMPROVED (partial) | `seal()` now called `trace_assembler.py:83`; still unfrozen, still not verified on read in `json_store.get_trace` |
+| C1 | Storage not crash/concurrency-safe | PARTIALLY FIXED — atomic writes added | `json_store.py` `_atomic_write_text` (locking still open) |
+| C2 | Trace integrity half-realised | IMPROVED — read-time verify added | `get_trace` now warns on hash mismatch; still unfrozen/non-enforcing |
 | C3 | Gateway unauthenticated by default | STILL VALID | `server.py:54-56` (`REQUIRE_SIGNATURE` off by default) |
 | C4 | Signing has no replay protection | STILL VALID | `signing.py:155,194` (no nonce store; 300 s skew) |
-| C5 | Validator container = host-root | STILL VALID | `docker-compose.yaml` (docker.sock rw, no userns/apparmor) |
+| C5 | Validator container = host-root | IMPROVED — `no-new-privileges` added; sock risk unchanged | `docker-compose.yaml` (docker.sock rw, no userns/apparmor) |
 | C6 | No per-validator gateway metering | STILL VALID | `server.py:73-121` |
 | C7 | Trace egress | REFRAMED — now exists, lossy/insecure | `orchestrator_api.py:18,208` |
 | C8 | Scoring contract | REFRAMED — now implicit, unversioned | submit payload in `validator.py` |
-| **C9** | **Committed DB credential** | **NEW — untracked this pass; history scrub pending** | `almanac/storage/storage.env:6` |
-| **C10** | **Almanac Postgres not crash/concurrency-safe** | **NEW (critical)** | `postgres_validator_storage.py:55,148,293` |
-| H1 | Agent image floating `:latest` | STILL VALID | `core/constants.py`, `docker-compose.yaml` |
+| **C9** | **Committed DB credential** | **FIXED (tracking) — untracked + gitignored; history scrub pending** | `almanac/storage/storage.env:6` |
+| **C10** | **Almanac Postgres not crash/concurrency-safe** | **NEW — deferred (needs PG harness)** | `postgres_validator_storage.py:55,148,293` |
+| H1 | Agent image floating `:latest` | STILL VALID (cross-arch build now scripted) | `core/constants.py`, `docker-compose.yaml` |
 | H2 | No seccomp/AppArmor on sandbox | STILL VALID | `sandbox_docker.py` (`no-new-privileges` only) |
 | H3 | In-process sandbox footgun | IMPROVED (partial) | default now `docker_runc`; `--sandbox in_process` still available |
 | H6 | Failure semantics drop data | STILL VALID | `orchestrator.py` (spend lost if assemble fails) |
@@ -760,8 +804,36 @@ current.
 | **H9** | **Prediction submit is lossy** | **NEW (high)** | `validator.py:469-490` |
 | **H10** | **No TLS / no code-signature on orch path** | **NEW (high)** | `constants.py:86`, `validator.py:515-521` |
 | **H11** | **Almanac production footguns** | **NEW (high)** | `almanac/loop.py:34,100,246` |
-| **M8** | **Unpinned/undeclared deps** | **NEW (medium)** | `requirements.txt:11-17` |
+| **M8** | **Unpinned/undeclared deps** | **PARTIALLY FIXED — `psycopg2-binary` declared** | `requirements-almanac-postgres.txt` (cvxpy/ecos pins open) |
 
-No first-pass finding was fully resolved; C2 and H3 improved but remain
-open. The two new critical items (C9, C10) and the orchestrator-path highs
-(H9, H10) are the net-new exposure from the merges.
+### 12.1 Remediation applied in this pass (non-breaking, verified)
+
+These changes were made and committed alongside this audit update. Each was
+verified without breaking the codebase (the full test suite needs
+`bittensor`/`cvxpy`, absent in this environment, so verification was scoped
+to what could be exercised):
+
+- **C9 — leaked credential contained.** `storage.env` untracked
+  (`git rm --cached`, local copy preserved), `.gitignore` tightened to
+  `*.env`/`storage.env` while keeping `*.env.example`. *Pending:* rotate +
+  history scrub (your call, low urgency — test credential).
+- **C1 — atomic trace writes.** `_atomic_write_text` (tempfile → fsync →
+  `os.replace`) in `json_store.py`. Verified: round-trip, overwrite, and a
+  no-torn-file check in an isolated pydantic venv.
+- **C2 — read-time integrity check.** `get_trace` now warns on a sealed-hash
+  mismatch (non-fatal). Verified: tamper-on-disk emits the warning and still
+  returns the digest.
+- **C5 — validator hardening.** `no-new-privileges:true` on the validator
+  service. Verified with `docker compose config`.
+- **Docker cross-arch (H1-adjacent, the multi-OS ask).** Added
+  `scripts/build_images.sh` (+ `.ps1` for Windows) that sets `--platform`
+  explicitly and warns on cross-arch builds; README + compose comments
+  document the footgun. Verified end-to-end by cross-building `agent-runner`
+  for `linux/amd64` on an arm64 host and confirming `Architecture=amd64`.
+- **M8 — optional Postgres dep declared** in
+  `requirements-almanac-postgres.txt`.
+
+Deferred deliberately (need an environment this pass lacks): C10 (Postgres
+pool/rollback/migrations — needs a live PG + bittensor), `cvxpy`/`ecos`
+pinning (needs a full resolve), and the larger gateway/orchestrator work
+(C3/C4/C6, H9/H10) which is feature work, not a non-breaking patch.

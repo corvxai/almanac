@@ -5,7 +5,15 @@
 #                       by `validator` via /var/run/docker.sock.
 #
 # Run order:
-#   1. Build agent-runner: `docker compose build agent-runner`
+#   1. Build agent-runner FOR THE ARCHITECTURE THE VALIDATOR WILL RUN ON:
+#        scripts/build_images.sh agent-runner          (Linux/macOS/WSL/Git-Bash)
+#        scripts/build_images.ps1 -Target agent-runner (Windows PowerShell)
+#      `docker compose build agent-runner` also works, but it builds for the
+#      builder's native architecture only. The validator spawns this image as
+#      sibling containers, so an arm64 image built on a laptop will NOT start on
+#      an amd64 server (and vice versa). The build scripts make the target
+#      `--platform` explicit and warn on cross-arch builds. To pin compose
+#      builds, export DOCKER_DEFAULT_PLATFORM=linux/amd64 before building.
 #   2. Local gateway on host: `python scripts/run_gateway.py` (separate terminal)
 #   3. Start validator (host URL, not localhost — see README Docker section):
 #        GATEWAY_SERVICE_URL=http://host.docker.internal:8077 docker compose up validator
@@ -37,10 +45,19 @@ services:
       ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET: ${ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET:-}
       # Agent provider keys passed through to the central gateway are NOT
       # set here — secrets live with the central gateway, not the validator.
+    # Defence-in-depth: the validator process must not be able to gain new
+    # privileges via setuid binaries. It still spawns sibling containers via
+    # the docker.sock API (an API call, not a privilege escalation), so this
+    # does not affect functionality. NOTE: docker.sock access remains the
+    # primary privilege risk (audit C5) — this flag does not close that.
+    security_opt:
+      - "no-new-privileges:true"
     volumes:
-      # Sibling-container spawn. Documented privilege risk.
+      # Sibling-container spawn. Documented privilege risk (audit C5).
       - /var/run/docker.sock:/var/run/docker.sock
-      # Bittensor wallet, read-only. Numinous-compatible host path.
+      # Bittensor wallet, read-only. ${HOME} resolves on Linux/macOS/WSL. On
+      # native Windows PowerShell, set HOME or replace with an absolute path
+      # (e.g. ${USERPROFILE}\.bittensor) — Compose does not expand ~ there.
       - ${HOME}/.bittensor:/root/.bittensor:ro
       # UDS directory: the validator-local proxy creates proxy.sock here,
       # and the validator uses docker.sock to bind-mount this same host dir
