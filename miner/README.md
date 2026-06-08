@@ -1,13 +1,14 @@
 # Miner Guide
 
-Use this guide to build an agent and interact with the centralized orchestrator
-through the miner CLI.
+Use this guide to build an agent and interact with gateway orchestrator miner endpoints via `miner/cli.py`.
 
 ## What this CLI does
 
-- Upload your agent file to the orchestrator (`upload-agent`)
+- Submit your agent file to gateway (`submit-agent`, alias `upload-agent`)
 - List published agents (`list-agents`)
 - Reserve a credits command for later (`buy-credits`, currently stubbed)
+
+`get-agent` is intentionally not part of this miner CLI because that route is validator-facing.
 
 ## Prerequisites
 
@@ -35,68 +36,75 @@ From the repo root:
 ```bash
 python3 miner/cli.py --help
 python3 miner/cli.py list-agents
-python3 miner/cli.py upload-agent path/to/agent.py --netuid <netuid> --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
+python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
 ```
 
 ## Configuration
 
-You can configure the CLI with flags or environment variables.
+The CLI uses the shared orchestrator constant from `src/core/constants.py`:
+`ORCHESTRATOR_API_URL` (default: `http://localhost:4000`).
 
-- `ARCRATIO_ORCHESTRATOR_URL` (default: `http://localhost:4000`)
-- `ARCRATIO_API_TOKEN` (optional token for non-wallet-auth endpoints)
+You can still override the URL per command with `--orchestrator-url`.
+
 - `ARCRATIO_TIMEOUT_SECONDS` (default: `20.0`)
 - `ARCRATIO_WALLET_PATH` (default: `~/.bittensor/wallets`)
 - `ARCRATIO_WALLET_NAME` (default: `default`)
 - `ARCRATIO_WALLET_HOTKEY` (default: `default`)
-- `ARCRATIO_SUBTENSOR_NETWORK` (default: `finney`)
-- `ARCRATIO_NETUID` (required for auto UID lookup unless `--miner-uid` is provided)
 
 Flag equivalents:
 
 - `--orchestrator-url`
-- `--api-token`
 - `--timeout-seconds`
+- `--wallet-path`
+- `--wallet-name`
+- `--wallet-hotkey-name`
 
 ## Command reference
 
 ### `list-agents`
 
-Calls the orchestrator `list-agents` endpoint.
+Calls `GET /v1/agents/list-agents`.
 
 ```bash
 python3 miner/cli.py list-agents --limit 25 --offset 0
 ```
 
-### `upload-agent`
+### `submit-agent` (alias: `upload-agent`)
 
-Uploads a local file to the orchestrator `upload-agent` endpoint using multipart
-form data.
+Calls `POST /v1/agents/submit-agent` with the raw `.py` file bytes as the request body.
 
 ```bash
-python3 miner/cli.py upload-agent path/to/agent.py --netuid <netuid> --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
+python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
 ```
 
-Upload request shape:
+Submit auth + request shape:
 
-- Header: `Authorization: Bearer <wallet-signature-token>`
-- Form fields:
-  - `minerHotkey` (required)
-  - `minerUid` (required)
-  - `agentFile` (required, exactly one `.py` file)
+- Content type: `application/octet-stream`
+- Header: `x-agent-filename: <agent file name>`
+- Signed headers:
+  - `x-miner-hotkey`
+  - `x-miner-signature`
+  - `x-miner-nonce`
+  - `x-miner-timestamp`
 
-How auth + UID are derived:
+How signing works:
 
-- CLI loads the miner hotkey keypair from local Bittensor wallet files.
-- CLI signs payload `<minerHotkey>:<sha256(agentFileBytes)>`.
-- CLI sends base64(signature) in `Authorization: Bearer ...`.
-- If `--miner-uid` is omitted, CLI looks up UID from Bittensor metagraph using
-  `--subtensor-network` + `--netuid` (or corresponding env vars).
-- If the hotkey is not registered on that subnet, upload fails with an error.
+- CLI loads miner hotkey from local Bittensor wallet files.
+- CLI builds canonical message domain `sub41-agent-v1`:
+  - method
+  - path (and query when present)
+  - subject hotkey
+  - nonce
+  - timestamp (ms)
+  - sha256(body)
+- CLI signs with the wallet hotkey and sends hex signature as `x-miner-signature`.
 
-Testnet example:
-```bash
-python3 miner/cli.py upload-agent path/to/agent.py --netuid 172 --subtensor-network test --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
-```
+Compatibility flags retained on `submit-agent`:
+
+- `--miner-hotkey` (optional override; defaults to wallet hotkey ss58)
+- `--miner-uid` (currently ignored by submit endpoint)
+- `--subtensor-network` (currently ignored by submit endpoint)
+- `--netuid` (currently ignored by submit endpoint)
 
 Client-side checks enforced by the CLI:
 
@@ -112,14 +120,8 @@ Command is present for future credits flows but is not implemented yet.
 python3 miner/cli.py buy-credits 25
 ```
 
-## Authentication note
-
-The upload command now uses wallet-based signature auth via `bittensor`.
-Exact backend verification policy can still evolve, but the client no longer
-requires a manually provided upload token.
-
 ## Troubleshooting
 
-- **Connection errors**: verify `ARCRATIO_ORCHESTRATOR_URL` or `--orchestrator-url`.
-- **401/403 responses**: check token configuration (`ARCRATIO_API_TOKEN`).
-- **Upload file errors**: confirm the file path exists and points to a file.
+- **Connection errors**: verify `ORCHESTRATOR_API_URL` in `src/core/constants.py` or use `--orchestrator-url`.
+- **Wallet load errors**: verify wallet path/name/hotkey name and that hotkey files exist.
+- **Upload file errors**: confirm the file path exists and points to a `.py` file.

@@ -25,6 +25,7 @@ class ValidatorConfig(BaseModel):
     available_providers: list[str] = Field(
         default_factory=lambda: list(constants.VALIDATOR.available_providers)
     )
+    orchestrator_api_url: str = constants.ORCHESTRATOR_API_URL
 
     sandbox_type: SandboxType = constants.VALIDATOR.sandbox_type  # type: ignore[assignment]
     sandbox_image: str = constants.VALIDATOR.sandbox_image

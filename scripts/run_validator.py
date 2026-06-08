@@ -348,6 +348,7 @@ def main() -> None:
     )
     _log_startup_config_table(log, config, args)
 
+    state = None
     if not args.no_proxy:
         state = start_local_proxy(config)
         kp = state.loaded_keypair
@@ -368,7 +369,7 @@ def main() -> None:
         threading.Event().wait()
         return
 
-    validator = Validator(config=config, store=store)
+    validator = Validator(config=config, store=store, local_proxy_state=state)
     try:
         validator.run()
     except KeyboardInterrupt:
