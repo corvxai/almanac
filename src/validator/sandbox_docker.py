@@ -232,6 +232,12 @@ def run_agent_in_container(
         "agent_module": agent_module,
         "agent_class": agent_class,
     }
+    inline_code = getattr(agent, "_arcratio_agent_source_code", None)
+    inline_class = getattr(agent, "_arcratio_agent_source_class", None)
+    if isinstance(inline_code, str) and inline_code.strip():
+        payload["agent_code"] = inline_code
+        if isinstance(inline_class, str) and inline_class.strip():
+            payload["agent_class"] = inline_class
     # JSON payload is written to the shared UDS bind mount so the sibling can
     # read it via ARCRATIO_RUNNER_INPUT_FILE. Docker stdin attach + EOF is
     # unreliable; ``sys.stdin.read()`` in the runner would otherwise hang.

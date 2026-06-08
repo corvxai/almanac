@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import hashlib
 import secrets
 import time
@@ -14,6 +15,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 from src.gateway.signing import LoadedKeypair
 
 AGENT_AND_EVENT_ENDPOINT = "/v1/validators/agent-and-event"
+PREDICTION_ENDPOINT = "/v1/validators/prediction"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 AUTH_DOMAIN = "sub41-gateway-v1"
 
@@ -32,6 +34,7 @@ class AssignmentEvent(BaseModel):
     question: str
     description: str | None = None
     endDate: datetime
+    outcomes: list[dict[str, Any]] = Field(default_factory=list)
     currentOutcomePrices: dict[str, float] = Field(default_factory=dict)
 
 
@@ -57,6 +60,13 @@ class AgentAndEventResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     assignment: OrchestratorAssignment | None
     reason: str | None = None
+
+
+class SubmitPredictionResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    ok: bool
+    agentPredictionId: str
+    status: str
 
 
 def build_assignment_auth_headers(
@@ -159,3 +169,52 @@ def fetch_agent_event_assignment(
         return AgentAndEventResponse.model_validate(payload)
     except ValidationError as exc:
         raise RuntimeError(f"invalid orchestrator assignment payload: {exc}") from exc
+
+
+def submit_validator_prediction(
+    *,
+    base_url: str,
+    loaded_hotkey: LoadedKeypair,
+    payload: dict[str, Any],
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    http_client: httpx.Client | None = None,
+) -> SubmitPredictionResponse:
+    """Submit prediction payload to ``POST /v1/validators/prediction``."""
+    body_text = _canonical_json(payload)
+    body_bytes = body_text.encode("utf-8")
+    headers = build_assignment_auth_headers(
+        loaded_hotkey=loaded_hotkey,
+        method="POST",
+        path_and_query=PREDICTION_ENDPOINT,
+        body=body_bytes,
+    )
+    headers["content-type"] = "application/json"
+    target = f"{base_url.rstrip('/')}{PREDICTION_ENDPOINT}"
+
+    if http_client is not None:
+        resp = http_client.post(target, headers=headers, content=body_text, timeout=timeout_seconds)
+    else:
+        with httpx.Client(timeout=timeout_seconds) as client:
+            resp = client.post(target, headers=headers, content=body_text)
+    resp.raise_for_status()
+    raw = resp.json()
+    if not isinstance(raw, dict):
+        raise RuntimeError("validator prediction submit response must be a JSON object")
+    try:
+        return SubmitPredictionResponse.model_validate(raw)
+    except ValidationError as exc:
+        raise RuntimeError(f"invalid validator prediction submit response: {exc}") from exc
+
+
+def _canonical_json(value: Any) -> str:
+    """Match the API's canonical JSON serialization for signing."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ",".join(_canonical_json(v) for v in value) + "]"
+    if isinstance(value, dict):
+        parts = []
+        for key in sorted(value.keys(), key=lambda k: str(k)):
+            parts.append(f"{json.dumps(str(key), ensure_ascii=False)}:{_canonical_json(value[key])}")
+        return "{" + ",".join(parts) + "}"
+    raise TypeError(f"unsupported value for canonical JSON: {type(value).__name__}")
