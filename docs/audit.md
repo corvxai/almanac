@@ -43,6 +43,27 @@ unauthenticated by default and has no per-validator metering; and
 sandbox baseline flags that depend on `:latest` image trust and Docker's
 default seccomp profile.
 
+> **Second-pass update (2026-06-08).** This audit was re-run after the
+> `main` + `origin/integration_updates` merges, which added two large
+> surfaces the first pass did not cover: an **orchestrator API
+> integration** (validator now polls assignments and submits predictions
+> + full traces to a central orchestrator) and the **Almanac incentive
+> mechanism** (a second IM merged from the sn41 codebase, with Postgres
+> storage and dual-IM weight blending). The most consequential changes
+> from this pass:
+>
+> - **Trace egress now exists.** C7 ("traces never leave the validator")
+>   is reframed, not closed — validators now POST the full `EvidenceDigest`
+>   to the orchestrator, but the path is lossy and runs over an unenforced
+>   transport. See the revised C7, plus H9/H10.
+> - **A plaintext DB credential is committed to the repo** —
+>   `src/validator/almanac/storage/storage.env`. This is the single
+>   highest-urgency item in the document. See **C9**.
+> - **The Almanac Postgres store repeats C1's mistakes** for the new IM's
+>   payout data (single reused connection, no pool, no rollback). See **C10**.
+>
+> A finding-by-finding status table for this pass is in **§12**.
+
 ---
 
 ## 2. Architecture as understood
@@ -76,20 +97,29 @@ customer-facing API serving live probability predictions and calibrated
 forecasts with uncertainty. None of pillar 2 exists in the current
 codebase.
 
-### 2.3 The connection between pillars (currently absent)
+### 2.3 The connection between pillars (partially built since first pass)
 
 Three artefacts are needed to bridge pillar 1 → pillar 2:
 
 1. **Trace egress** — a path for sealed traces to leave validator-local
-   disk and reach the operator's ingestion side. Not designed.
+   disk and reach the operator's ingestion side. **Now partially built**
+   via the orchestrator API: the validator polls
+   `GET /v1/validators/agent-and-event` for an assignment, runs the agent,
+   and `POST`s the prediction plus the full `EvidenceDigest` to
+   `/v1/validators/prediction` (`src/validator/orchestrator_api.py:17-19`).
+   The path is real but lossy and transport-insecure — see the revised C7,
+   H9, H10.
 2. **Scoring contract** — the interface between the trace producer (this
-   repo) and the scoring/IM consumer (separate repo). Not defined.
+   repo) and the scoring/IM consumer. **Now implicit** in the submit
+   payload (`validator.py` `_build_prediction_submit_payload`, ~line 547+)
+   and the `GET /v1/validators/scored-predictions` reader, but still
+   undocumented and unversioned beyond an inline `schemaVersion: "1.0"`.
 3. **Prediction publication** — once scored, predictions need to land
-   somewhere pillar 2 can read with low latency. Not designed.
+   somewhere pillar 2 can read with low latency. Still not designed.
 
-Items 1 and 2 are the two highest-priority undecided architectural
-decisions. They should be resolved before any remediation work begins on
-the existing code.
+Items 1 and 2 are no longer greenfield decisions — they are an existing
+path to **harden** (idempotency, durable retry, TLS, a versioned contract)
+rather than design from scratch. See Q1/Q2 below for the revised framing.
 
 ---
 
@@ -274,20 +304,94 @@ onboarded. Concretely needed:
 - Replay nonce store (closes C4)
 - Audit log of every authorised call keyed by hotkey for reconciliation
 
-### C7. Trace egress / ingest path does not exist
+### C7. Trace egress now exists, but the path is lossy and transport-insecure
 
-Sealed traces sit on validator-local disk and never leave. There is no
-HTTP endpoint, no queue producer, no chain anchor producer, no S3
-uploader. This is the load-bearing missing piece for pillar 1; until it
-is designed and implemented, the rest of the operator's pipeline is
-theoretical. See Q1.
+**Status (2026-06-08): partially addressed — downgraded from "does not exist".**
+Sealed traces now leave the validator: after each run the validator POSTs
+the prediction plus the full `EvidenceDigest` (in `reasoningTrace.trace`)
+to the orchestrator at `/v1/validators/prediction`
+(`src/validator/orchestrator_api.py:18,208`; payload built in
+`validator.py` `_build_prediction_submit_payload`). Authentication to the
+orchestrator is Bittensor hotkey signing — the right primitive. The
+remaining gaps that keep this from being production-grade:
 
-### C8. Scoring contract is undefined
+- **No durability on failure.** If the submit raises, it is caught and the
+  call simply `return`s (`src/validator/validator.py:484-490`) — the scored
+  prediction is dropped. There is no queue, no retry, no dead-letter. A
+  single network blip loses a trace. (See H9.)
+- **No idempotency key.** The payload carries no `submissionId` /
+  content hash, so any retry the orchestrator *does* receive is an
+  uncontrolled duplicate. This is H8, now concrete on a live path.
+- **Transport is not enforced TLS.** Default URL is
+  `http://localhost:4000` (`src/core/constants.py:86`); nothing rejects a
+  plaintext `http://` orchestrator URL in production. (See H10.)
 
-Whatever scoring service consumes traces and emits scores needs an
-explicit, versioned interface. Today there is none, and the
-resolution-record duality described in C2 will make any naïve
-implementation inconsistent. See Q2.
+The egress *shape* is sound; treat C7 now as a hardening task, not a
+design task. See Q1.
+
+### C8. Scoring contract is implicit and unversioned
+
+**Status (2026-06-08): partially addressed.** A wire format now exists in
+practice — the orchestrator consumes the submit payload (full
+`EvidenceDigest` under `reasoningTrace.trace`) and the validator reads
+back `GET /v1/validators/scored-predictions`. But the contract is defined
+only by the code that emits it, pinned to an inline `schemaVersion: "1.0"`
+string with no validation on either side, and the resolution-record
+duality described in C2 still applies. Promote this to an explicit,
+versioned, documented interface before external validators or pillar 2
+depend on it. See Q2.
+
+### C9. A plaintext database credential was committed to the repo
+
+**New finding (2026-06-08). Tracking fixed this pass; history scrub still
+outstanding.** `src/validator/almanac/storage/storage.env` was
+**git-tracked** and contained a plaintext Postgres password
+(`DB_PASSWORD=...`, line 6) alongside `DB_USER`, `DB_NAME`, host and port.
+Per the maintainer this is a **local/test credential** (`almanac_market_test`
+DB) with low direct exposure — but committing any secret is the wrong
+default, and it is present in committed history (commits `4a02092`,
+`67a949a`). The original `.gitignore` `.env` rule did **not** match
+`storage.env`, so nothing prevented the commit.
+
+Status of remediation:
+
+- ✅ **Stopped tracking the file** (`git rm --cached`); the local copy is
+  preserved and the loader (`postgres_validator_storage.py:69-88`) still
+  reads it, falling back to OS env vars when absent.
+- ✅ **`.gitignore` tightened** to cover `*.env` / `storage.env` while
+  keeping `*.env.example` tracked; a placeholder `storage.env.example`
+  already exists for operators.
+- ⚠️ **Still outstanding:** rotate the credential wherever it is reused,
+  and **scrub git history** (e.g. `git filter-repo`) + force-push with
+  coordination so the secret leaves all refs. Low urgency given it is a
+  test credential, but it should not live in history indefinitely.
+- ⚠️ **Recommended:** add a pre-commit secret scanner so this class of
+  leak cannot recur.
+
+### C10. Almanac Postgres store is not concurrency- or crash-safe
+
+**New finding (2026-06-08). This is C1 repeated for the new IM's data.**
+`src/validator/almanac/storage/postgres_validator_storage.py` is a
+singleton holding a single long-lived connection literally named
+`continuous_connection_do_not_reuse` (line 55, created at 148, returned at
+293) guarded by a process-local `RLock`. Queries are correctly
+**parameterised** (`%s` placeholders — no SQL-injection exposure), but:
+
+- **No connection pool.** Every write also opens an ad-hoc connection via
+  `contextlib.closing(self._create_connection())` (lines 153, 338, 392),
+  so the "continuous" connection and per-call connections coexist with no
+  coherent lifecycle. A dropped DB connection has no recovery path.
+- **No rollback on error.** `connection.commit()` is called only on the
+  success path (lines 271, 368, 469); there is no `try/except` issuing
+  `ROLLBACK`, so a mid-transaction failure leaves the session in an
+  aborted/inconsistent state.
+- **No schema migrations.** Schema is created inline with raw DDL; there
+  is no versioning or migration framework, so any schema change is a
+  manual, unversioned operation.
+
+Because this store holds epoch scores and miner-pool weights that feed the
+IM, the same "payout integrity" framing as C1 applies: torn or lost writes
+here translate directly into mis-weighting on chain.
 
 ---
 
@@ -367,7 +471,70 @@ A validator that retries submitting the same trace (network blip,
 process restart) will be processed multiple times by whatever ingestion
 service consumes traces. There is no `request_id` / `submission_id` /
 content-derived key to dedupe. This must be designed into the egress
-path (Q1) from the start.
+path (Q1) from the start. **(2026-06-08: now concrete — the live submit
+payload in `validator.py` carries no idempotency key. See C7, H9.)**
+
+### H9. Prediction submission is lossy — no retry, queue, or durability
+
+**New finding (2026-06-08).** The validator's submit path
+(`src/validator/validator.py:469-490`) builds the payload, calls
+`submit_validator_prediction`, and on any exception logs and `return`s.
+The digest is persisted locally, but the *scored prediction* — the thing
+the IM pays against — is silently dropped on the first network error,
+timeout (default 15 s, `orchestrator_api.py:20`), or 5xx. The same lossy
+pattern repeats on the read side: assignment fetch and scored-prediction
+fetch both `except Exception: return` and simply skip the epoch
+(`validator.py:389-391`, `~827-842`). For payout integrity this must
+become a durable, retried, idempotent submission (a local outbox/queue
+with backoff), not a fire-and-forget POST. Couples with H8.
+
+### H10. Orchestrator path has no enforced TLS and no miner code-signature chain
+
+**New finding (2026-06-08).** Two transport-trust gaps on the new
+orchestrator integration:
+
+- **No TLS enforcement.** The orchestrator base URL defaults to
+  `http://localhost:4000` (`src/core/constants.py:86`) and nothing rejects
+  a plaintext `http://` URL in production. Agent **code**, predictions, and
+  full traces all traverse this URL; on a plaintext link they are
+  MITM-able.
+- **Code integrity rests on a hash, not a signature.** When the validator
+  pulls agent code it verifies the SHA-256 against the value the
+  orchestrator itself supplied (`validator.py:515-521`) — that detects
+  transport corruption but **not** substitution by a compromised or
+  spoofed orchestrator, because the attacker controls both the code and
+  the hash. There is no miner hotkey signature over the code that the
+  validator can independently verify. The Docker sandbox (good) is then
+  the *only* thing standing between an injected payload and the validator
+  host (see C5). Mitigate by enforcing HTTPS (reject `http://` for
+  non-loopback) and adding a miner-signature-over-code check before
+  execution.
+
+### H11. Almanac ships production footguns
+
+**New finding (2026-06-08).** The merged Almanac IM carries several
+dev-only behaviours into production code paths:
+
+- **Toggleable synthetic/mock trading data.** `use_synthetic_data`
+  (`src/validator/almanac/loop.py:100`) swaps real trading history for an
+  sn41-shipped mock dataset. Left true (or defaulted true in a config),
+  the entire subnet rewards miners against static fixture data.
+- **Hardcoded localhost test endpoint.**
+  `_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "http://localhost:3001/..."`
+  (`loop.py:34`) is selected whenever `network == "test"`; a
+  misconfiguration silently points scoring at a non-existent local API.
+- **Substring miner-id matching.** A miner profile is accepted if the
+  on-chain commitment id is a **substring** of the stored profile id
+  (`loop.py:246-247`). This is intentional ("chain stores only a partial
+  id for privacy"), but substring matching is weaker than a prefix/exact
+  match and widens the space for id collision/spoofing; worth tightening
+  to an explicit prefix match with a minimum length.
+- **Dual-IM blend edge cases.** The Almanac/Arcratio weight blend can
+  silently misbehave: a non-zero `share` on a *disabled* mechanism is
+  ignored with no warning, and a total share of zero falls back to equal
+  weighting rather than erroring. An operator can believe they are running
+  a 50/50 blend while emitting 100%/0%. Add validation that enabled
+  mechanisms' shares are positive and sum to 1.0, and fail loudly otherwise.
 
 ---
 
@@ -424,6 +591,20 @@ tests. There's no test asserting "two clients cannot interleave traces"
 or "unsigned request is rejected when REQUIRE_SIGNATURE=true". The
 shape is right; the coverage isn't.
 
+### M8. Heavy new dependencies are unpinned and one is undeclared
+
+**New finding (2026-06-08).** The Almanac merge added a scientific stack
+to `requirements.txt` (lines 11-17) with **no version pins** —
+`cvxpy`, `ecos`, `numpy`, `scipy`, `pandas`. `cvxpy`/`ecos` pull compiled
+conic solvers; an unpinned resolve can silently break the validator on a
+new release and is a supply-chain surface. Separately,
+`postgres_validator_storage.py` imports `psycopg2` but `psycopg2-binary`
+is **not in any requirements file** (only mentioned in the module
+docstring) — Postgres storage degrades to disabled silently if the
+operator doesn't hand-install it. `bittensor>=9.0,<11` is also a wide
+range across a major version. Pin these (ideally via a lockfile /
+`pip-compile`) and declare `psycopg2-binary` as an extra.
+
 ---
 
 ## 8. Cross-cutting risks
@@ -450,16 +631,24 @@ shape is right; the coverage isn't.
 
 ## 9. Recommended priority order
 
-1. **Decide Q2 (scoring contract), then Q1 (trace egress).** Paper
-   decisions. They unblock everything else.
+0. **Leaked DB credential (C9) — mostly contained.** Untracking +
+   `.gitignore` done this pass; remaining: rotate the credential and scrub
+   git history (low urgency — it is a test credential), plus add a secret
+   scanner. Not a roadmap item; close it out.
+1. **Harden the now-existing egress path, don't redesign it.** Document
+   and version the scoring contract (Q2/C8), then make the submit durable
+   and idempotent (H9, H8) and enforce TLS + a code-signature check (H10).
 2. **Lock down the gateway as the operator's spending choke point**
    (C3, C4, C6 together; H7 alongside).
-3. **Fix storage and seal-integrity** on the *ingestion* side wherever
-   traces durably land for scoring (C1, C2, M4, M5, H6).
+3. **Fix storage and seal-integrity** wherever traces and IM scores
+   durably land (C1, C2, M4, M5, H6), **including the new Almanac Postgres
+   store (C10)** — connection pool, rollback, migrations.
 4. **Continue tightening the agent sandbox** (C5, H1, H2, H3). These
    stay the same regardless of framing.
-5. **Add observability** before external validators onboard (H4).
-6. **Pillar 2 design** is its own exercise; do not start it before Q2
+5. **De-footgun the Almanac IM** (H11): default off the synthetic-data
+   path, validate blend shares, pin deps (M8).
+6. **Add observability** before external validators onboard (H4).
+7. **Pillar 2 design** is its own exercise; do not start it before Q2
    is fixed.
 
 ---
@@ -515,10 +704,64 @@ Files that any remediation pass will touch most:
 - `config/pricing_cards.json` + `src/gateway/cost_estimator.py` —
   billing data flow
 
+New hot files added by the orchestrator + Almanac merges (2026-06-08):
+
+- `src/validator/orchestrator_api.py` — assignment poll + prediction
+  submit + scored-prediction read (C7, C8, H9, H10)
+- `src/validator/validator.py` — submit payload build, code SHA check,
+  lossy submit/return paths (C7, H9, H10)
+- `src/validator/almanac/storage/storage.env` — committed DB credential
+  (C9); untracked + gitignored this pass, history scrub still pending
+- `src/validator/almanac/storage/postgres_validator_storage.py` —
+  connection reuse, no pool/rollback/migrations (C10)
+- `src/validator/almanac/loop.py` — synthetic-data toggle, localhost
+  test endpoint, substring miner-id match (H11)
+- `src/validator/almanac/scoring.py` + `src/validator/scoring.py` +
+  `src/validator/uid_map.py` — dual-IM scoring + blend (H11)
+- `requirements.txt` — unpinned `cvxpy`/`ecos`, undeclared
+  `psycopg2-binary` (M8)
+
 Files that don't yet exist but should be designed before further code
 work:
 
-- A trace egress producer (Q1)
-- A scoring-service interface schema or OpenAPI doc (Q2)
+- A versioned, documented scoring-service interface schema / OpenAPI doc
+  formalising the now-implicit submit + scored-prediction contract (Q2)
+- A durable, idempotent submission outbox on the validator (H8, H9)
 - An ingestion-side durable trace store with by-validator,
   by-event, by-date queries (replaces `JsonTraceStore`)
+
+---
+
+## 12. Re-verification status (second pass, 2026-06-08)
+
+This pass re-checked the first-pass findings against the current tree
+(after the `main` + `origin/integration_updates` merges) and added
+findings for the orchestrator API and Almanac IM. Line numbers below are
+current.
+
+| # | Finding | Status | Current anchor |
+|---|---------|--------|----------------|
+| C1 | Storage not crash/concurrency-safe | STILL VALID | `json_store.py:33,55,68` |
+| C2 | Trace integrity half-realised | IMPROVED (partial) | `seal()` now called `trace_assembler.py:83`; still unfrozen, still not verified on read in `json_store.get_trace` |
+| C3 | Gateway unauthenticated by default | STILL VALID | `server.py:54-56` (`REQUIRE_SIGNATURE` off by default) |
+| C4 | Signing has no replay protection | STILL VALID | `signing.py:155,194` (no nonce store; 300 s skew) |
+| C5 | Validator container = host-root | STILL VALID | `docker-compose.yaml` (docker.sock rw, no userns/apparmor) |
+| C6 | No per-validator gateway metering | STILL VALID | `server.py:73-121` |
+| C7 | Trace egress | REFRAMED — now exists, lossy/insecure | `orchestrator_api.py:18,208` |
+| C8 | Scoring contract | REFRAMED — now implicit, unversioned | submit payload in `validator.py` |
+| **C9** | **Committed DB credential** | **NEW — untracked this pass; history scrub pending** | `almanac/storage/storage.env:6` |
+| **C10** | **Almanac Postgres not crash/concurrency-safe** | **NEW (critical)** | `postgres_validator_storage.py:55,148,293` |
+| H1 | Agent image floating `:latest` | STILL VALID | `core/constants.py`, `docker-compose.yaml` |
+| H2 | No seccomp/AppArmor on sandbox | STILL VALID | `sandbox_docker.py` (`no-new-privileges` only) |
+| H3 | In-process sandbox footgun | IMPROVED (partial) | default now `docker_runc`; `--sandbox in_process` still available |
+| H6 | Failure semantics drop data | STILL VALID | `orchestrator.py` (spend lost if assemble fails) |
+| H7 | Hotkey plaintext in memory | STILL VALID (by design) | `local_proxy.py` |
+| H8 | No idempotency for re-ingestion | STILL VALID — now concrete | submit payload has no key |
+| **H9** | **Prediction submit is lossy** | **NEW (high)** | `validator.py:469-490` |
+| **H10** | **No TLS / no code-signature on orch path** | **NEW (high)** | `constants.py:86`, `validator.py:515-521` |
+| **H11** | **Almanac production footguns** | **NEW (high)** | `almanac/loop.py:34,100,246` |
+| **M8** | **Unpinned/undeclared deps** | **NEW (medium)** | `requirements.txt:11-17` |
+
+No first-pass finding was fully resolved; C2 and H3 improved but remain
+open. The two new critical items (C9, C10) and the orchestrator-path highs
+(H9, H10) are the net-new exposure from the merges.

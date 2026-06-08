@@ -5,6 +5,11 @@ venv/
 .cursor/
 
 .env
+# Any local env / secrets file (keep *.env.example tracked).
+*.env
+!*.env.example
+storage.env
+**/storage.env
 
 # Run directory for the validator-agent execution loop.
 var/run/
