@@ -19,6 +19,7 @@ it — see `src/gateway/server.py`.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import secrets
@@ -45,6 +46,7 @@ HEADER_NONCE = "X-Nonce"
 HEADER_SIGNATURE = "X-Signature"
 HEADER_SCHEME = "X-Signature-Scheme"
 HEADER_AUTH_VERSION = "X-Auth-Version"
+HEADER_AUTHORIZATION = "Authorization"
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,7 @@ def load_hotkey(cfg: BittensorConfig) -> Optional[LoadedKeypair]:
             "--unsafe-no-signing for local dev."
         ) from exc
 
-    wallet = bittensor.wallet(
+    wallet = bittensor.Wallet(
         name=cfg.wallet_name,
         hotkey=cfg.wallet_hotkey,
         path=str(cfg.wallet_path),
@@ -154,8 +156,10 @@ def sign_request(
     canonical = _canonical_message(netuid, ts, nonce, body)
     signature_bytes = loaded.keypair.sign(canonical)
     signature_hex = signature_bytes.hex() if isinstance(signature_bytes, (bytes, bytearray)) else str(signature_bytes)
+    basic_token = base64.b64encode(f"{loaded.hotkey_ss58}:{signature_hex}".encode("utf-8")).decode("ascii")
 
     headers = {
+        HEADER_AUTHORIZATION: f"Basic {basic_token}",
         HEADER_HOTKEY: loaded.hotkey_ss58,
         HEADER_NETUID: str(netuid),
         HEADER_TIMESTAMP: str(ts),

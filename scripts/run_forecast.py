@@ -11,7 +11,7 @@ import argparse
 import json
 import random
 import sys
-import time
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -27,61 +27,21 @@ from src.agent.examples.openrouter_agent import OpenRouterAgent
 from src.agent.examples.claude_agent import ClaudeAgent
 from src.storage.json_store import JsonTraceStore
 from src.validator.orchestrator import Orchestrator
+from src.validator.validator import start_local_proxy as _start_local_proxy
 
 
-def _start_local_proxy(config):
-    """Start the validator-local signing proxy in a daemon thread.
-
-    Returns the `LocalProxyState` so the orchestrator can register/drain runs
-    without going through HTTP. This keeps the orchestrator and proxy in a
-    single process for simplicity; production deployments can split them
-    across processes once the admin HTTP endpoints land.
-    """
-    import threading
-
-    import uvicorn
-
-    from src.gateway.local_proxy import create_app, LocalProxyState
-
-    socket_path = config.validator.sandbox_socket_dir / "proxy.sock"
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    if socket_path.exists():
-        socket_path.unlink()
-
-    app = create_app(config)
-    state: LocalProxyState = app.state.proxy
-    state.load_hotkey()
-
-    uvicorn_config = uvicorn.Config(
-        app,
-        uds=str(socket_path),
-        log_level="warning",
-        lifespan="off",
-    )
-    server = uvicorn.Server(uvicorn_config)
-
-    thread = threading.Thread(
-        target=server.run,
-        name="arcratio-local-proxy",
-        daemon=True,
-    )
-    thread.start()
-
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if socket_path.exists():
-            break
-        time.sleep(0.05)
-
-    return state
+@dataclass(frozen=True)
+class LoadedEvent:
+    filename_stem: str
+    event: Event
 
 
-def load_events(data_dir: Path) -> list[Event]:
+def load_events(data_dir: Path) -> list[LoadedEvent]:
     events_dir = data_dir / "events"
-    events = []
+    events: list[LoadedEvent] = []
     for path in sorted(events_dir.glob("*.json")):
         raw = json.loads(path.read_text())
-        events.append(Event.model_validate(raw))
+        events.append(LoadedEvent(filename_stem=path.stem, event=Event.model_validate(raw)))
     return events
 
 
@@ -252,13 +212,14 @@ def main() -> None:
         sys.exit(1)
 
     if args.event:
-        all_events = [e for e in all_events if args.event in e.title.lower().replace(" ", "-")]
+        needle = args.event.lower()
+        all_events = [e for e in all_events if needle in e.filename_stem.lower()]
         if not all_events:
             print(f"No events matching '{args.event}'")
             sys.exit(1)
     elif not args.all_events:
         chosen = random.choice(all_events)
-        print(f"  Randomly selected event: {chosen.title}")
+        print(f"  Randomly selected event: {chosen.event.title}")
         all_events = [chosen]
 
     print()
@@ -267,9 +228,21 @@ def main() -> None:
     print(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
 
     trace_idx = 0
-    for event in all_events:
+    for loaded_event in all_events:
+        event = loaded_event.event
         for agent in agents:
+            print(
+                "  Baseline: gathering validator-side market signal "
+                f"(source={event.source or 'n/a'}, source_id={event.source_id or 'n/a'}) ..."
+            )
             digest = orchestrator.run_agent(event, agent)
+            baseline = None
+            if digest.prediction_output.metadata:
+                baseline = digest.prediction_output.metadata.get("market_baseline")
+            if baseline is None:
+                print("  Baseline: unavailable for this run.")
+            else:
+                print("  Baseline: attached to trace metadata.")
             print_summary(digest, trace_idx)
             trace_idx += 1
 
