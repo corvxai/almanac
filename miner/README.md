@@ -38,6 +38,10 @@ python3 miner/cli.py --help
 python3 miner/cli.py list-agents
 python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
 ```
+Optionally run with explicit gateway API key defined, but MORE SECURE to define GATEWAY_API_KEY in .env:
+```bash
+python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name> --gateway-api-key <gateway-api-key>
+```
 
 ## Configuration
 
@@ -45,11 +49,13 @@ The CLI uses the shared orchestrator constant from `src/core/constants.py`:
 `ORCHESTRATOR_API_URL` (default: `http://localhost:4000`).
 
 You can still override the URL per command with `--orchestrator-url`.
+The CLI also auto-loads repo-root `.env` (`python-dotenv`) before resolving env vars.
 
 - `ARCRATIO_TIMEOUT_SECONDS` (default: `20.0`)
 - `ARCRATIO_WALLET_PATH` (default: `~/.bittensor/wallets`)
 - `ARCRATIO_WALLET_NAME` (default: `default`)
 - `ARCRATIO_WALLET_HOTKEY` (default: `default`)
+- `GATEWAY_API_KEY` or `ARCRATIO_GATEWAY_API_KEY`
 
 Flag equivalents:
 
@@ -58,6 +64,7 @@ Flag equivalents:
 - `--wallet-path`
 - `--wallet-name`
 - `--wallet-hotkey-name`
+- `--gateway-api-key`
 
 ## Command reference
 
@@ -74,13 +81,14 @@ python3 miner/cli.py list-agents --limit 25 --offset 0
 Calls `POST /v1/agents/submit-agent` with the raw `.py` file bytes as the request body.
 
 ```bash
-python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
+python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name> --gateway-api-key <gateway-api-key>
 ```
 
 Submit auth + request shape:
 
 - Content type: `application/octet-stream`
 - Header: `x-agent-filename: <agent file name>`
+- Header: `Authorization: Bearer <gateway_api_key>`
 - Signed headers:
   - `x-miner-hotkey`
   - `x-miner-signature`
@@ -98,13 +106,20 @@ How signing works:
   - timestamp (ms)
   - sha256(body)
 - CLI signs with the wallet hotkey and sends hex signature as `x-miner-signature`.
+- CLI does not include org or gateway account id in payload headers or signature.
 
 Compatibility flags retained on `submit-agent`:
 
 - `--miner-hotkey` (optional override; defaults to wallet hotkey ss58)
+- `--gateway-api-key` (required by gateway upload auth unless env var is set)
 - `--miner-uid` (currently ignored by submit endpoint)
 - `--subtensor-network` (currently ignored by submit endpoint)
 - `--netuid` (currently ignored by submit endpoint)
+
+Gateway key linking behavior:
+
+- First valid upload with an unoccupied API key auto-links miner to that key/org.
+- If an API key is already linked to a miner, upload fails; use a fresh key.
 
 Client-side checks enforced by the CLI:
 
