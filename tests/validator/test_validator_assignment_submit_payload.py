@@ -7,24 +7,13 @@ from uuid import uuid4
 import pytest
 
 from src.core.config import AppConfig
+from src.validator.assignment_pipeline import (
+    build_prediction_submit_payload,
+    build_sandbox_assignment_agent,
+    process_single_assignment,
+    resolve_binary_outcome_ids,
+)
 from src.validator.orchestrator_api import OrchestratorAssignment
-from src.validator import validator as validator_module
-from src.validator.validator import Validator
-
-
-def _bt_objects():
-    return validator_module._BtObjects(  # noqa: SLF001 - tests use internal helper
-        wallet=SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hotkey_test")),
-        subtensor=SimpleNamespace(),
-        dendrite=SimpleNamespace(),
-        metagraph=SimpleNamespace(),
-        network="test",
-    )
-
-
-def _validator() -> Validator:
-    cfg = AppConfig()
-    return Validator(config=cfg, store=None, bt_objects=_bt_objects(), metadata_manager=None)
 
 
 def _assignment(outcomes: list[dict]) -> OrchestratorAssignment:
@@ -79,27 +68,25 @@ class _Digest:
 
 
 def test_resolve_binary_outcome_ids_prefers_yes_no_names() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    yes_id, no_id = v._resolve_binary_outcome_ids(assignment)  # noqa: SLF001
+    yes_id, no_id = resolve_binary_outcome_ids(assignment)
     assert yes_id == "oid_yes"
     assert no_id == "oid_no"
 
 
 def test_build_prediction_submit_payload_binary_fields() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = v._build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9))  # noqa: SLF001
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9))
     prediction = payload["prediction"]
     assert prediction["predictedOutcomeId"] == "oid_yes"
     assert prediction["outcomeProbabilities"]["oid_yes"] == 0.8
@@ -118,21 +105,19 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
 
 
 def test_build_sandbox_assignment_agent_sets_inline_code_attrs() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    agent = v._build_sandbox_assignment_agent(assignment)  # noqa: SLF001
+    agent = build_sandbox_assignment_agent(assignment)
     assert getattr(agent, "_arcratio_agent_source_code") == assignment.agent.code
     assert str(agent.agent_id)
     assert agent.agent_version
 
 
 def test_build_sandbox_assignment_agent_rejects_hash_mismatch() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
@@ -141,36 +126,41 @@ def test_build_sandbox_assignment_agent_rejects_hash_mismatch() -> None:
     )
     assignment.agent.sha256 = "00" * 32
     with pytest.raises(RuntimeError, match="sha256 mismatch"):
-        v._build_sandbox_assignment_agent(assignment)  # noqa: SLF001
+        build_sandbox_assignment_agent(assignment)
 
 
-def test_handle_assignment_refuses_in_process_mode(monkeypatch) -> None:
-    v = _validator()
-    v._config.validator.sandbox_type = "in_process"  # noqa: SLF001
+def test_process_assignment_refuses_in_process_mode() -> None:
+    cfg = AppConfig()
+    cfg.validator.sandbox_type = "in_process"
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-
-    monkeypatch.setattr(
-        v,
-        "_get_assignment_orchestrator",
-        lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
+    fake_orchestrator = SimpleNamespace(
+        run_agent=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("should not execute")
+        )
     )
-    v._handle_orchestrator_assignment(assignment)  # noqa: SLF001
+    with pytest.raises(RuntimeError, match="sandbox is not docker-based"):
+        process_single_assignment(
+            assignment=assignment,
+            config=cfg,
+            orchestrator=fake_orchestrator,  # type: ignore[arg-type]
+            loaded_hotkey=None,
+            submit_prediction=False,
+        )
 
 
 def test_build_prediction_submit_payload_marks_invalid_non_numeric_prediction() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = v._build_prediction_submit_payload(assignment, _Digest("not-a-number", confidence=0.8))  # noqa: SLF001
+    payload = build_prediction_submit_payload(assignment, _Digest("not-a-number", confidence=0.8))
     prediction = payload["prediction"]
     assert prediction["predictedOutcomeId"] in {"oid_yes", "oid_no"}
     assert prediction["outcomeProbabilities"]["oid_yes"] == 0.0
@@ -183,14 +173,13 @@ def test_build_prediction_submit_payload_marks_invalid_non_numeric_prediction() 
 
 
 def test_build_prediction_submit_payload_marks_invalid_confidence_out_of_range() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = v._build_prediction_submit_payload(assignment, _Digest(0.8, confidence=5.0))  # noqa: SLF001
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=5.0))
     prediction = payload["prediction"]
     assert prediction["confidence"] == pytest.approx(0.0)
     assert prediction["executionMetadata"]["predictionIsInvalid"] is True
@@ -200,14 +189,13 @@ def test_build_prediction_submit_payload_marks_invalid_confidence_out_of_range()
 
 
 def test_build_prediction_submit_payload_marks_invalid_when_confidence_missing() -> None:
-    v = _validator()
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = v._build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None))  # noqa: SLF001
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None))
     prediction = payload["prediction"]
     assert prediction["confidence"] == pytest.approx(0.0)
     assert prediction["executionMetadata"]["predictionIsInvalid"] is True

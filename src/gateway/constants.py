@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+from src.core.constants import GATEWAY_SERVICE_URL as CORE_GATEWAY_SERVICE_URL
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _PROJECT_ROOT / ".env"
@@ -24,7 +25,7 @@ if _ENV_FILE.is_file():
 _ENV_KEY = "GATEWAY_SERVICE_URL"
 
 # Default when ``GATEWAY_SERVICE_URL`` is unset (local gateway).
-DEFAULT_GATEWAY_SERVICE_URL = "http://localhost:8077"
+DEFAULT_GATEWAY_SERVICE_URL = CORE_GATEWAY_SERVICE_URL
 
 
 def gateway_service_url() -> str:

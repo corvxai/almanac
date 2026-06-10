@@ -8,12 +8,19 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+load_dotenv(_PROJECT_ROOT / ".env")
 
 from src.core.constants import ORCHESTRATOR_API_URL
 
@@ -32,7 +39,11 @@ class SignedHeaders:
 
 
 def _resolve_orchestrator_url(args: argparse.Namespace) -> str:
-    return (args.orchestrator_url or DEFAULT_ORCHESTRATOR_URL).rstrip("/")
+    return (
+        args.orchestrator_url
+        or os.getenv("ARCRATIO_ORCHESTRATOR_URL")
+        or DEFAULT_ORCHESTRATOR_URL
+    ).rstrip("/")
 
 
 def _resolve_timeout(args: argparse.Namespace) -> float:
@@ -63,6 +74,14 @@ def _resolve_wallet_name(args: argparse.Namespace) -> str:
 
 def _resolve_wallet_hotkey_name(args: argparse.Namespace) -> str:
     return args.wallet_hotkey_name or os.getenv("ARCRATIO_WALLET_HOTKEY", "default")
+
+
+def _resolve_gateway_api_key(args: argparse.Namespace) -> str | None:
+    return (
+        args.gateway_api_key
+        or os.getenv("GATEWAY_API_KEY")
+        or os.getenv("ARCRATIO_GATEWAY_API_KEY")
+    )
 
 
 def _canonical_message(
@@ -220,6 +239,10 @@ def _handle_upload_agent(args: argparse.Namespace) -> int:
     miner = _load_hotkey_keypair(args)
     if miner is None:
         return 2
+    gateway_api_key = _resolve_gateway_api_key(args)
+    if not gateway_api_key:
+        print("gateway API key is required; pass --gateway-api-key or set GATEWAY_API_KEY.")
+        return 2
     miner_hotkey = args.miner_hotkey or miner.ss58_address
     signed = _sign_headers(
         role="miner",
@@ -231,6 +254,7 @@ def _handle_upload_agent(args: argparse.Namespace) -> int:
     )
     headers = {
         **signed.headers,
+        "Authorization": f"Bearer {gateway_api_key}",
         "content-type": "application/octet-stream",
         "x-agent-filename": args.agent_file.name or "agent.py",
     }
@@ -297,6 +321,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "HTTP timeout in seconds. Defaults to ARCRATIO_TIMEOUT_SECONDS "
             f"or {DEFAULT_TIMEOUT_SECONDS}."
+        ),
+    )
+    parser.add_argument(
+        "--gateway-api-key",
+        default=None,
+        help=(
+            "Gateway API key for submit auth. "
+            "Defaults to GATEWAY_API_KEY or ARCRATIO_GATEWAY_API_KEY."
         ),
     )
 

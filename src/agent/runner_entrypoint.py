@@ -130,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
         "--input-file",
         default=None,
         help=(
-            "Optional path to a JSON file with the {event, agent_module, agent_class} "
+            "Optional path to a JSON file with the "
+            "{event, agent_module, agent_class} payload or "
+            "{event, agent_code, inline_class} payload. "
             "payload. Defaults to stdin."
         ),
     )
@@ -152,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"missing required payload key: {exc}") from exc
 
     inline_code = payload.get("agent_code")
-    inline_class = payload.get("agent_class")
+    inline_class = payload.get("inline_class")
     agent_module = payload.get("agent_module")
     agent_class = payload.get("agent_class")
 

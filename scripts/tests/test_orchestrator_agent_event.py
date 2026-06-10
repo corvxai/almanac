@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manual smoke test for GET /v1/validators/agent-and-event.
+"""Manual orchestrator single-job harness.
 
 Run from repo root:
 
@@ -16,7 +16,6 @@ Optional:
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
 import sys
 from pathlib import Path
@@ -25,13 +24,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.config import AppConfig
+from src.gateway.client import build_remote_providers
+from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
+from src.storage.json_store import JsonTraceStore
+from src.validator.assignment_pipeline import process_single_assignment
+from src.validator.orchestrator import Orchestrator
 from src.validator.orchestrator_api import (
     PREDICTION_ENDPOINT,
-    OrchestratorAssignment,
     fetch_agent_event_assignment,
-    submit_validator_prediction,
 )
+from src.validator.validator import start_local_proxy
 
 
 def _code_preview(code: str, *, preview_chars: int = 50) -> str:
@@ -42,90 +45,6 @@ def _code_preview(code: str, *, preview_chars: int = 50) -> str:
     size_kb = len(code.encode("utf-8")) / 1024.0
     lines = code.count("\n") + (1 if code else 0)
     return f"{snippet} ({size_kb:.1f} KB, {lines} lines)"
-
-
-def _build_submit_payload(assignment: OrchestratorAssignment) -> dict:
-    yes_id, no_id = _resolve_binary_outcomes(assignment)
-    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    return {
-        "agentPredictionId": assignment.agentPredictionId,
-        "prediction": {
-            "schemaVersion": "1.0",
-            "submittedAt": now_iso,
-            "predictionType": "binary",
-            "predictedOutcomeId": yes_id,
-            "confidence": 0.5,
-            "outcomeProbabilities": {
-                yes_id: 0.5,
-                no_id: 0.5,
-            },
-            "outcomePricesAtPrediction": assignment.event.currentOutcomePrices,
-            "marketSnapshot": {
-                "source": assignment.event.source,
-                "sourceMarketId": assignment.event.sourceMarketId or assignment.event.marketId,
-                "capturedAt": now_iso,
-            },
-            "executionMetadata": {
-                "predictionIsInvalid": False,
-                "predictionInvalidReason": None,
-                "predictionValidation": {
-                    "isValid": True,
-                    "reasons": [],
-                    "rawObserved": {
-                        "prediction": "0.5",
-                        "confidence": "0.5",
-                    },
-                },
-                "model": "manual-smoke-test",
-                "latencyMs": 0,
-            },
-        },
-        "reasoningTrace": {
-            "schemaVersion": "1.0",
-            "trace": {
-                "steps": [
-                    "Fetched assignment via validator auth",
-                    "Built manual smoke-test prediction payload",
-                    "Submitted payload to orchestrator API",
-                ]
-            },
-            "traceSummary": {
-                "strategy": "manual-smoke-test",
-            },
-            "modelMetadata": {
-                "provider": "manual",
-                "model": "manual-smoke-test",
-            },
-        },
-    }
-
-
-def _resolve_binary_outcomes(assignment: OrchestratorAssignment) -> tuple[str, str]:
-    yes_id: str | None = None
-    no_id: str | None = None
-    for outcome in assignment.event.outcomes:
-        if not isinstance(outcome, dict):
-            continue
-        oid = outcome.get("outcomeId")
-        name = str(outcome.get("name", "")).strip().lower()
-        if not isinstance(oid, str):
-            continue
-        if name == "yes":
-            yes_id = oid
-        elif name == "no":
-            no_id = oid
-    if yes_id and no_id:
-        return yes_id, no_id
-
-    if len(assignment.event.outcomes) < 2:
-        raise RuntimeError("assignment has fewer than two outcomes")
-    first = assignment.event.outcomes[0] if isinstance(assignment.event.outcomes[0], dict) else {}
-    second = assignment.event.outcomes[1] if isinstance(assignment.event.outcomes[1], dict) else {}
-    first_id = first.get("outcomeId")
-    second_id = second.get("outcomeId")
-    if not isinstance(first_id, str) or not isinstance(second_id, str):
-        raise RuntimeError("assignment outcomes missing outcomeId")
-    return first_id, second_id
 
 
 def main() -> int:
@@ -163,12 +82,33 @@ def main() -> int:
     parser.add_argument(
         "--submit-prediction",
         action="store_true",
-        help="Prepare and optionally submit a prediction payload for the fetched assignment.",
+        help="Execute the assignment and prepare prediction submit payload.",
     )
     parser.add_argument(
         "--i-understand-this-submits",
         action="store_true",
         help="Required with --submit-prediction to actually POST to the API.",
+    )
+    parser.add_argument(
+        "--execute-agent",
+        action="store_true",
+        help="Execute assignment agent code in sandbox without submitting.",
+    )
+    parser.add_argument(
+        "--gateway-url",
+        default=None,
+        help="Gateway service URL (defaults to configured gateway URL).",
+    )
+    parser.add_argument(
+        "--sandbox",
+        choices=["docker_runc", "docker_gvisor"],
+        default=None,
+        help="Override sandbox type for this run (docker-only for orchestrator assignments).",
+    )
+    parser.add_argument(
+        "--unsafe-no-signing",
+        action="store_true",
+        help="Disable wallet signing for local proxy requests (dev only).",
     )
     args = parser.parse_args()
 
@@ -179,11 +119,16 @@ def main() -> int:
         cfg.bittensor.wallet_hotkey = args.wallet_hotkey
     if args.wallet_path is not None:
         cfg.bittensor.wallet_path = args.wallet_path
+    if args.sandbox is not None:
+        cfg.validator.sandbox_type = args.sandbox
+    if args.unsafe_no_signing:
+        cfg.bittensor.signing_required = False
 
     base_url = (args.base_url or cfg.validator.orchestrator_api_url).strip()
     if not base_url:
         print("missing orchestrator API URL in validator config")
         return 2
+    cfg.validator.orchestrator_api_url = base_url
 
     loaded_hotkey = load_hotkey(cfg.bittensor)
     if loaded_hotkey is None:
@@ -213,15 +158,60 @@ def main() -> int:
             agent_payload["code"] = _code_preview(code)
     print(json.dumps(assignment_payload, indent=2, sort_keys=True))
 
+    should_execute = args.execute_agent or args.submit_prediction
+    if not should_execute:
+        return 0
+
+    gateway_url = args.gateway_url or gateway_service_url()
+    store = JsonTraceStore(data_dir=cfg.storage.data_dir)
+    try:
+        providers = build_remote_providers(gateway_url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"failed to connect to gateway ({gateway_url}): {exc}")
+        return 1
+
+    local_proxy_state = None
+    if cfg.validator.sandbox_type.startswith("docker"):
+        try:
+            local_proxy_state = start_local_proxy(cfg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"failed to start local proxy: {exc}")
+            return 1
+
+    orchestrator = Orchestrator(
+        config=cfg,
+        store=store,
+        providers=providers,
+        local_proxy_state=local_proxy_state,
+    )
+    submit_live = args.submit_prediction and args.i_understand_this_submits
+    try:
+        result = process_single_assignment(
+            assignment=response.assignment,
+            config=cfg,
+            orchestrator=orchestrator,
+            loaded_hotkey=loaded_hotkey if submit_live else None,
+            submit_prediction=submit_live,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"assignment processing failed: {exc}")
+        return 1
+
+    print()
+    print(
+        "Execution completed:"
+        f" event_id={result.event.event_id}"
+        f" execution_id={result.digest.execution_context.execution_id}"
+    )
     if not args.submit_prediction:
         return 0
 
     submit_url = f"{base_url.rstrip('/')}{PREDICTION_ENDPOINT}"
-    submit_payload = _build_submit_payload(response.assignment)
     print()
     print(f"Submit endpoint: {submit_url}")
     print("Prediction payload preview:")
-    print(json.dumps(submit_payload, indent=2, sort_keys=True))
+    print(json.dumps(result.submit_payload, indent=2, sort_keys=True))
 
     if not args.i_understand_this_submits:
         print()
@@ -231,20 +221,12 @@ def main() -> int:
         )
         return 0
 
-    try:
-        ack = submit_validator_prediction(
-            base_url=base_url,
-            loaded_hotkey=loaded_hotkey,
-            payload=submit_payload,
-            timeout_seconds=args.timeout_seconds,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"prediction submit failed: {exc}")
-        return 1
-
     print()
     print("Submit response:")
-    print(json.dumps(ack.model_dump(mode="json"), indent=2, sort_keys=True))
+    if result.submit_ack is None:
+        print("missing submit acknowledgement")
+        return 1
+    print(json.dumps(result.submit_ack.model_dump(mode="json"), indent=2, sort_keys=True))
     return 0
 
 
