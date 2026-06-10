@@ -8,6 +8,7 @@ the raw responses flow back through HTTP.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -31,6 +32,15 @@ _DEFAULT_TIERS: dict[str, ProviderTier] = {
 }
 
 
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    provider_id: str
+    models: tuple[str, ...]
+    allows_any_model: bool
+    default_call_type: str
+    supports_completions: bool
+
+
 class RemoteProvider(BaseProvider):
     """Proxies calls to the gateway HTTP service.
 
@@ -51,6 +61,8 @@ class RemoteProvider(BaseProvider):
         gateway_url: str | None = None,
         provider_tier: ProviderTier | None = None,
         timeout: float = 120.0,
+        default_call_type: str | None = None,
+        supports_completions: bool = True,
         *,
         client: httpx.Client | None = None,
         headers: dict[str, str] | None = None,
@@ -59,6 +71,8 @@ class RemoteProvider(BaseProvider):
         self._gateway_url = (gateway_url or gateway_service_url()).rstrip("/")
         self._tier = provider_tier or _DEFAULT_TIERS.get(provider_id, ProviderTier.INFERENCE)
         self._timeout = timeout
+        self._default_call_type = default_call_type or "chat_completion"
+        self._supports_completions = supports_completions
         self._client = client
         self._headers = dict(headers) if headers else {}
 
@@ -71,18 +85,24 @@ class RemoteProvider(BaseProvider):
         return self._tier
 
     def call(self, call_type: str, params: dict[str, Any]) -> dict[str, Any]:
-        body = {
-            "provider_id": self._provider_id,
-            "call_type": call_type,
-            "params": params,
-        }
+        body = _build_completions_payload(
+            self._provider_id,
+            call_type,
+            params,
+            default_call_type=self._default_call_type,
+            supports_completions=self._supports_completions,
+        )
 
         if self._client is not None:
             # Pre-configured client (e.g. UDS transport in the sandbox).
-            url = "/v1/call" if self._client.base_url else f"{self._gateway_url}/v1/call"
+            url = (
+                "/v1/gateway/validator/completions"
+                if self._client.base_url
+                else f"{self._gateway_url}/v1/gateway/validator/completions"
+            )
             resp = self._client.post(url, json=body, headers=self._headers or None)
         else:
-            url = f"{self._gateway_url}/v1/call"
+            url = f"{self._gateway_url}/v1/gateway/validator/completions"
             with httpx.Client(timeout=self._timeout) as client:
                 resp = client.post(url, json=body, headers=self._headers or None)
                 if resp.is_error:
@@ -111,7 +131,47 @@ def _http_error_detail(resp: httpx.Response) -> str:
     return text or "(no response body)"
 
 
-def discover_providers(gateway_url: str | None = None) -> list[str]:
+def _build_completions_payload(
+    provider_id: str,
+    call_type: str,
+    params: dict[str, Any],
+    *,
+    default_call_type: str,
+    supports_completions: bool,
+) -> dict[str, Any]:
+    messages = params.get("messages")
+    if not isinstance(messages, list) or not messages:
+        messages = [
+            {
+                "role": "user",
+                "content": default_message_content(call_type, params),
+            }
+        ]
+    max_tokens = params.get("maxTokens", params.get("max_tokens", 1024))
+    top_p = params.get("topP", params.get("top_p", 1))
+    stop = params.get("stop", [])
+    model = params.get("model", "")
+    payload = {
+        "provider": provider_id,
+        "model": model,
+        "messages": messages,
+        "maxTokens": max_tokens,
+        "temperature": params.get("temperature", 1),
+        "topP": top_p,
+        "stop": stop if isinstance(stop, list) else [str(stop)],
+    }
+    if not supports_completions:
+        payload["callType"] = call_type or default_call_type
+        payload["params"] = params
+    return payload
+
+
+def default_message_content(call_type: str, params: dict[str, Any]) -> str:
+    parts = [f"{k}={v}" for k, v in sorted(params.items())]
+    return f"{call_type}({', '.join(parts)})"
+
+
+def discover_provider_descriptors(gateway_url: str | None = None) -> list[ProviderDescriptor]:
     """Ask the gateway which providers are available."""
     base = (gateway_url or gateway_service_url()).rstrip("/")
     with httpx.Client(timeout=10.0) as client:
@@ -121,17 +181,41 @@ def discover_providers(gateway_url: str | None = None) -> list[str]:
         if not isinstance(providers, list):
             raise RuntimeError("invalid gateway providers response: providers must be a list")
 
-        provider_ids: list[str] = []
+        descriptors: list[ProviderDescriptor] = []
         for row in providers:
             if isinstance(row, str):
-                provider_ids.append(row)
+                descriptors.append(
+                    ProviderDescriptor(
+                        provider_id=row,
+                        models=(),
+                        allows_any_model=True,
+                        default_call_type="chat_completion",
+                        supports_completions=True,
+                    )
+                )
                 continue
             if not isinstance(row, dict):
                 continue
             provider_id = row.get("id")
             if isinstance(provider_id, str) and provider_id.strip():
-                provider_ids.append(provider_id.strip())
-        return provider_ids
+                models = row.get("models", [])
+                if not isinstance(models, list):
+                    models = []
+                descriptors.append(
+                    ProviderDescriptor(
+                        provider_id=provider_id.strip(),
+                        models=tuple(str(m) for m in models if isinstance(m, str)),
+                        allows_any_model=bool(row.get("allowsAnyModel", False)),
+                        default_call_type=str(row.get("defaultCallType") or "chat_completion"),
+                        supports_completions=bool(row.get("supportsCompletions", True)),
+                    )
+                )
+        return descriptors
+
+
+def discover_providers(gateway_url: str | None = None) -> list[str]:
+    """Return provider IDs from gateway discovery."""
+    return [p.provider_id for p in discover_provider_descriptors(gateway_url)]
 
 
 def build_remote_providers(
@@ -139,5 +223,13 @@ def build_remote_providers(
 ) -> list[RemoteProvider]:
     """Discover providers from the gateway and return RemoteProvider instances."""
     base = gateway_url or gateway_service_url()
-    provider_ids = discover_providers(base)
-    return [RemoteProvider(pid, base) for pid in provider_ids]
+    providers = discover_provider_descriptors(base)
+    return [
+        RemoteProvider(
+            p.provider_id,
+            base,
+            default_call_type=p.default_call_type,
+            supports_completions=p.supports_completions,
+        )
+        for p in providers
+    ]

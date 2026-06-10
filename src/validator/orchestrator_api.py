@@ -230,7 +230,10 @@ def submit_validator_prediction(
     else:
         with httpx.Client(timeout=timeout_seconds) as client:
             resp = client.post(target, headers=headers, content=body_text)
-    resp.raise_for_status()
+    if resp.is_error:
+        raise RuntimeError(
+            f"validator prediction submit failed ({resp.status_code}): {_http_error_detail(resp)}"
+        )
     raw = resp.json()
     if not isinstance(raw, dict):
         raise RuntimeError("validator prediction submit response must be a JSON object")
@@ -238,6 +241,23 @@ def submit_validator_prediction(
         return SubmitPredictionResponse.model_validate(raw)
     except ValidationError as exc:
         raise RuntimeError(f"invalid validator prediction submit response: {exc}") from exc
+
+
+def _http_error_detail(resp: httpx.Response) -> str:
+    text = (resp.text or "")[:4000]
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            if "detail" in data:
+                return str(data["detail"])
+            if "message" in data:
+                return str(data["message"])
+            if "reason" in data:
+                return str(data["reason"])
+            return json.dumps(data, ensure_ascii=False)
+    except json.JSONDecodeError:
+        pass
+    return text or "(empty body)"
 
 
 def _canonical_json(value: Any) -> str:

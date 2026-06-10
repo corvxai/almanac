@@ -21,16 +21,70 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.gateway.providers.base import BaseProvider
 from src.gateway.signing import verify_request_headers
+from src.gateway.validator_protocol import verify_validator_completions_request
 
 logger = logging.getLogger("arcratio.gateway")
 
 app = FastAPI(title="Arcratio Provider Gateway", version="0.1.0")
 
 _providers: dict[str, BaseProvider] = {}
+_seen_validator_nonces: dict[tuple[str, str], int] = {}
+_NONCE_TTL_MS = 10 * 60 * 1000
+
+_PROVIDER_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "claude": {
+        "models": ["claude-sonnet-4-6"],
+        "allowsAnyModel": False,
+        "defaultCallType": "messages",
+        "supportsCompletions": True,
+    },
+    "openrouter": {
+        "models": [],
+        "allowsAnyModel": True,
+        "defaultCallType": "chat_completion",
+        "supportsCompletions": True,
+    },
+    "openai": {
+        "models": [],
+        "allowsAnyModel": True,
+        "defaultCallType": "chat_completion",
+        "supportsCompletions": True,
+    },
+    "grok": {
+        "models": [],
+        "allowsAnyModel": True,
+        "defaultCallType": "chat_completion",
+        "supportsCompletions": True,
+    },
+    "gemini": {
+        "models": [],
+        "allowsAnyModel": True,
+        "defaultCallType": "generate_content",
+        "supportsCompletions": True,
+    },
+    "perplexity": {
+        "models": [],
+        "allowsAnyModel": True,
+        "defaultCallType": "chat_completion",
+        "supportsCompletions": True,
+    },
+    "polymarket": {
+        "models": [],
+        "allowsAnyModel": False,
+        "defaultCallType": "get_market",
+        "supportsCompletions": False,
+    },
+    "web_search": {
+        "models": [],
+        "allowsAnyModel": False,
+        "defaultCallType": "search",
+        "supportsCompletions": False,
+    },
+}
 
 
 class CallRequest(BaseModel):
@@ -44,6 +98,19 @@ class CallResponse(BaseModel):
     call_type: str
     data: dict[str, Any]
     latency_ms: int
+
+
+class ValidatorCompletionsRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    provider: str
+    model: str | None = None
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    maxTokens: int | None = None
+    temperature: float | None = None
+    topP: float | None = None
+    stop: list[str] = Field(default_factory=list)
+    callType: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 def register_provider(provider: BaseProvider) -> None:
@@ -75,17 +142,22 @@ def list_gateway_providers() -> dict[str, list[dict[str, Any]]]:
     provider_ids = sorted(_providers.keys())
     rows: list[dict[str, Any]] = []
     for provider_id in provider_ids:
-        models: list[str] = []
-        allows_any_model = False
-        if provider_id == "claude":
-            models = ["claude-sonnet-4-6"]
-        if provider_id == "openrouter":
-            allows_any_model = True
+        caps = _PROVIDER_CAPABILITIES.get(
+            provider_id,
+            {
+                "models": [],
+                "allowsAnyModel": True,
+                "defaultCallType": "chat_completion",
+                "supportsCompletions": True,
+            },
+        )
         rows.append(
             {
                 "id": provider_id,
-                "models": models,
-                "allowsAnyModel": allows_any_model,
+                "models": list(caps["models"]),
+                "allowsAnyModel": bool(caps["allowsAnyModel"]),
+                "defaultCallType": str(caps["defaultCallType"]),
+                "supportsCompletions": bool(caps["supportsCompletions"]),
             }
         )
     return {"providers": rows}
@@ -140,3 +212,120 @@ async def proxy_call(request: Request) -> CallResponse:
         data=data,
         latency_ms=latency_ms,
     )
+
+
+@app.post("/v1/gateway/validator/completions")
+async def validator_completions(request: Request) -> dict[str, Any]:
+    body_bytes = await request.body()
+    try:
+        req = ValidatorCompletionsRequest.model_validate_json(body_bytes)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    miner_hotkey_header = _header(request.headers, "x-miner-hotkey")
+    if not miner_hotkey_header:
+        raise HTTPException(status_code=401, detail="missing x-miner-hotkey")
+    if isinstance(req.params, dict) and "minerHotkey" in req.params:
+        raise HTTPException(status_code=400, detail="minerHotkey is not allowed in body params")
+    try:
+        raw_obj = await request.json()
+        if isinstance(raw_obj, dict) and "minerHotkey" in raw_obj:
+            raise HTTPException(status_code=400, detail="minerHotkey is forbidden in body")
+    except HTTPException:
+        raise
+    except Exception:
+        # JSON parse already validated above through pydantic; ignore defensive parse failures.
+        pass
+
+    verification = verify_validator_completions_request(request.headers, body_bytes)
+    if _require_signature() and not verification.verified:
+        raise HTTPException(
+            status_code=401,
+            detail=verification.reason or "invalid signature",
+        )
+    _check_replay(verification)
+
+    provider = _providers.get(req.provider)
+    if provider is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Unknown provider '{req.provider}'. Available: {sorted(_providers.keys())}",
+        )
+
+    caps = _PROVIDER_CAPABILITIES.get(
+        req.provider,
+        {
+            "defaultCallType": "chat_completion",
+            "supportsCompletions": True,
+        },
+    )
+    supports_completions = bool(caps.get("supportsCompletions", True))
+
+    params = req.params if isinstance(req.params, dict) else {}
+    if not params:
+        params = {
+            "model": req.model,
+            "messages": req.messages,
+            "max_tokens": req.maxTokens,
+            "temperature": req.temperature,
+            "top_p": req.topP,
+            "stop": req.stop,
+        }
+        params = {k: v for k, v in params.items() if v is not None}
+    if not supports_completions and not req.callType:
+        raise HTTPException(
+            status_code=400,
+            detail=f"provider '{req.provider}' requires callType/params in validator completions payload",
+        )
+
+    call_type = req.callType or str(caps.get("defaultCallType") or _infer_default_call_type(req.provider))
+    t0 = time.monotonic()
+    try:
+        data = provider.call(call_type, params)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    return {
+        "provider_id": req.provider,
+        "call_type": call_type,
+        "data": data,
+        "latency_ms": latency_ms,
+    }
+
+
+def _infer_default_call_type(provider_id: str) -> str:
+    defaults = {
+        "claude": "messages",
+        "openrouter": "chat_completion",
+        "openai": "chat_completion",
+        "grok": "chat_completion",
+        "gemini": "generate_content",
+        "perplexity": "chat_completion",
+        "polymarket": "get_market",
+        "web_search": "search",
+    }
+    return defaults.get(provider_id, "chat_completion")
+
+
+def _check_replay(verification) -> None:  # noqa: ANN001
+    if not verification.verified:
+        return
+    if not verification.validator_hotkey or not verification.nonce:
+        return
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - _NONCE_TTL_MS
+    stale_keys = [k for k, ts in _seen_validator_nonces.items() if ts < cutoff]
+    for key in stale_keys:
+        _seen_validator_nonces.pop(key, None)
+    key = (verification.validator_hotkey, verification.nonce)
+    if key in _seen_validator_nonces:
+        raise HTTPException(status_code=401, detail="replayed nonce")
+    _seen_validator_nonces[key] = verification.timestamp_ms or now_ms
+
+
+def _header(headers: Any, name: str) -> str | None:
+    lower = name.lower()
+    for k, v in headers.items():
+        if str(k).lower() == lower:
+            return str(v)
+    return None

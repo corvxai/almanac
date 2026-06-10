@@ -93,7 +93,6 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert prediction["outcomeProbabilities"]["oid_no"] == 0.2
     assert prediction["confidence"] == pytest.approx(0.9)
     assert prediction["executionMetadata"]["model"] == "claude-sonnet-4-6"
-    assert prediction["executionMetadata"]["provider"] == "claude"
     assert prediction["executionMetadata"]["latencyMs"] == 1234
     assert prediction["executionMetadata"]["predictionIsInvalid"] is False
     assert prediction["executionMetadata"]["predictionInvalidReason"] is None
@@ -102,6 +101,8 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert payload["reasoningTrace"]["modelMetadata"]["provider"] == "claude"
     assert payload["reasoningTrace"]["modelMetadata"]["model"] == "claude-sonnet-4-6"
     assert payload["reasoningTrace"]["schemaVersion"] == "1.0"
+    assert payload["reasoningTrace"]["traceSummary"]["strategy"] == "validator-assignment-pipeline"
+    assert isinstance(payload["reasoningTrace"]["trace"]["steps"], list)
 
 
 def test_build_sandbox_assignment_agent_sets_inline_code_attrs() -> None:

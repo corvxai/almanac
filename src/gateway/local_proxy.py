@@ -33,10 +33,12 @@ from src.core.schemas import ProviderCall, ProviderTier
 from src.gateway.client import _DEFAULT_TIERS  # type: ignore[attr-defined]
 from src.gateway.constants import gateway_service_url
 from src.gateway.gateway import build_provider_call_record, default_summarise_params
-from src.gateway.signing import LoadedKeypair, load_hotkey, sign_request
+from src.gateway.signing import LoadedKeypair, load_hotkey
 from src.gateway.track_config import is_provider_allowed
+from src.gateway.validator_protocol import canonical_json, sign_validator_completions_request
 
 logger = logging.getLogger("arcratio.local_proxy")
+_NON_COMPLETIONS_PROVIDERS = {"polymarket", "web_search"}
 
 
 # ---------------------------------------------------------------------------
@@ -47,11 +49,12 @@ logger = logging.getLogger("arcratio.local_proxy")
 class _RunState:
     """Per-run state held by the proxy."""
 
-    __slots__ = ("run_id", "track", "calls", "call_counter", "lock")
+    __slots__ = ("run_id", "track", "miner_hotkey", "calls", "call_counter", "lock")
 
-    def __init__(self, run_id: str, track: str) -> None:
+    def __init__(self, run_id: str, track: str, miner_hotkey: str | None = None) -> None:
         self.run_id = run_id
         self.track = track
+        self.miner_hotkey = miner_hotkey
         self.calls: list[ProviderCall] = []
         self.call_counter = 0
         self.lock = threading.Lock()
@@ -90,7 +93,13 @@ class LocalProxyState:
         """Load the validator's hotkey. Called once on FastAPI startup."""
         self._loaded_keypair = load_hotkey(self._cfg.bittensor)
 
-    def register_run(self, run_id: UUID | str, track: str = "MAIN") -> None:
+    def register_run(
+        self,
+        run_id: UUID | str,
+        track: str = "MAIN",
+        *,
+        miner_hotkey: str | None = None,
+    ) -> None:
         """Allow the proxy to accept calls tagged with this `run_id`.
 
         Idempotent: re-registering an existing run updates the track. The
@@ -99,7 +108,7 @@ class LocalProxyState:
         """
         rid = str(run_id)
         with self._lock:
-            self._runs[rid] = _RunState(rid, track)
+            self._runs[rid] = _RunState(rid, track, miner_hotkey)
 
     def pop_calls(self, run_id: UUID | str) -> list[ProviderCall]:
         """Drain and remove the run's call log."""
@@ -194,6 +203,15 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
         provider_id = body.get("provider_id")
         call_type = body.get("call_type")
         params = body.get("params", {}) or {}
+        miner_hotkey_override = body.get("minerHotkey")
+        if not isinstance(miner_hotkey_override, str) or not miner_hotkey_override.strip():
+            miner_hotkey_override = (
+                params.get("minerHotkey")
+                if isinstance(params, dict)
+                and isinstance(params.get("minerHotkey"), str)
+                and str(params.get("minerHotkey")).strip()
+                else None
+            )
 
         if not isinstance(provider_id, str) or not isinstance(call_type, str):
             raise HTTPException(status_code=400, detail="provider_id and call_type are required strings")
@@ -212,7 +230,72 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
                 detail=f"provider '{provider_id}' not allowed under track '{run.track}'",
             )
 
-        return _forward_and_record(state, run, body_bytes, body, provider_id, call_type, params)
+        return _forward_and_record(
+            state,
+            run,
+            provider_id=provider_id,
+            call_type=call_type,
+            params=params,
+            completion_payload=None,
+            miner_hotkey_override=miner_hotkey_override,
+        )
+
+    @app.post("/v1/gateway/validator/completions")
+    async def _v1_gateway_validator_completions(
+        request: Request,
+        x_run_id: str = Header(default=""),
+    ) -> dict[str, Any]:
+        if not x_run_id:
+            raise HTTPException(status_code=401, detail="missing X-Run-Id header")
+
+        run = state._get_run(x_run_id)  # noqa: SLF001
+        if run is None:
+            raise HTTPException(status_code=401, detail=f"unknown run_id '{x_run_id}'")
+
+        body_bytes = await request.body()
+        try:
+            body = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"invalid json body: {exc}")
+
+        provider_id = body.get("provider")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise HTTPException(status_code=400, detail="provider is required")
+        provider_id = provider_id.strip()
+        miner_hotkey_override = body.get("minerHotkey")
+        if not isinstance(miner_hotkey_override, str) or not miner_hotkey_override.strip():
+            miner_hotkey_override = None
+        call_type = body.get("callType")
+        if not isinstance(call_type, str) or not call_type.strip():
+            call_type = _default_call_type(provider_id)
+        params = body.get("params", {}) or {}
+        if not isinstance(params, dict):
+            raise HTTPException(status_code=400, detail="params must be an object when provided")
+        if not params:
+            params = _params_from_completions_payload(body)
+
+        if not is_provider_allowed(run.track, provider_id):
+            logger.warning(
+                "Run %s (track=%s) attempted disallowed provider '%s'",
+                run.run_id,
+                run.track,
+                provider_id,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=f"provider '{provider_id}' not allowed under track '{run.track}'",
+            )
+
+        completion_payload = dict(body) if isinstance(body, dict) else {}
+        return _forward_and_record(
+            state,
+            run,
+            provider_id=provider_id,
+            call_type=call_type,
+            params=params,
+            completion_payload=completion_payload,
+            miner_hotkey_override=miner_hotkey_override,
+        )
 
     return app
 
@@ -220,26 +303,59 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
 def _forward_and_record(
     state: LocalProxyState,
     run: _RunState,
-    body_bytes: bytes,
-    body: dict[str, Any],
+    *,
     provider_id: str,
     call_type: str,
     params: dict[str, Any],
+    completion_payload: dict[str, Any] | None,
+    miner_hotkey_override: str | None = None,
 ) -> dict[str, Any]:
     """Sign the outbound POST, forward upstream, build a `ProviderCall`."""
-    upstream = f"{gateway_service_url()}/v1/call"
-    headers = {"Content-Type": "application/json"}
+    upstream = f"{gateway_service_url()}/v1/gateway/validator/completions"
+    miner_hotkey = miner_hotkey_override or run.miner_hotkey
+    if not isinstance(miner_hotkey, str) or not miner_hotkey.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "missing miner hotkey for gateway billing context; "
+                "register run with miner_hotkey or include minerHotkey in request body"
+            ),
+        )
+    miner_hotkey = miner_hotkey.strip()
+    completion_payload = dict(completion_payload or {})
+    completion_payload.setdefault("provider", provider_id)
+    completion_payload.setdefault("model", params.get("model", ""))
+    completion_payload.setdefault(
+        "messages",
+        params.get("messages", [{"role": "user", "content": default_summarise_params(call_type, params)}]),
+    )
+    completion_payload.setdefault("maxTokens", params.get("maxTokens", params.get("max_tokens", 1024)))
+    completion_payload.setdefault("temperature", params.get("temperature", 1))
+    completion_payload.setdefault("topP", params.get("topP", params.get("top_p", 1)))
+    completion_payload.setdefault("stop", params.get("stop", []))
+    completion_payload.pop("minerHotkey", None)
+    if provider_id in _NON_COMPLETIONS_PROVIDERS:
+        completion_payload.setdefault("callType", call_type)
+        completion_payload.setdefault("params", params)
+    outbound_text = canonical_json(completion_payload)
+    outbound_bytes = outbound_text.encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "x-miner-hotkey": miner_hotkey,
+    }
     headers.update(
-        sign_request(
-            state.loaded_keypair,
-            body_bytes,
-            netuid=state.cfg.bittensor.netuid,
+        sign_validator_completions_request(
+            loaded=state.loaded_keypair,
+            payload=completion_payload,
+            miner_hotkey=miner_hotkey,
+            method="POST",
+            path_and_query="/v1/gateway/validator/completions",
         )
     )
 
     t0 = time.monotonic()
     try:
-        resp = state.http_client.post(upstream, content=body_bytes, headers=headers)
+        resp = state.http_client.post(upstream, content=outbound_bytes, headers=headers)
     except httpx.RequestError as exc:
         logger.exception("Upstream request to %s failed", upstream)
         raise HTTPException(status_code=502, detail=f"upstream unreachable: {exc}")
@@ -254,9 +370,24 @@ def _forward_and_record(
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=502, detail=f"upstream non-json response: {exc}")
 
-    raw_response = upstream_payload.get("data", {})
+    _maybe_log_proxy_raw_response(
+        state,
+        provider_id=provider_id,
+        call_type=call_type,
+        value=upstream_payload,
+        label="upstream_payload",
+    )
+    raw_response = upstream_payload.get("data", upstream_payload)
+    if raw_response is not upstream_payload:
+        _maybe_log_proxy_raw_response(
+            state,
+            provider_id=provider_id,
+            call_type=call_type,
+            value=raw_response,
+            label="upstream_data",
+        )
     if not isinstance(raw_response, dict):
-        raise HTTPException(status_code=502, detail="upstream payload missing 'data' object")
+        raise HTTPException(status_code=502, detail="upstream payload missing response object")
 
     tier = _DEFAULT_TIERS.get(provider_id, ProviderTier.INFERENCE)
     summary = default_summarise_params(call_type, params)
@@ -286,6 +417,33 @@ def _forward_and_record(
     }
 
 
+def _default_call_type(provider_id: str) -> str:
+    defaults = {
+        "claude": "messages",
+        "openrouter": "chat_completion",
+        "openai": "chat_completion",
+        "grok": "chat_completion",
+        "gemini": "generate_content",
+        "perplexity": "chat_completion",
+        "polymarket": "get_market",
+        "web_search": "search",
+    }
+    return defaults.get(provider_id, "chat_completion")
+
+
+def _params_from_completions_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    params = {
+        "model": payload.get("model"),
+        "messages": payload.get("messages"),
+        "max_tokens": payload.get("maxTokens"),
+        "temperature": payload.get("temperature"),
+        "top_p": payload.get("topP"),
+        "stop": payload.get("stop"),
+        "minerHotkey": payload.get("minerHotkey"),
+    }
+    return {k: v for k, v in params.items() if v is not None}
+
+
 def _extract_upstream_detail(resp: httpx.Response) -> str:
     text = (resp.text or "")[:1000]
     try:
@@ -295,6 +453,39 @@ def _extract_upstream_detail(resp: httpx.Response) -> str:
     except json.JSONDecodeError:
         pass
     return text or "(empty body)"
+
+
+def _maybe_log_proxy_raw_response(
+    state: LocalProxyState,
+    *,
+    provider_id: str,
+    call_type: str,
+    value: Any,
+    label: str,
+) -> None:
+    if not state.cfg.gateway.debug_log_raw_response:
+        return
+    text = json.dumps(value, sort_keys=True, default=str)
+    max_chars = max(0, int(state.cfg.gateway.debug_raw_response_max_chars))
+    if max_chars > 0 and len(text) > max_chars:
+        logger.warning(
+            "Local proxy raw response debug provider=%s call_type=%s label=%s size=%d truncated=true payload=%s...(truncated %d chars)",
+            provider_id,
+            call_type,
+            label,
+            len(text),
+            text[:max_chars],
+            len(text) - max_chars,
+        )
+        return
+    logger.warning(
+        "Local proxy raw response debug provider=%s call_type=%s label=%s size=%d truncated=false payload=%s",
+        provider_id,
+        call_type,
+        label,
+        len(text),
+        text,
+    )
 
 
 def _registered_count(state: LocalProxyState) -> int:
