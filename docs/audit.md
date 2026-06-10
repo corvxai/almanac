@@ -64,6 +64,26 @@ default seccomp profile.
 >
 > A finding-by-finding status table for this pass is in **§12**.
 
+> **Third-pass update (2026-06-10).** A further review was run after the
+> `origin/assignment_pipeline` sync (which refactored the orchestrator
+> assignment flow into `src/validator/assignment_pipeline.py`). It found a
+> set of **new findings the first two passes missed** — including two
+> payout-correctness bugs in the Almanac scoring path — and several were
+> remediated in a non-breaking patch this pass. The most consequential:
+>
+> - **Two latent payout bugs in Almanac scoring (now fixed).** A
+>   case-sensitivity bug falsely flagged legitimate miners as multi-profile
+>   and zeroed their weight; an unguarded division crashed the entire
+>   weight-setting step on a zero-fee epoch. See **N1** and **N2**.
+> - **Gateway error responses leaked upstream provider bodies** verbatim to
+>   callers (potential secret/identifier exposure), and validation errors
+>   leaked schema internals. Both sanitised this pass. See **N3**.
+> - **The leaked DB credential (C9) is confirmed still reachable in git
+>   history** (`git show 67a949a:.../storage.env`); the scrub remains
+>   outstanding.
+>
+> New findings and the remediation log for this pass are in **§13**.
+
 ---
 
 ## 2. Architecture as understood
@@ -837,3 +857,153 @@ Deferred deliberately (need an environment this pass lacks): C10 (Postgres
 pool/rollback/migrations — needs a live PG + bittensor), `cvxpy`/`ecos`
 pinning (needs a full resolve), and the larger gateway/orchestrator work
 (C3/C4/C6, H9/H10) which is feature work, not a non-breaking patch.
+
+---
+
+## 13. Third pass — new findings + remediation (2026-06-10)
+
+Run after the `origin/assignment_pipeline` sync. That sync refactored the
+orchestrator-assignment flow out of `validator.py` into
+`src/validator/assignment_pipeline.py`; the load-bearing safety guard was
+re-verified intact (`assignment_pipeline.py:274` still refuses to execute
+orchestrator-supplied agent code unless `sandbox_type` is docker-based, and
+the untrusted `exec()` only ever runs inside the sandbox container, never the
+validator process). The sync also renamed the inline payload key
+`agent_class` → `inline_class` and added the `/v1/gateway/providers` catalog
+endpoint used by the miner upload flow.
+
+This pass found new issues the first two passes missed and remediated the
+non-breaking subset. Findings are numbered N1–N8 to avoid colliding with the
+existing C/H/M scheme.
+
+### 13.1 New findings
+
+#### N1. Almanac profile-id matching had a case-sensitivity bug that zeroed legitimate miners (PAYOUT)
+
+**Severity: high — fixed this pass.** `scoring.py` (~line 324) stored the
+first eligible trade's profile id lowercased
+(`miner_profiles[miner_id] = trade["profile_id"].lower()`) but compared
+subsequent trades against the **raw, non-lowercased** value
+(`elif miner_profiles[miner_id] != trade["profile_id"]`). Any miner whose
+profile id contained an uppercase character had every trade after the first
+"mismatch", get comma-appended, and then be flagged as multi-profile by the
+comma check in `loop.py` — which sets that miner's weight to **0**. A
+legitimate miner with a mixed-case profile id and ≥2 trades was silently
+zeroed every epoch. Fixed: compare lowercase-to-lowercase and dedupe against
+the already-recorded ids, so genuine multi-profile is still detected but the
+false positive is gone.
+
+#### N2. Unguarded division crashes weight-setting on a zero-fee epoch (PAYOUT)
+
+**Severity: critical — fixed this pass.** `calculate_weights` in `scoring.py`
+divided each miner's tokens and the dynamic general-pool tokens by
+`total_epoch_budget` (~lines 1340, 1367) with no zero guard. An epoch with no
+qualifying fees (`total_epoch_budget == 0`) raised `ZeroDivisionError` and
+crashed the entire weight-setting step, so **no weights were committed on
+chain** that epoch. Fixed: guard both divisions, falling back to `0.0` weight
+when the budget is non-positive. (The `scale_factor` divisions at ~1236/1294,
+flagged by an automated reviewer, were verified **already safe** — their
+enclosing `if total_tokens > budget` guarantees `total_tokens > 0`.)
+
+#### N3. Gateway leaked upstream provider bodies and schema internals to callers
+
+**Severity: high — fixed this pass.** `src/gateway/server.py` returned
+`detail=str(exc)` on the 502 (provider-call-failed) path; the Claude and
+OpenRouter adapters embed `resp.text[:2000]` from the upstream response in
+that exception (`providers/claude.py:83`, `providers/openrouter.py:99`), so a
+raw upstream error body — potentially carrying rate-limit headers, internal
+ids, or secrets — was relayed verbatim to the (currently unauthenticated)
+caller. The 422 path likewise leaked full Pydantic validation detail. Fixed:
+both paths now log the full error server-side and return a generic message
+(`upstream provider '<id>' call failed` / `invalid request body`). Verified a
+synthetic `sk-…` secret in an upstream error reaches only the server log,
+never the HTTP response.
+
+#### N4. Gateway had no request-body size limit (DoS)
+
+**Severity: medium — fixed this pass.** `/v1/call` buffered the full request
+body in memory before parsing with no cap. Fixed: reject bodies over 1 MiB
+(via declared `Content-Length` and actual read length) with a 413.
+
+#### N5. Gateway netuid claim was signed but never enforced
+
+**Severity: high — partially addressed this pass.** The signing canonical
+form includes `netuid`, but even with `REQUIRE_SIGNATURE=true` the server
+never checked the claimed netuid against the operator's subnet — a valid
+signature from a hotkey on *any* subnet would pass (the metagraph-membership
+check itself remains C6 feature work). Added an optional `GATEWAY_NETUID`
+pin: when set and signatures are required, a signed request whose netuid does
+not match is rejected. Default-off, so no behaviour change until configured.
+
+#### N6. Unauthenticated `/health` disclosed gateway configuration
+
+**Severity: low — fixed this pass.** `/health` returned the provider list and
+the `require_signature` policy to any caller. Trimmed to `{"status": "ok"}`.
+
+#### N7. Agent stdout was buffered and JSON-scanned without a size cap (DoS)
+
+**Severity: medium — fixed this pass.** `sandbox_docker.py` read the
+untrusted agent container's entire stdout into memory and ran an O(n)
+backwards brace-scan (`_last_json_object`) plus a pydantic parse over it, with
+no ceiling (`mem_limit` bounds the agent, not the validator's read). A hostile
+agent could flood stdout to pressure the validator. Fixed: reject stdout over
+8 MiB before decoding/parsing. (The deeper fix — a streamed, capped read so
+the bytes are never fully buffered — is left as a follow-up.)
+
+#### N8. Proxy-socket directory created with umask-default permissions
+
+**Severity: medium — fixed this pass.** `validator.py`
+`_prepare_proxy_socket_path` created the UDS directory (and its `/tmp`
+fallback) with the process umask (typically `0o755`). That UDS lets its
+holder drive provider calls, so a world-traversable parent dir widens local
+access. Fixed: explicit `chmod 0o700` on both the primary and fallback
+directories.
+
+**Also surfaced, deferred to a deliberate decision (run_gateway bind):** the
+gateway still defaults to `--host 0.0.0.0`, which — combined with C3 (signing
+off by default) — is an open, unauthenticated proxy to the operator's
+provider keys on all interfaces. The default was **intentionally left as-is**
+this pass because the documented Docker dev flow relies on containers
+reaching the host gateway via `host.docker.internal`; flipping to loopback
+would silently break it. As a non-breaking interim, `run_gateway.py` now logs
+a loud warning when bound to a non-loopback address with `REQUIRE_SIGNATURE`
+off. Flipping the default to `127.0.0.1` (with `--host 0.0.0.0` documented for
+the container flow) remains a recommended follow-up.
+
+### 13.2 Remediation applied this pass (non-breaking, verified)
+
+Changes were made to the working tree (uncommitted — the maintainer handles
+commit/push). Each edited file byte-compiles; the gateway test suite still
+passes (32 passed / 13 skipped, unchanged from baseline); the gateway
+hardening and the scoring logic were verified with targeted checks. As in
+prior passes, the full validator/Almanac suites need `bittensor`+`cvxpy`
+(absent here), so those changes are compile- and logic-verified only.
+
+- **N1, N2 — payout bugs fixed.** `scoring.py`: lowercase-to-lowercase
+  profile-id compare with dedupe; zero-budget guards on both weight
+  divisions. `almanac/constants.py`: import-time range validation
+  (`[0, 1]`) on `EXCESS_MINER_TAKE_PERCENTAGE` and
+  `GENERAL_POOL_WEIGHT_PERCENTAGE` to prevent negative/over-unity burn
+  weights. Verified pass + reject paths in isolation.
+- **N3 — gateway error sanitisation.** 502 and 422 return generic messages;
+  full detail logged server-side. Verified no upstream secret reaches the
+  response body.
+- **N4 — gateway body cap.** 1 MiB limit → 413. Verified.
+- **N5 — optional netuid pin** (`GATEWAY_NETUID`). Verified it still rejects
+  unsigned requests and does not regress the existing signing test.
+- **N6 — `/health` trimmed** to `{"status": "ok"}`. Verified.
+- **N7 — sandbox stdout cap** (8 MiB) in `sandbox_docker.py`.
+- **N8 — `chmod 0o700`** on the proxy-socket dir + fallback in `validator.py`.
+- **run_gateway bind warning** (see N8 note above).
+
+### 13.3 Still outstanding after this pass
+
+- **C9 history scrub — confirmed still reachable.**
+  `git show 67a949a:src/validator/almanac/storage/storage.env` still returns
+  the plaintext password. Rotate the credential and `git filter-repo` +
+  coordinated force-push. Unchanged from §12.
+- **Dockerfile hardening + dependency lockfile** (validator image runs as
+  root; base images pinned by tag not digest; `cvxpy`/`ecos`/`requests`/
+  `fastapi`/`uvicorn` unpinned). These change the build and need a full
+  resolve/rebuild to validate, so they were not patched blind this pass.
+- **C3/C4/C6, H9/H10, C10** remain feature work as described in §5–§6.

@@ -30,6 +30,11 @@ logger = logging.getLogger("arcratio.gateway")
 
 app = FastAPI(title="Arcratio Provider Gateway", version="0.1.0")
 
+# Max accepted request body for /v1/call. The body is buffered fully in
+# memory before parsing, so without a cap a single large POST can OOM the
+# gateway. 1 MiB is far above any legitimate provider-call payload.
+MAX_BODY_BYTES = 1_048_576
+
 _providers: dict[str, BaseProvider] = {}
 
 
@@ -56,13 +61,29 @@ def _require_signature() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _expected_netuid() -> int | None:
+    """The netuid this gateway serves, if pinned via env.
+
+    When set (and signatures are required), a signed request whose claimed
+    netuid does not match is rejected. This binds a hotkey's authorisation to
+    *our* subnet — without it, a valid signature from a hotkey on any other
+    subnet would pass. Unset (the default) preserves current behaviour.
+    """
+    raw = os.environ.get("GATEWAY_NETUID", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("GATEWAY_NETUID=%r is not an integer; ignoring", raw)
+        return None
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "providers": ",".join(sorted(_providers.keys())),
-        "require_signature": _require_signature(),
-    }
+    # Intentionally minimal: this endpoint is unauthenticated, so it must not
+    # disclose configuration (provider list, signature policy) to callers.
+    return {"status": "ok"}
 
 
 @app.get("/providers")
@@ -93,20 +114,46 @@ def list_gateway_providers() -> dict[str, list[dict[str, Any]]]:
 
 @app.post("/v1/call", response_model=CallResponse)
 async def proxy_call(request: Request) -> CallResponse:
+    # Reject oversized bodies before buffering/parsing. Trust the declared
+    # Content-Length when present; otherwise enforce against the read bytes.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_BODY_BYTES:
+                raise HTTPException(status_code=413, detail="request body too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid Content-Length") from None
+
     body_bytes = await request.body()
+    if len(body_bytes) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="request body too large")
+
     try:
         req = CallRequest.model_validate_json(body_bytes)
     except Exception as exc:  # pydantic ValidationError or JSON parse error
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # Log the detail server-side; return a generic message so we don't
+        # echo schema internals / raw input back to unauthenticated callers.
+        logger.info("rejected malformed /v1/call body: %s", exc)
+        raise HTTPException(status_code=422, detail="invalid request body") from exc
 
     # Best-effort verification — logged only, never enforced in v1 unless
     # REQUIRE_SIGNATURE is set (intended for a follow-up rollout phase).
     verification = verify_request_headers(request.headers, body_bytes)
-    if _require_signature() and not verification.verified:
-        raise HTTPException(
-            status_code=401,
-            detail=f"signature required: {verification.reason or 'invalid'}",
-        )
+    if _require_signature():
+        if not verification.verified:
+            raise HTTPException(
+                status_code=401,
+                detail=f"signature required: {verification.reason or 'invalid'}",
+            )
+        expected_netuid = _expected_netuid()
+        if expected_netuid is not None and verification.netuid != expected_netuid:
+            logger.warning(
+                "rejected signed call: netuid %s != expected %s (hotkey=%s)",
+                verification.netuid,
+                expected_netuid,
+                verification.hotkey,
+            )
+            raise HTTPException(status_code=401, detail="signature netuid mismatch")
 
     provider = _providers.get(req.provider_id)
     if provider is None:
@@ -120,7 +167,19 @@ async def proxy_call(request: Request) -> CallResponse:
     try:
         data = provider.call(req.call_type, req.params)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Provider exceptions may embed raw upstream response bodies (which can
+        # carry rate-limit headers, internal identifiers, or — worst case —
+        # secrets). Log the full error server-side; return only the provider id.
+        logger.warning(
+            "provider call failed: provider=%s call_type=%s error=%s",
+            req.provider_id,
+            req.call_type,
+            exc,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"upstream provider '{req.provider_id}' call failed",
+        ) from exc
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     actor = verification.hotkey or "<unsigned>"

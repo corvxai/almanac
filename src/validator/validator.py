@@ -147,6 +147,13 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
     socket_dir = config.validator.sandbox_socket_dir
     socket_path = socket_dir / "proxy.sock"
     socket_dir.mkdir(parents=True, exist_ok=True)
+    # Restrict the proxy socket directory to the validator user. The UDS lets
+    # its holder drive provider calls; a world-traversable dir would let any
+    # local user connect. chmod explicitly since mkdir is subject to umask.
+    try:
+        os.chmod(socket_dir, 0o700)
+    except OSError as exc:
+        logger.warning("could not chmod proxy socket dir %s: %s", socket_dir, exc)
 
     if not socket_path.exists():
         return socket_path
@@ -157,6 +164,12 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
     except PermissionError:
         fallback_dir = Path("/tmp") / "arcratio" / str(os.getuid())
         fallback_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(fallback_dir, 0o700)
+        except OSError as chmod_exc:
+            logger.warning(
+                "could not chmod fallback proxy socket dir %s: %s", fallback_dir, chmod_exc
+            )
         fallback_socket_path = fallback_dir / "proxy.sock"
         if fallback_socket_path.exists():
             fallback_socket_path.unlink(missing_ok=True)

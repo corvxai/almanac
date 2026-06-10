@@ -66,3 +66,16 @@ BURN_UID = 210
 EXCESS_MINER_WEIGHT_UID = None
 EXCESS_MINER_MIN_WEIGHT = 0 # 0.00001 should be low enough if used
 EXCESS_MINER_TAKE_PERCENTAGE = 0 # percentage of the excess miner weight that is set to EXCESS_MINER_WEIGHT_UID. rest goes to BURN_UID.
+
+# --- Fail-fast validation of weight-distribution constants ---------------
+# These feed directly into on-chain weight setting. A value outside [0, 1]
+# silently produces negative or >1 burn/excess weights (corrupting payouts)
+# rather than erroring, so validate them at import time.
+if not 0.0 <= EXCESS_MINER_TAKE_PERCENTAGE <= 1.0:
+    raise ValueError(
+        f"EXCESS_MINER_TAKE_PERCENTAGE must be in [0, 1], got {EXCESS_MINER_TAKE_PERCENTAGE}"
+    )
+if not 0.0 <= GENERAL_POOL_WEIGHT_PERCENTAGE <= 1.0:
+    raise ValueError(
+        f"GENERAL_POOL_WEIGHT_PERCENTAGE must be in [0, 1], got {GENERAL_POOL_WEIGHT_PERCENTAGE}"
+    )
