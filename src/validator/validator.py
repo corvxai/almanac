@@ -24,7 +24,6 @@ mechanism is enabled.
 from __future__ import annotations
 
 import datetime
-import hashlib
 import math
 import logging
 import os
@@ -35,16 +34,23 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from uuid import NAMESPACE_URL, uuid5
 import numpy as np
 
-from src.agent.base import BaseAgent
 from src.core.config import AppConfig
 from src.core.schemas import EvidenceDigest
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
 from src.storage.json_store import JsonTraceStore
+from src.validator.assignment_pipeline import (
+    build_prediction_submit_payload,
+    build_sandbox_assignment_agent,
+    log_prediction_submit_invariants,
+    normalize_prediction_values,
+    process_single_assignment,
+    resolve_binary_outcome_ids,
+    trace_primary_model_info,
+)
 from src.validator.orchestrator import Orchestrator
 from src.validator.orchestrator_api import (
     OrchestratorAssignment,
@@ -52,20 +58,9 @@ from src.validator.orchestrator_api import (
     fetch_agent_event_assignment,
     submit_validator_prediction,
 )
-from src.validator.orchestrator_event_mapper import assignment_to_event
 from src.validator import scoring as arcratio_scoring
 
 logger = logging.getLogger("arcratio.validator")
-_MAX_ASSIGNMENT_AGENT_CODE_BYTES = 2 * 1024 * 1024  # 2MB
-_INVALID_PREDICTION_SENTINEL = 0.0
-_INVALID_CONFIDENCE_SENTINEL = 0.0
-
-
-class _InlineCodeSandboxAgent(BaseAgent):
-    """Host-side placeholder; real untrusted code runs in sandbox only."""
-
-    def predict(self, ctx):  # pragma: no cover
-        raise RuntimeError("Inline orchestrator agent code must run in sandbox")
 
 
 @dataclass
@@ -400,15 +395,6 @@ class Validator:
         self._handle_orchestrator_assignment(response.assignment)
 
     def _handle_orchestrator_assignment(self, assignment: OrchestratorAssignment) -> None:
-        try:
-            event = assignment_to_event(assignment)
-        except Exception:
-            logger.exception(
-                "Failed to map orchestrator assignment id=%s into internal Event.",
-                assignment.agentPredictionId,
-            )
-            return
-
         if not (assignment.event.description or "").strip():
             logger.info(
                 "Assignment id=%s has null/empty description; defaulted description to question.",
@@ -420,31 +406,6 @@ class Validator:
                 assignment.agentPredictionId,
                 assignment.event.marketId,
             )
-        if not self._config.validator.sandbox_type.startswith("docker"):
-            logger.error(
-                "Refusing orchestrator agent execution for assignment id=%s because "
-                "sandbox_type=%s is not docker-based.",
-                assignment.agentPredictionId,
-                self._config.validator.sandbox_type,
-            )
-            return
-
-        if not assignment.agent.code:
-            logger.warning(
-                "Assignment id=%s has no agent.code; skipping execution.",
-                assignment.agentPredictionId,
-            )
-            return
-
-        try:
-            agent = self._build_sandbox_assignment_agent(assignment)
-        except Exception:
-            logger.exception(
-                "Failed to prepare agent payload for assignment id=%s upload_id=%s.",
-                assignment.agentPredictionId,
-                assignment.agent.agentUploadId,
-            )
-            return
 
         try:
             orchestrator = self._get_assignment_orchestrator()
@@ -456,17 +417,22 @@ class Validator:
             return
 
         try:
-            digest = orchestrator.run_agent(event, agent)
+            result = process_single_assignment(
+                assignment=assignment,
+                config=self._config,
+                orchestrator=orchestrator,
+                loaded_hotkey=None,
+                submit_prediction=False,
+            )
         except Exception:
             logger.exception(
-                "Agent execution failed for assignment id=%s event_id=%s.",
+                "Failed to process assignment id=%s through shared pipeline.",
                 assignment.agentPredictionId,
-                event.event_id,
             )
             return
 
-        self._log_prediction_submit_invariants(assignment, digest)
-        submit_payload = self._build_prediction_submit_payload(assignment, digest)
+        log_prediction_submit_invariants(logger, assignment, result.digest)
+        submit_payload = result.submit_payload
         if self._orchestrator_hotkey is Validator._AUTO:
             self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
         if self._orchestrator_hotkey is None:
@@ -485,7 +451,7 @@ class Validator:
             logger.exception(
                 "Prediction submit failed for assignment id=%s execution_id=%s.",
                 assignment.agentPredictionId,
-                digest.execution_context.execution_id,
+                result.digest.execution_context.execution_id,
             )
             return
 
@@ -496,35 +462,14 @@ class Validator:
             assignment.status,
             assignment.miner.minerUid,
             assignment.event.source,
-            event.source_id,
-            event.event_id,
-            digest.execution_context.execution_id,
+            result.event.source_id,
+            result.event.event_id,
+            result.digest.execution_context.execution_id,
             ack.status,
         )
 
-    def _build_sandbox_assignment_agent(self, assignment: OrchestratorAssignment) -> BaseAgent:
-        code = assignment.agent.code or ""
-        code_bytes = code.encode("utf-8")
-        if not code_bytes:
-            raise RuntimeError("assignment agent.code is empty")
-        if len(code_bytes) > _MAX_ASSIGNMENT_AGENT_CODE_BYTES:
-            raise RuntimeError(
-                f"assignment code exceeds {_MAX_ASSIGNMENT_AGENT_CODE_BYTES} bytes"
-            )
-
-        computed_sha256 = hashlib.sha256(code_bytes).hexdigest().lower()
-        expected_sha256 = (assignment.agent.sha256 or "").strip().lower()
-        if expected_sha256 and computed_sha256 != expected_sha256:
-            raise RuntimeError(
-                "assignment agent code sha256 mismatch: "
-                f"expected={expected_sha256} computed={computed_sha256}"
-            )
-
-        agent = _InlineCodeSandboxAgent()
-        agent.agent_id = uuid5(NAMESPACE_URL, f"agent-upload:{assignment.agent.agentUploadId}")
-        agent.agent_version = assignment.agent.uploadedAt.isoformat()
-        setattr(agent, "_arcratio_agent_source_code", code)
-        return agent
+    def _build_sandbox_assignment_agent(self, assignment: OrchestratorAssignment):
+        return build_sandbox_assignment_agent(assignment)
 
     def _get_assignment_orchestrator(self) -> Orchestrator:
         if self._assignment_orchestrator is not None:
@@ -549,110 +494,16 @@ class Validator:
         assignment: OrchestratorAssignment,
         digest: EvidenceDigest,
     ) -> dict:
-        yes_id, no_id = self._resolve_binary_outcome_ids(assignment)
-        (
-            probability,
-            confidence,
-            is_valid_prediction,
-            invalid_reasons,
-            raw_observed,
-        ) = self._normalize_prediction_values(digest)
-        predicted_outcome_id = yes_id if probability >= 0.5 else no_id
-        outcome_probs = {
-            yes_id: round(probability, 6),
-            no_id: round(1.0 - probability, 6),
-        }
-        submitted_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        provider_id, model = self._trace_primary_model_info(digest)
-        invalid_reason = "; ".join(invalid_reasons) if invalid_reasons else None
-
-        return {
-            "agentPredictionId": assignment.agentPredictionId,
-            "prediction": {
-                "schemaVersion": "1.0",
-                "submittedAt": submitted_at,
-                "predictionType": "binary",
-                "predictedOutcomeId": predicted_outcome_id,
-                "confidence": confidence,
-                "outcomeProbabilities": outcome_probs,
-                "outcomePricesAtPrediction": assignment.event.currentOutcomePrices,
-                "marketSnapshot": {
-                    "source": assignment.event.source,
-                    "sourceMarketId": assignment.event.sourceMarketId
-                    or assignment.event.marketId,
-                    "capturedAt": submitted_at,
-                },
-                "executionMetadata": {
-                    "model": model,
-                    "latencyMs": digest.execution_context.execution_duration_ms,
-                    "provider": provider_id,
-                    "agentUploadId": assignment.agent.agentUploadId,
-                    "agentVersion": digest.execution_context.agent_version,
-                    "executionId": str(digest.execution_context.execution_id),
-                    "predictionIsInvalid": not is_valid_prediction,
-                    "predictionInvalidReason": invalid_reason,
-                    "predictionValidation": {
-                        "isValid": is_valid_prediction,
-                        "reasons": invalid_reasons,
-                        "rawObserved": raw_observed,
-                    },
-                },
-            },
-            "reasoningTrace": {
-                "schemaVersion": "1.0",
-                "trace": digest.model_dump(mode="json"),
-                "traceSummary": {
-                    "execution_id": str(digest.execution_context.execution_id),
-                    "reasoning_summary": digest.prediction_output.reasoning_summary,
-                    "provider_calls": len(digest.provider_calls),
-                },
-                "modelMetadata": {
-                    "provider": provider_id,
-                    "model": model,
-                    "agentUploadId": assignment.agent.agentUploadId,
-                    "agentSha256": assignment.agent.sha256,
-                },
-            },
-        }
+        return build_prediction_submit_payload(assignment, digest)
 
     def _trace_primary_model_info(self, digest: EvidenceDigest) -> tuple[str | None, str | None]:
-        for call in reversed(digest.provider_calls):
-            if call.model:
-                return call.provider_id, call.model
-        if digest.provider_calls:
-            return digest.provider_calls[-1].provider_id, None
-        return None, None
+        return trace_primary_model_info(digest)
 
     def _normalize_prediction_values(
         self,
         digest: EvidenceDigest,
     ) -> tuple[float, float, bool, list[str], dict[str, str]]:
-        reasons: list[str] = []
-        raw_observed = {
-            "prediction": repr(digest.prediction_output.final_probability),
-            "confidence": repr(digest.prediction_output.confidence),
-        }
-
-        probability = self._coerce_unit_interval(
-            digest.prediction_output.final_probability,
-            "prediction",
-            reasons,
-            fallback=_INVALID_PREDICTION_SENTINEL,
-        )
-
-        confidence_raw = digest.prediction_output.confidence
-        if confidence_raw is None:
-            reasons.append("confidence_missing")
-            confidence = _INVALID_CONFIDENCE_SENTINEL
-        else:
-            confidence = self._coerce_unit_interval(
-                confidence_raw,
-                "confidence",
-                reasons,
-                fallback=_INVALID_CONFIDENCE_SENTINEL,
-            )
-
-        return probability, confidence, len(reasons) == 0, reasons, raw_observed
+        return normalize_prediction_values(digest)
 
     def _coerce_unit_interval(
         self,
@@ -680,70 +531,10 @@ class Validator:
         assignment: OrchestratorAssignment,
         digest: EvidenceDigest,
     ) -> None:
-        prob, conf, is_valid, reasons, _raw = self._normalize_prediction_values(digest)
-        if not is_valid:
-            logger.warning(
-                "Assignment id=%s prediction normalization applied: reasons=%s",
-                assignment.agentPredictionId,
-                ",".join(reasons),
-            )
-        if prob < 0.0 or prob > 1.0:
-            logger.warning(
-                "Assignment id=%s prediction out of range [0,1]: %s",
-                assignment.agentPredictionId,
-                prob,
-            )
-
-        if conf is not None and (float(conf) < 0.0 or float(conf) > 1.0):
-            logger.warning(
-                "Assignment id=%s confidence out of range [0,1]: %s",
-                assignment.agentPredictionId,
-                conf,
-            )
-
-        implied_yes = prob
-        implied_no = 1.0 - prob
-        total = implied_yes + implied_no
-        if abs(total - 1.0) > 1e-6:
-            logger.warning(
-                "Assignment id=%s outcome probabilities do not sum to 1.0: total=%s",
-                assignment.agentPredictionId,
-                total,
-            )
+        log_prediction_submit_invariants(logger, assignment, digest)
 
     def _resolve_binary_outcome_ids(self, assignment: OrchestratorAssignment) -> tuple[str, str]:
-        outcomes = assignment.event.outcomes
-        if len(outcomes) < 2:
-            raise RuntimeError(
-                f"assignment {assignment.agentPredictionId} has fewer than 2 outcomes"
-            )
-
-        yes_id: str | None = None
-        no_id: str | None = None
-        for outcome in outcomes:
-            if not isinstance(outcome, dict):
-                continue
-            oid = outcome.get("outcomeId")
-            name = str(outcome.get("name", "")).strip().lower()
-            if not isinstance(oid, str) or not oid.strip():
-                continue
-            if name == "yes":
-                yes_id = oid
-            elif name == "no":
-                no_id = oid
-
-        if yes_id and no_id:
-            return yes_id, no_id
-
-        first = outcomes[0] if isinstance(outcomes[0], dict) else {}
-        second = outcomes[1] if isinstance(outcomes[1], dict) else {}
-        first_id = first.get("outcomeId")
-        second_id = second.get("outcomeId")
-        if not isinstance(first_id, str) or not isinstance(second_id, str):
-            raise RuntimeError(
-                f"assignment {assignment.agentPredictionId} outcomes missing outcomeId fields"
-            )
-        return first_id, second_id
+        return resolve_binary_outcome_ids(assignment)
 
     # ------------------------------------------------------------------
     # Per-epoch tick

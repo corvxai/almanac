@@ -72,7 +72,7 @@ def main() -> None:
     print("  ARCRATIO PROVIDER GATEWAY")
     print(f"  Listening on http://{args.host}:{args.port}")
     print(f"  Health:     http://localhost:{args.port}/health")
-    print(f"  Providers:  http://localhost:{args.port}/providers")
+    print(f"  Providers:  http://localhost:{args.port}/v1/gateway/providers")
     print("=" * 60)
     print()
 

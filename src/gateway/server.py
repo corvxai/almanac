@@ -70,6 +70,27 @@ def list_providers() -> dict[str, list[str]]:
     return {"providers": sorted(_providers.keys())}
 
 
+@app.get("/v1/gateway/providers")
+def list_gateway_providers() -> dict[str, list[dict[str, Any]]]:
+    provider_ids = sorted(_providers.keys())
+    rows: list[dict[str, Any]] = []
+    for provider_id in provider_ids:
+        models: list[str] = []
+        allows_any_model = False
+        if provider_id == "claude":
+            models = ["claude-sonnet-4-6"]
+        if provider_id == "openrouter":
+            allows_any_model = True
+        rows.append(
+            {
+                "id": provider_id,
+                "models": models,
+                "allowsAnyModel": allows_any_model,
+            }
+        )
+    return {"providers": rows}
+
+
 @app.post("/v1/call", response_model=CallResponse)
 async def proxy_call(request: Request) -> CallResponse:
     body_bytes = await request.body()

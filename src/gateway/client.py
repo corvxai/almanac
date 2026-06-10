@@ -115,9 +115,23 @@ def discover_providers(gateway_url: str | None = None) -> list[str]:
     """Ask the gateway which providers are available."""
     base = (gateway_url or gateway_service_url()).rstrip("/")
     with httpx.Client(timeout=10.0) as client:
-        resp = client.get(f"{base}/providers")
+        resp = client.get(f"{base}/v1/gateway/providers")
         resp.raise_for_status()
-        return resp.json()["providers"]
+        providers = resp.json().get("providers", [])
+        if not isinstance(providers, list):
+            raise RuntimeError("invalid gateway providers response: providers must be a list")
+
+        provider_ids: list[str] = []
+        for row in providers:
+            if isinstance(row, str):
+                provider_ids.append(row)
+                continue
+            if not isinstance(row, dict):
+                continue
+            provider_id = row.get("id")
+            if isinstance(provider_id, str) and provider_id.strip():
+                provider_ids.append(provider_id.strip())
+        return provider_ids
 
 
 def build_remote_providers(
