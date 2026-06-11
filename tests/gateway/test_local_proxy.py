@@ -178,6 +178,9 @@ class TestForwardingAndRecording:
         assert upstream["provider"] == "anthropic"
         assert "callType" not in upstream
         assert "params" not in upstream
+        assert "temperature" not in upstream
+        assert "topP" not in upstream
+        assert "maxTokens" not in upstream
 
     def test_new_completions_route_forwards_and_records(self, proxy_client):
         client, state, captured = proxy_client

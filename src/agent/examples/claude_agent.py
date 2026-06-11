@@ -14,6 +14,7 @@ gets full search results and per-sentence citation links.
 from __future__ import annotations
 
 import logging
+import re
 from uuid import UUID
 
 from src.agent.base import BaseAgent
@@ -66,23 +67,42 @@ def _parse_llm_output(text: str) -> tuple[float, float | None, str]:
     confidence = None
     reasoning = "No reasoning provided."
     for line in text.strip().split("\n"):
-        if line.startswith("PREDICTION:"):
+        cleaned = line.strip().strip("*`_ ").strip()
+        if cleaned.startswith("PREDICTION:"):
             try:
-                prediction = max(0.0, min(1.0, float(line.replace("PREDICTION:", "").strip())))
+                prediction = max(0.0, min(1.0, float(cleaned.replace("PREDICTION:", "").strip())))
             except ValueError:
                 pass
-        elif line.startswith("CONVICTION:"):
+        elif cleaned.startswith("CONVICTION:"):
             try:
-                confidence = max(0.0, min(1.0, float(line.replace("CONVICTION:", "").strip())))
+                confidence = max(0.0, min(1.0, float(cleaned.replace("CONVICTION:", "").strip())))
             except ValueError:
                 pass
-        elif line.startswith("REASONING:"):
-            reasoning = line.replace("REASONING:", "").strip()
+        elif cleaned.startswith("REASONING:"):
+            reasoning = cleaned.replace("REASONING:", "").strip()
+    if prediction == 0.5:
+        match = re.search(r"(?im)\bPREDICTION\b\s*:\s*([0-9]*\.?[0-9]+)", text)
+        if match:
+            try:
+                prediction = max(0.0, min(1.0, float(match.group(1))))
+            except ValueError:
+                pass
+    if confidence is None:
+        match = re.search(r"(?im)\b(?:CONVICTION|CONFIDENCE)\b\s*:\s*([0-9]*\.?[0-9]+)", text)
+        if match:
+            try:
+                confidence = max(0.0, min(1.0, float(match.group(1))))
+            except ValueError:
+                pass
+    if reasoning == "No reasoning provided.":
+        match = re.search(r"(?is)\bREASONING\b\s*:\s*(.+)$", text)
+        if match:
+            reasoning = match.group(1).strip()
     return prediction, confidence, reasoning
 
 
 def _extract_text_from_claude_response(raw: dict) -> str:
-    """Pull text from Claude's structured content blocks."""
+    """Pull text from Claude's structured content blocks or output text."""
     content = raw.get("content", [])
     if isinstance(content, str):
         return content
@@ -90,7 +110,12 @@ def _extract_text_from_claude_response(raw: dict) -> str:
     for block in content:
         if isinstance(block, dict) and block.get("type") == "text":
             parts.append(block.get("text", ""))
-    return "\n".join(parts)
+    if parts:
+        return "\n".join(parts)
+    output = raw.get("output")
+    if isinstance(output, str):
+        return output
+    return ""
 
 
 class ClaudeAgent(BaseAgent):

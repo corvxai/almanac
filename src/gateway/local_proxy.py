@@ -30,7 +30,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from src.core.config import AppConfig
 from src.core.schemas import ProviderCall, ProviderTier
-from src.gateway.client import _DEFAULT_TIERS  # type: ignore[attr-defined]
+from src.gateway.client import _DEFAULT_TIERS, optional_completions_fields
 from src.gateway.constants import gateway_service_url
 from src.gateway.gateway import build_provider_call_record, default_summarise_params
 from src.gateway.signing import LoadedKeypair, load_hotkey
@@ -324,15 +324,8 @@ def _forward_and_record(
     miner_hotkey = miner_hotkey.strip()
     completion_payload = dict(completion_payload or {})
     completion_payload.setdefault("provider", provider_id)
-    completion_payload.setdefault("model", params.get("model", ""))
-    completion_payload.setdefault(
-        "messages",
-        params.get("messages", [{"role": "user", "content": default_summarise_params(call_type, params)}]),
-    )
-    completion_payload.setdefault("maxTokens", params.get("maxTokens", params.get("max_tokens", 1024)))
-    completion_payload.setdefault("temperature", params.get("temperature", 1))
-    completion_payload.setdefault("topP", params.get("topP", params.get("top_p", 1)))
-    completion_payload.setdefault("stop", params.get("stop", []))
+    for key, value in optional_completions_fields(params).items():
+        completion_payload.setdefault(key, value)
     completion_payload.pop("minerHotkey", None)
     if provider_id in _NON_COMPLETIONS_PROVIDERS:
         completion_payload.setdefault("callType", call_type)
