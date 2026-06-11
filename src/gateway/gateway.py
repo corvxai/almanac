@@ -14,14 +14,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from src.core import constants
 from src.core.schemas import ProviderCall, ProviderTier, ResponseMeta, UsageMeta
 from src.gateway.cost_estimator import estimate_cost_usd
 from src.gateway.extractor import extract_evidence
 from src.gateway.providers.base import BaseProvider
+
+logger = logging.getLogger("arcratio.gateway")
 
 
 def default_summarise_params(call_type: str, params: dict[str, Any]) -> str:
@@ -53,6 +57,7 @@ def build_provider_call_record(
     `local_proxy` (validator-side proxy path) so the trace shape is identical
     regardless of whether the agent ran in-process or in a sandbox.
     """
+    _maybe_log_raw_response(provider_id=provider_id, call_type=call_type, raw_response=raw_response)
     raw_json = json.dumps(raw_response, sort_keys=True, default=str)
     raw_hash = hashlib.sha256(raw_json.encode()).hexdigest()
 
@@ -93,6 +98,30 @@ def build_provider_call_record(
         raw_response_hash=raw_hash,
         latency_ms=latency_ms,
         cost_units=cost_units,
+    )
+
+
+def _maybe_log_raw_response(*, provider_id: str, call_type: str, raw_response: dict[str, Any]) -> None:
+    if not constants.GATEWAY.debug_log_raw_response:
+        return
+    raw_json = json.dumps(raw_response, sort_keys=True, default=str)
+    max_chars = max(0, int(constants.GATEWAY.debug_raw_response_max_chars))
+    if max_chars > 0 and len(raw_json) > max_chars:
+        logger.warning(
+            "Gateway raw response debug provider=%s call_type=%s size=%d truncated=true payload=%s...(truncated %d chars)",
+            provider_id,
+            call_type,
+            len(raw_json),
+            raw_json[:max_chars],
+            len(raw_json) - max_chars,
+        )
+        return
+    logger.warning(
+        "Gateway raw response debug provider=%s call_type=%s size=%d truncated=false payload=%s",
+        provider_id,
+        call_type,
+        len(raw_json),
+        raw_json,
     )
 
 
@@ -165,11 +194,22 @@ class ProviderGateway:
             completion_tokens = _safe_int(usage.get("completion_tokens"))
             input_tokens = _safe_int(usage.get("input_tokens"))
             output_tokens = _safe_int(usage.get("output_tokens"))
+            # OpenRouter/other providers often use camelCase usage keys.
+            if prompt_tokens is None:
+                prompt_tokens = _safe_int(usage.get("promptTokens"))
+            if completion_tokens is None:
+                completion_tokens = _safe_int(usage.get("completionTokens"))
+            if input_tokens is None:
+                input_tokens = _safe_int(usage.get("inputTokens"))
+            if output_tokens is None:
+                output_tokens = _safe_int(usage.get("outputTokens"))
             if prompt_tokens is None and input_tokens is not None:
                 prompt_tokens = input_tokens
             if completion_tokens is None and output_tokens is not None:
                 completion_tokens = output_tokens
             total_tokens = _safe_int(usage.get("total_tokens"))
+            if total_tokens is None:
+                total_tokens = _safe_int(usage.get("totalTokens"))
             if total_tokens is None and prompt_tokens is not None and completion_tokens is not None:
                 total_tokens = prompt_tokens + completion_tokens
 
@@ -181,10 +221,14 @@ class ProviderGateway:
                 cached_tokens = _safe_int(prompt_details.get("cached_tokens"))
             if cached_tokens is None:
                 cached_tokens = _safe_int(usage.get("cache_read_input_tokens"))
+            if cached_tokens is None:
+                cached_tokens = _safe_int(usage.get("cacheReadInputTokens"))
             reasoning_tokens = None
             if isinstance(completion_details, dict):
                 reasoning_tokens = _safe_int(completion_details.get("reasoning_tokens"))
             cost = _safe_float(usage.get("cost"))
+            if cost is None:
+                cost = _safe_float(usage.get("costUsd"))
             if cost is None and isinstance(cost_details, dict):
                 cost = _safe_float(cost_details.get("upstream_inference_cost"))
 

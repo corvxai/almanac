@@ -55,6 +55,9 @@ class StorageDefaults:
 class GatewayDefaults:
     default_timeout_ms: int = 30_000
     max_retries: int = 2
+    debug_log_raw_response: bool = True
+    # 0 means "no truncation" when debug logging is enabled.
+    debug_raw_response_max_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,5 +86,7 @@ BITTENSOR = BittensorDefaults()
 STORAGE = StorageDefaults()
 GATEWAY = GatewayDefaults()
 VALIDATOR_LOOP = ValidatorLoopDefaults()
+ORCHESTRATOR_API_URL = "http://localhost:4000"
+GATEWAY_SERVICE_URL = "http://localhost:4000"
 LOG_LEVEL = "INFO"
 

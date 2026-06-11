@@ -98,22 +98,9 @@ class ClaudeAgent(BaseAgent):
     agent_version = "0.1.0"
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
-        # --- Phase 1: Market anchor ---
-        market_context = ""
-        try:
-            market = ctx.call_provider("polymarket", "get_market", {
-                "market_slug": ctx.event_title.lower().replace(" ", "-"),
-            })
-            price = market.get("price", 0.5)
-            volume = market.get("volume_24h", 0)
-            market_context = (
-                f"Polymarket implied probability: {price:.4f} "
-                f"(24h volume: ${volume:,.0f})"
-            )
-        except Exception:
-            pass
+        market_context = None
 
-        # --- Phase 2: Claude with web search ---
+        # --- Phase 1: Call Claude with web search tool ---
         messages = [
             {"role": "user", "content": _build_user_prompt(
                 ctx.event_title, ctx.event_description, market_context,

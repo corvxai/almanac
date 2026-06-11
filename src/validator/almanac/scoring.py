@@ -322,11 +322,12 @@ def build_epoch_history(
             is_reward_eligible = trade["is_reward_eligible"]
             # If the trade is reward eligible, add the profile id to the miner profiles
             if is_reward_eligible:
+                trade_profile_id = trade["profile_id"].lower()
                 if miner_id not in miner_profiles:
-                    miner_profiles[miner_id] = trade["profile_id"].lower()
-                elif miner_profiles[miner_id] != trade["profile_id"]:
+                    miner_profiles[miner_id] = trade_profile_id
+                elif trade_profile_id not in miner_profiles[miner_id].split(","):
                     # append additional profile ids to be validated later in the validator
-                    miner_profiles[miner_id] += f",{trade['profile_id'].lower()}"
+                    miner_profiles[miner_id] += f",{trade_profile_id}"
                 # Map the entity id to the account id only if the trade is reward eligible
                 if entity_id not in account_map:
                     account_map[entity_id] = account_id
@@ -1335,8 +1336,11 @@ def calculate_weights(
             miner_weights[miner_uid] = 0
             continue
         
-        # Calculate weight as percentage of total epoch budget
-        miner_weight = miner_tokens / total_epoch_budget
+        # Calculate weight as percentage of total epoch budget.
+        # Guard against a zero/negative budget (e.g. an epoch with no
+        # qualifying fees): without this the division raises and the entire
+        # weight-setting step crashes, so no weights are committed on chain.
+        miner_weight = (miner_tokens / total_epoch_budget) if total_epoch_budget > 0 else 0.0
         #bt.logging.info(f"Miner {miner_uid} tokens allocated: {miner_tokens:,.2f}, weight: {miner_weight:.4f}")
         #print(f"Miner {miner_uid} tokens allocated: {miner_tokens:,.2f}, weight: {miner_weight:.4f}")
         miner_weights[miner_uid] = miner_weight
@@ -1363,7 +1367,7 @@ def calculate_weights(
         print(f"General pool BURN_UID weight: {general_pool_weight:.4f} (static weighting: always {GENERAL_POOL_WEIGHT_PERCENTAGE * 100:.2f}% of total epoch budget)")
     else:
         # If dynamic weighting is enabled, the general pool weight is the percentage of the total epoch budget that the general pool tokens represent.
-        general_pool_weight = (total_general_pool_tokens / total_epoch_budget)
+        general_pool_weight = (total_general_pool_tokens / total_epoch_budget) if total_epoch_budget > 0 else 0.0
         #bt.logging.info(f"General pool BURN_UID weight: {general_pool_weight:.4f} (dynamic weighting: {total_general_pool_tokens:,.2f} / {total_epoch_budget:,.2f})")
         print(f"General pool BURN_UID weight: {general_pool_weight:.4f} (dynamic weighting: {total_general_pool_tokens:,.2f} / {total_epoch_budget:,.2f})")
 

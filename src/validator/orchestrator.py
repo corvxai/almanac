@@ -76,7 +76,13 @@ class Orchestrator:
     def validator_id(self) -> UUID:
         return self._config.validator.validator_id
 
-    def run_agent(self, event: Event, agent: BaseAgent) -> EvidenceDigest:
+    def run_agent(
+        self,
+        event: Event,
+        agent: BaseAgent,
+        *,
+        miner_hotkey: str | None = None,
+    ) -> EvidenceDigest:
         """Execute a single agent on a single event and return the sealed trace.
 
         The agent is a black box — it returns AgentResult (probability + reasoning).
@@ -104,7 +110,11 @@ class Orchestrator:
         market_baseline = self._collect_market_baseline(event)
 
         if is_docker:
-            self._local_proxy_state.register_run(execution_id, self._track)  # type: ignore[union-attr]
+            self._local_proxy_state.register_run(
+                execution_id,
+                self._track,
+                miner_hotkey=miner_hotkey,
+            )
 
         ts_start = datetime.now(timezone.utc)
         t0 = time.monotonic()

@@ -1,0 +1,10 @@
+# Optional dependencies for the Almanac validator's PostgreSQL storage backend
+# (src/validator/almanac/storage/postgres_validator_storage.py).
+#
+# This is OPTIONAL — the Postgres store is guarded by a try/except import and
+# the validator runs without it. Install only if you persist epoch scores to
+# Postgres:
+#   pip install -r requirements-almanac-postgres.txt
+#
+# python-dotenv is already in the base requirements.txt.
+psycopg2-binary>=2.9,<3

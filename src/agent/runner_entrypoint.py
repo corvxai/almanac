@@ -88,6 +88,28 @@ def _load_agent_class(module_name: str, class_name: str) -> type[BaseAgent]:
     return cls
 
 
+def _load_agent_class_from_code(code: str, class_name: str | None = None) -> type[BaseAgent]:
+    scope: dict[str, Any] = {}
+    exec(compile(code, "<orchestrator-agent>", "exec"), scope)  # noqa: S102
+    if class_name:
+        cls = scope.get(class_name)
+        if not isinstance(cls, type) or not issubclass(cls, BaseAgent):
+            raise RuntimeError(f"class '{class_name}' is not a BaseAgent subclass")
+        return cls
+    candidates = []
+    for obj in scope.values():
+        if isinstance(obj, type) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
+            candidates.append(obj)
+    if not candidates:
+        raise RuntimeError("no BaseAgent subclass found in inline agent_code")
+    if len(candidates) > 1:
+        names = ", ".join(sorted(c.__name__ for c in candidates))
+        raise RuntimeError(
+            f"multiple BaseAgent subclasses found in inline agent_code ({names})"
+        )
+    return candidates[0]
+
+
 def _read_stdin_payload() -> dict[str, Any]:
     raw = sys.stdin.read()
     if not raw.strip():
@@ -108,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
         "--input-file",
         default=None,
         help=(
-            "Optional path to a JSON file with the {event, agent_module, agent_class} "
+            "Optional path to a JSON file with the "
+            "{event, agent_module, agent_class} payload or "
+            "{event, agent_code, inline_class} payload. "
             "payload. Defaults to stdin."
         ),
     )
@@ -126,10 +150,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         event_dict = payload["event"]
-        agent_module = payload["agent_module"]
-        agent_class = payload["agent_class"]
     except KeyError as exc:
         raise RuntimeError(f"missing required payload key: {exc}") from exc
+
+    inline_code = payload.get("agent_code")
+    inline_class = payload.get("inline_class")
+    agent_module = payload.get("agent_module")
+    agent_class = payload.get("agent_class")
 
     run_id = os.environ.get("RUN_ID", "").strip()
     if not run_id:
@@ -138,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
     socket_path = _socket_path_from_env()
 
     event = Event.model_validate(event_dict)
-    cls = _load_agent_class(agent_module, agent_class)
+    if isinstance(inline_code, str) and inline_code.strip():
+        cls = _load_agent_class_from_code(inline_code, inline_class)
+    else:
+        if not isinstance(agent_module, str) or not isinstance(agent_class, str):
+            raise RuntimeError("missing agent loader keys: expected inline agent_code or agent_module+agent_class")
+        cls = _load_agent_class(agent_module, agent_class)
     agent = cls()
 
     client = _make_uds_client(socket_path, run_id)

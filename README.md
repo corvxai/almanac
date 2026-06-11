@@ -96,6 +96,23 @@ access (`docker.sock`) via Compose.
 docker compose build agent-runner validator
 ```
 
+> **Build for the architecture the validator will run on.** The validator
+> spawns the `agent-runner` image as sibling containers, and container images
+> are architecture-specific. An image built on an Apple Silicon (arm64) laptop
+> will not start on an amd64 Linux server, and vice versa. `docker compose
+> build` only builds for the builder's native arch. To target a specific
+> platform (e.g. building on a Mac for an amd64 server), use the arch-aware
+> wrappers, which set `--platform` explicitly and warn on cross-arch builds:
+>
+> ```bash
+> # Linux / macOS / WSL / Git-Bash
+> PLATFORM=linux/amd64 scripts/build_images.sh all
+> # Windows PowerShell
+> ./scripts/build_images.ps1 -Target all -Platform linux/amd64
+> ```
+>
+> Or pin Compose builds with `export DOCKER_DEFAULT_PLATFORM=linux/amd64`.
+
 ```bash
 docker compose run --rm validator \
   python scripts/run_validator.py \

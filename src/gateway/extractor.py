@@ -10,6 +10,7 @@ sophisticated (NLP, LLM-assisted) in later phases.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.core.schemas import EvidenceType, ExtractedEvidence, ExtractionMethod
@@ -112,18 +113,39 @@ def _parse_prediction_reasoning(
     confidence = None
     reasoning = None
     for line in text.strip().split("\n"):
-        if line.startswith("PREDICTION:"):
+        cleaned = line.strip().strip("*`_ ").strip()
+        if cleaned.startswith("PREDICTION:"):
             try:
-                prediction = float(line.replace("PREDICTION:", "").strip())
+                prediction = float(cleaned.replace("PREDICTION:", "").strip())
             except ValueError:
                 pass
-        elif line.startswith("CONVICTION:"):
+        elif cleaned.startswith("CONVICTION:"):
             try:
-                confidence = float(line.replace("CONVICTION:", "").strip())
+                confidence = float(cleaned.replace("CONVICTION:", "").strip())
             except ValueError:
                 pass
-        elif line.startswith("REASONING:"):
-            reasoning = line.replace("REASONING:", "").strip()
+        elif cleaned.startswith("REASONING:"):
+            reasoning = cleaned.replace("REASONING:", "").strip()
+
+    # Tolerant fallback for markdown/decorated outputs.
+    if prediction is None:
+        match = re.search(r"(?im)\bPREDICTION\b\s*:\s*([0-9]*\.?[0-9]+)", text)
+        if match:
+            try:
+                prediction = float(match.group(1))
+            except ValueError:
+                pass
+    if confidence is None:
+        match = re.search(r"(?im)\b(?:CONVICTION|CONFIDENCE)\b\s*:\s*([0-9]*\.?[0-9]+)", text)
+        if match:
+            try:
+                confidence = float(match.group(1))
+            except ValueError:
+                pass
+    if reasoning is None:
+        match = re.search(r"(?is)\bREASONING\b\s*:\s*(.+)$", text)
+        if match:
+            reasoning = match.group(1).strip()
     return prediction, confidence, reasoning
 
 
@@ -131,26 +153,58 @@ def _extract_llm_completion_text(raw: dict[str, Any]) -> str:
     """Get the completion text from various LLM response formats."""
     # OpenAI/Grok/Perplexity chat completions format
     choices = raw.get("choices", [])
-    if choices:
-        return choices[0].get("message", {}).get("content", "")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, dict):
+            message = first_choice.get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content", "")
+                if isinstance(content, str):
+                    return content
+
+    # OpenRouter may return plain text in top-level output.
+    output = raw.get("output")
+    if isinstance(output, str):
+        return output
 
     # OpenAI Responses API format
-    for item in raw.get("output", []):
-        if item.get("type") == "message":
-            for block in item.get("content", []):
-                if block.get("type") == "output_text":
-                    return block.get("text", "")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "message":
+                content_blocks = item.get("content", [])
+                if not isinstance(content_blocks, list):
+                    continue
+                for block in content_blocks:
+                    if isinstance(block, dict) and block.get("type") == "output_text":
+                        text = block.get("text", "")
+                        if isinstance(text, str):
+                            return text
 
     # Claude Messages API format
-    for block in raw.get("content", []):
-        if block.get("type") == "text":
-            return block.get("text", "")
+    content = raw.get("content", [])
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                if isinstance(text, str):
+                    return text
 
     # Gemini format
-    for candidate in raw.get("candidates", []):
-        parts = candidate.get("content", {}).get("parts", [])
-        if parts:
-            return parts[0].get("text", "")
+    candidates = raw.get("candidates", [])
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_content = candidate.get("content", {})
+            if not isinstance(candidate_content, dict):
+                continue
+            parts = candidate_content.get("parts", [])
+            if isinstance(parts, list) and parts and isinstance(parts[0], dict):
+                text = parts[0].get("text", "")
+                if isinstance(text, str):
+                    return text
 
     return ""
 

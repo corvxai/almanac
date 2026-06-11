@@ -7,12 +7,42 @@ to a database backend later via the TraceStore interface.
 
 from __future__ import annotations
 
-import json
+import logging
+import os
+import tempfile
 from pathlib import Path
 from uuid import UUID
 
 from src.core.schemas import EvidenceDigest, ResolutionRecord
 from src.storage.store import TraceStore
+
+logger = logging.getLogger(__name__)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Durably write ``text`` to ``path`` without exposing a torn file.
+
+    Writes to a temp file in the same directory (so ``os.replace`` is a same-
+    filesystem atomic rename), fsyncs the file contents, then renames over the
+    destination. A power loss mid-write leaves either the old file or the new
+    file fully written — never a half-written JSON that downstream scoring would
+    silently skip.
+    """
+    directory = path.parent
+    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Best-effort cleanup of the temp file; never mask the original error.
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 class JsonTraceStore(TraceStore):
@@ -30,13 +60,24 @@ class JsonTraceStore(TraceStore):
 
     def save_trace(self, digest: EvidenceDigest) -> None:
         path = self._trace_path(digest.execution_context.execution_id)
-        path.write_text(digest.model_dump_json(indent=2))
+        _atomic_write_text(path, digest.model_dump_json(indent=2))
 
     def get_trace(self, execution_id: UUID) -> EvidenceDigest | None:
         path = self._trace_path(execution_id)
         if not path.exists():
             return None
-        return EvidenceDigest.model_validate_json(path.read_text())
+        digest = EvidenceDigest.model_validate_json(path.read_text())
+        if not digest.verify_integrity():
+            # The file parsed but its sealed hash does not match its contents —
+            # i.e. it was mutated after sealing or corrupted on disk. Surface it
+            # rather than feeding a tampered trace into scoring. Non-fatal: the
+            # caller still receives the digest and can decide how to handle it.
+            logger.warning(
+                "Trace %s failed integrity verification on read (path=%s).",
+                execution_id,
+                path,
+            )
+        return digest
 
     def list_traces_by_event(self, event_id: UUID) -> list[EvidenceDigest]:
         return [
@@ -52,7 +93,7 @@ class JsonTraceStore(TraceStore):
 
     def save_resolution(self, event_id: UUID, record: ResolutionRecord) -> None:
         path = self._resolution_path(event_id)
-        path.write_text(record.model_dump_json(indent=2))
+        _atomic_write_text(path, record.model_dump_json(indent=2))
 
     def get_resolution(self, event_id: UUID) -> ResolutionRecord | None:
         path = self._resolution_path(event_id)

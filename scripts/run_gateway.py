@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -42,9 +43,29 @@ log = logging.getLogger("arcratio.gateway")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Arcratio Provider Gateway")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Bind address (0.0.0.0 exposes to other hosts/containers)",
+    )
     parser.add_argument("--port", "-p", type=int, default=8077, help="Port")
     args = parser.parse_args()
+
+    # The gateway holds upstream provider API keys. Binding to a non-loopback
+    # address without signature enforcement leaves an open, unauthenticated
+    # proxy to those keys. The default stays 0.0.0.0 so the documented Docker
+    # dev flow (containers reaching the host via host.docker.internal) keeps
+    # working, but surface the risk loudly.
+    require_signature = os.environ.get("REQUIRE_SIGNATURE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if args.host not in {"127.0.0.1", "localhost", "::1"} and not require_signature:
+        log.warning(
+            "Gateway bound to %s with REQUIRE_SIGNATURE off: this is an OPEN, "
+            "unauthenticated proxy to your provider API keys. Bind to 127.0.0.1 "
+            "or set REQUIRE_SIGNATURE=true before exposing it.",
+            args.host,
+        )
 
     # Real providers (need API keys)
     try:
@@ -72,7 +93,7 @@ def main() -> None:
     print("  ARCRATIO PROVIDER GATEWAY")
     print(f"  Listening on http://{args.host}:{args.port}")
     print(f"  Health:     http://localhost:{args.port}/health")
-    print(f"  Providers:  http://localhost:{args.port}/providers")
+    print(f"  Providers:  http://localhost:{args.port}/v1/gateway/providers")
     print("=" * 60)
     print()
 

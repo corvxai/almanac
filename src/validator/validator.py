@@ -16,14 +16,15 @@ This is the entrypoint of the validator container's main process.
   share one implementation.
 
 The dev orchestrator + signing-proxy daemon stays running on a daemon
-thread (it's needed by anything that spawns agent containers). In v1 it is
-not auto-driven by this loop — that wiring comes later when miner agents
-start submitting.
+thread (it's needed by anything that spawns agent containers). The validator
+loop now also polls orchestrator assignment availability when the arcratio
+mechanism is enabled.
 """
 
 from __future__ import annotations
 
 import datetime
+import math
 import logging
 import os
 import random
@@ -33,11 +34,30 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-
 import numpy as np
 
 from src.core.config import AppConfig
+from src.core.schemas import EvidenceDigest
+from src.gateway.client import build_remote_providers
+from src.gateway.constants import gateway_service_url
+from src.gateway.signing import load_hotkey
 from src.storage.json_store import JsonTraceStore
+from src.validator.assignment_pipeline import (
+    build_prediction_submit_payload,
+    build_sandbox_assignment_agent,
+    log_prediction_submit_invariants,
+    normalize_prediction_values,
+    process_single_assignment,
+    resolve_binary_outcome_ids,
+    trace_primary_model_info,
+)
+from src.validator.orchestrator import Orchestrator
+from src.validator.orchestrator_api import (
+    OrchestratorAssignment,
+    fetch_all_scored_predictions,
+    fetch_agent_event_assignment,
+    submit_validator_prediction,
+)
 from src.validator import scoring as arcratio_scoring
 
 logger = logging.getLogger("arcratio.validator")
@@ -127,6 +147,13 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
     socket_dir = config.validator.sandbox_socket_dir
     socket_path = socket_dir / "proxy.sock"
     socket_dir.mkdir(parents=True, exist_ok=True)
+    # Restrict the proxy socket directory to the validator user. The UDS lets
+    # its holder drive provider calls; a world-traversable dir would let any
+    # local user connect. chmod explicitly since mkdir is subject to umask.
+    try:
+        os.chmod(socket_dir, 0o700)
+    except OSError as exc:
+        logger.warning("could not chmod proxy socket dir %s: %s", socket_dir, exc)
 
     if not socket_path.exists():
         return socket_path
@@ -137,6 +164,12 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
     except PermissionError:
         fallback_dir = Path("/tmp") / "arcratio" / str(os.getuid())
         fallback_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(fallback_dir, 0o700)
+        except OSError as chmod_exc:
+            logger.warning(
+                "could not chmod fallback proxy socket dir %s: %s", fallback_dir, chmod_exc
+            )
         fallback_socket_path = fallback_dir / "proxy.sock"
         if fallback_socket_path.exists():
             fallback_socket_path.unlink(missing_ok=True)
@@ -213,6 +246,7 @@ class Validator:
         metadata_manager=_AUTO,
         clock=None,
         sleep=None,
+        local_proxy_state=None,
     ) -> None:
         self._config = config
         self._store = store
@@ -240,6 +274,11 @@ class Validator:
 
         self._scoring_minute = random.randint(10, 25)
         self._stopped = False
+        self._orchestrator_hotkey = Validator._AUTO
+        self._orchestrator_poll_config_warned = False
+        self._orchestrator_poll_signing_warned = False
+        self._assignment_orchestrator: Orchestrator | None = None
+        self._assignment_local_proxy_state = local_proxy_state
 
         if self._metadata_manager is not None and self._metadata_owned:
             self._metadata_manager.start()
@@ -287,6 +326,8 @@ class Validator:
         while not self._stopped:
             try:
                 current_time = self._clock()
+                if self._config.loop.arcratio_enabled:
+                    self._poll_orchestrator_assignment()
                 if self._should_score(current_time):
                     self.run_scoring_step()
                 elif current_time.minute % 10 == 0:
@@ -327,6 +368,187 @@ class Validator:
         stats = self._metadata_manager.get_stats()
         logger.info("Metadata Manager Stats: %s", stats)
 
+    def _poll_orchestrator_assignment(self) -> None:
+        base_url = self._config.validator.orchestrator_api_url.strip()
+        if not base_url:
+            if not self._orchestrator_poll_config_warned:
+                logger.info(
+                    "Arcratio assignment polling disabled: set validator.orchestrator_api_url "
+                    "in src/core/constants.py."
+                )
+                self._orchestrator_poll_config_warned = True
+            return
+
+        if self._orchestrator_hotkey is Validator._AUTO:
+            self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
+        if self._orchestrator_hotkey is None:
+            if not self._orchestrator_poll_signing_warned:
+                logger.warning(
+                    "Arcratio assignment polling disabled: validator hotkey signing is unavailable."
+                )
+                self._orchestrator_poll_signing_warned = True
+            return
+
+        try:
+            response = fetch_agent_event_assignment(
+                base_url=base_url,
+                loaded_hotkey=self._orchestrator_hotkey,
+            )
+        except Exception:
+            logger.exception("Failed to fetch /v1/validators/agent-and-event assignment.")
+            return
+
+        if response.assignment is None:
+            logger.debug(
+                "No orchestrator assignment available (reason=%s).",
+                response.reason or "none_available",
+            )
+            return
+
+        self._handle_orchestrator_assignment(response.assignment)
+
+    def _handle_orchestrator_assignment(self, assignment: OrchestratorAssignment) -> None:
+        if not (assignment.event.description or "").strip():
+            logger.info(
+                "Assignment id=%s has null/empty description; defaulted description to question.",
+                assignment.agentPredictionId,
+            )
+        if not (assignment.event.sourceMarketId or "").strip():
+            logger.info(
+                "Assignment id=%s missing sourceMarketId; defaulted source_id to marketId=%s.",
+                assignment.agentPredictionId,
+                assignment.event.marketId,
+            )
+
+        try:
+            orchestrator = self._get_assignment_orchestrator()
+        except Exception:
+            logger.exception(
+                "Failed to initialize execution orchestrator for assignment id=%s.",
+                assignment.agentPredictionId,
+            )
+            return
+
+        try:
+            result = process_single_assignment(
+                assignment=assignment,
+                config=self._config,
+                orchestrator=orchestrator,
+                loaded_hotkey=None,
+                submit_prediction=False,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to process assignment id=%s through shared pipeline.",
+                assignment.agentPredictionId,
+            )
+            return
+
+        log_prediction_submit_invariants(logger, assignment, result.digest)
+        submit_payload = result.submit_payload
+        if self._orchestrator_hotkey is Validator._AUTO:
+            self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
+        if self._orchestrator_hotkey is None:
+            logger.warning(
+                "Cannot submit prediction for assignment id=%s: validator hotkey unavailable.",
+                assignment.agentPredictionId,
+            )
+            return
+        try:
+            ack = submit_validator_prediction(
+                base_url=self._config.validator.orchestrator_api_url,
+                loaded_hotkey=self._orchestrator_hotkey,
+                payload=submit_payload,
+            )
+        except Exception:
+            logger.exception(
+                "Prediction submit failed for assignment id=%s execution_id=%s.",
+                assignment.agentPredictionId,
+                result.digest.execution_context.execution_id,
+            )
+            return
+
+        logger.info(
+            "Assignment processed id=%s status=%s miner_uid=%s source=%s source_id=%s "
+            "event_id=%s execution_id=%s submit_status=%s",
+            assignment.agentPredictionId,
+            assignment.status,
+            assignment.miner.minerUid,
+            assignment.event.source,
+            result.event.source_id,
+            result.event.event_id,
+            result.digest.execution_context.execution_id,
+            ack.status,
+        )
+
+    def _build_sandbox_assignment_agent(self, assignment: OrchestratorAssignment):
+        return build_sandbox_assignment_agent(assignment)
+
+    def _get_assignment_orchestrator(self) -> Orchestrator:
+        if self._assignment_orchestrator is not None:
+            return self._assignment_orchestrator
+
+        providers = build_remote_providers(gateway_service_url())
+        proxy_state = self._assignment_local_proxy_state
+        if self._config.validator.sandbox_type.startswith("docker") and proxy_state is None:
+            proxy_state = start_local_proxy(self._config)
+            self._assignment_local_proxy_state = proxy_state
+
+        self._assignment_orchestrator = Orchestrator(
+            config=self._config,
+            store=self._store,
+            providers=providers,
+            local_proxy_state=proxy_state,
+        )
+        return self._assignment_orchestrator
+
+    def _build_prediction_submit_payload(
+        self,
+        assignment: OrchestratorAssignment,
+        digest: EvidenceDigest,
+    ) -> dict:
+        return build_prediction_submit_payload(assignment, digest)
+
+    def _trace_primary_model_info(self, digest: EvidenceDigest) -> tuple[str | None, str | None]:
+        return trace_primary_model_info(digest)
+
+    def _normalize_prediction_values(
+        self,
+        digest: EvidenceDigest,
+    ) -> tuple[float, float, bool, list[str], dict[str, str]]:
+        return normalize_prediction_values(digest)
+
+    def _coerce_unit_interval(
+        self,
+        value: object,
+        field_name: str,
+        reasons: list[str],
+        *,
+        fallback: float,
+    ) -> float:
+        try:
+            number = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            reasons.append(f"{field_name}_non_numeric")
+            return fallback
+        if not math.isfinite(number):
+            reasons.append(f"{field_name}_non_finite")
+            return fallback
+        if number < 0.0 or number > 1.0:
+            reasons.append(f"{field_name}_out_of_range")
+            return fallback
+        return number
+
+    def _log_prediction_submit_invariants(
+        self,
+        assignment: OrchestratorAssignment,
+        digest: EvidenceDigest,
+    ) -> None:
+        log_prediction_submit_invariants(logger, assignment, digest)
+
+    def _resolve_binary_outcome_ids(self, assignment: OrchestratorAssignment) -> tuple[str, str]:
+        return resolve_binary_outcome_ids(assignment)
+
     # ------------------------------------------------------------------
     # Per-epoch tick
     # ------------------------------------------------------------------
@@ -349,7 +571,7 @@ class Validator:
 
         weights_arcratio: Optional[np.ndarray] = None
         if loop_cfg.arcratio_enabled:
-            weights_arcratio = self._score_arcratio()
+            weights_arcratio = self._score_agent_predictions()
 
         blend_cfg = BlendConfig(
             almanac_enabled=loop_cfg.almanac_enabled,
@@ -394,12 +616,30 @@ class Validator:
             logger.exception("Almanac scoring failed for this epoch.")
             return None
 
-    def _score_arcratio(self) -> Optional[np.ndarray]:
+    def _score_agent_predictions(self) -> Optional[np.ndarray]:
+        base_url = self._config.validator.orchestrator_api_url.strip()
+        if not base_url:
+            logger.warning("Arcratio scoring disabled: validator.orchestrator_api_url is empty.")
+            return None
+
+        if self._orchestrator_hotkey is Validator._AUTO:
+            self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
+        if self._orchestrator_hotkey is None:
+            logger.warning("Arcratio scoring disabled: validator hotkey signing is unavailable.")
+            return None
+
         try:
-            return arcratio_scoring.score_arcratio(
+            scored_predictions = fetch_all_scored_predictions(
+                base_url=base_url,
+                loaded_hotkey=self._orchestrator_hotkey,
+                days=self._config.loop.rolling_window_days,
+                include_trace_summary=False,
+            )
+            return arcratio_scoring.score_agent_predictions(
                 metagraph=self._bt.metagraph,
-                trace_store=self._store,
+                scored_predictions=scored_predictions,
                 rolling_window_days=self._config.loop.rolling_window_days,
+                now=self._clock(),
             )
         except Exception:
             logger.exception("Arcratio scoring failed for this epoch.")

@@ -25,6 +25,7 @@ class ValidatorConfig(BaseModel):
     available_providers: list[str] = Field(
         default_factory=lambda: list(constants.VALIDATOR.available_providers)
     )
+    orchestrator_api_url: str = constants.ORCHESTRATOR_API_URL
 
     sandbox_type: SandboxType = constants.VALIDATOR.sandbox_type  # type: ignore[assignment]
     sandbox_image: str = constants.VALIDATOR.sandbox_image
@@ -69,6 +70,8 @@ class StorageConfig(BaseModel):
 class GatewayConfig(BaseModel):
     default_timeout_ms: int = constants.GATEWAY.default_timeout_ms
     max_retries: int = constants.GATEWAY.max_retries
+    debug_log_raw_response: bool = constants.GATEWAY.debug_log_raw_response
+    debug_raw_response_max_chars: int = constants.GATEWAY.debug_raw_response_max_chars
 
 
 class ValidatorLoopConfig(BaseModel):

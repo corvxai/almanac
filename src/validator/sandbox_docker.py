@@ -44,6 +44,11 @@ logger = logging.getLogger("arcratio.sandbox_docker")
 _SANDBOX_SOCKET_DIR = "/run/arcratio"
 _SANDBOX_SOCKET_URL = f"http+unix://{_SANDBOX_SOCKET_DIR}/proxy.sock"
 
+# Upper bound on agent stdout we are willing to buffer/parse. A real
+# AgentResult JSON is a few KB; this is a generous ceiling to contain a
+# hostile agent flooding stdout (see read path below).
+_MAX_SANDBOX_STDOUT_BYTES = 8 * 1024 * 1024
+
 
 def _decode_proc_mount_token(token: str) -> str:
     """Undo mountinfo(5) octal escapes in a single path token."""
@@ -232,6 +237,12 @@ def run_agent_in_container(
         "agent_module": agent_module,
         "agent_class": agent_class,
     }
+    inline_code = getattr(agent, "_arcratio_agent_source_code", None)
+    inline_class = getattr(agent, "_arcratio_agent_source_class", None)
+    if isinstance(inline_code, str) and inline_code.strip():
+        payload["agent_code"] = inline_code
+        if isinstance(inline_class, str) and inline_class.strip():
+            payload["inline_class"] = inline_class
     # JSON payload is written to the shared UDS bind mount so the sibling can
     # read it via ARCRATIO_RUNNER_INPUT_FILE. Docker stdin attach + EOF is
     # unreliable; ``sys.stdin.read()`` in the runner would otherwise hang.
@@ -358,7 +369,18 @@ def run_agent_in_container(
                 f"Agent sandbox exited with code {exit_code}. stderr tail:\n{stderr_text}"
             )
 
-        stdout_text = (stdout or b"").decode("utf-8", errors="replace").strip()
+        # The agent is untrusted: a hostile (or buggy) agent can flood stdout
+        # to force the validator to buffer, decode, and JSON-scan an arbitrarily
+        # large string (the O(n) `_last_json_object` walk + pydantic parse). A
+        # legitimate AgentResult is small, so reject anything implausibly large.
+        stdout_raw = stdout or b""
+        if len(stdout_raw) > _MAX_SANDBOX_STDOUT_BYTES:
+            raise RuntimeError(
+                f"Agent sandbox stdout exceeded {_MAX_SANDBOX_STDOUT_BYTES} bytes "
+                f"({len(stdout_raw)} bytes); refusing to parse."
+            )
+
+        stdout_text = stdout_raw.decode("utf-8", errors="replace").strip()
         if not stdout_text:
             stderr_text = (stderr or b"").decode("utf-8", errors="replace")[-1000:]
             raise RuntimeError(
