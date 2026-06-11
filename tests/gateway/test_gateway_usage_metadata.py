@@ -87,3 +87,33 @@ def test_gateway_normalizes_claude_style_usage_tokens() -> None:
     # Estimated from configured per-model rates when provider omits cost.
     assert call.usage_meta.cost == pytest.approx(0.00783, rel=1e-9)
     assert call.cost_units == pytest.approx(0.00783, rel=1e-9)
+
+
+def test_gateway_normalizes_openrouter_camelcase_usage_tokens() -> None:
+    raw = {
+        "provider": "openrouter",
+        "output": "PREDICTION: 0.6\nCONVICTION: 0.7\nREASONING: test",
+        "usage": {
+            "promptTokens": 280,
+            "completionTokens": 405,
+            "totalTokens": 685,
+            "cacheReadInputTokens": 12,
+            "costUsd": 0.000285,
+        },
+    }
+    provider = StubProvider(
+        provider_id="openrouter",
+        call_type="chat_completion",
+        raw=raw,
+        tier=ProviderTier.INFERENCE,
+    )
+    gateway = ProviderGateway(providers={"openrouter": provider})
+
+    gateway.call_provider("openrouter", "chat_completion", {})
+    call = gateway.call_log[0]
+    assert call.usage_meta is not None
+    assert call.usage_meta.prompt_tokens == 280
+    assert call.usage_meta.completion_tokens == 405
+    assert call.usage_meta.total_tokens == 685
+    assert call.usage_meta.cached_tokens == 12
+    assert call.usage_meta.cost == pytest.approx(0.000285, rel=1e-9)

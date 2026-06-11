@@ -37,15 +37,16 @@ def upstream_handler():
         captured["requests"].append(
             {
                 "headers": dict(request.headers),
+                "url": str(request.url),
                 "body": body,
             }
         )
         return httpx.Response(
             200,
             json={
-                "provider_id": body["provider_id"],
-                "call_type": body["call_type"],
-                "data": {"echo": body["params"]},
+                "provider_id": body["provider"],
+                "call_type": body.get("callType") or "unknown",
+                "data": {"echo": body.get("params", {})},
                 "latency_ms": 0,
             },
         )
@@ -102,7 +103,7 @@ class TestTrackAllowlist:
     def test_main_track_allows_everything(self, proxy_client):
         client, state, _ = proxy_client
         run_id = uuid4()
-        state.register_run(run_id, track="MAIN")
+        state.register_run(run_id, track="MAIN", miner_hotkey="5MinerHotkey")
         resp = client.post(
             "/v1/call",
             json={"provider_id": "claude", "call_type": "messages", "params": {"x": 1}},
@@ -115,7 +116,7 @@ class TestForwardingAndRecording:
     def test_call_is_forwarded_and_recorded(self, proxy_client):
         client, state, captured = proxy_client
         run_id = uuid4()
-        state.register_run(run_id, track="MAIN")
+        state.register_run(run_id, track="MAIN", miner_hotkey="5MinerHotkey")
 
         resp = client.post(
             "/v1/call",
@@ -128,11 +129,12 @@ class TestForwardingAndRecording:
         # Upstream saw exactly one request.
         assert len(captured["requests"]) == 1
         upstream = captured["requests"][0]
-        assert upstream["body"] == {
-            "provider_id": "polymarket",
-            "call_type": "get_market",
-            "params": {"slug": "x"},
-        }
+        assert upstream["url"].endswith("/v1/gateway/validator/completions")
+        assert upstream["body"]["provider"] == "polymarket"
+        assert upstream["body"]["callType"] == "get_market"
+        assert upstream["body"]["params"] == {"slug": "x"}
+        assert "minerHotkey" not in upstream["body"]
+        assert upstream["headers"]["x-miner-hotkey"] == "5MinerHotkey"
 
         # The proxy records the call against the run.
         calls = state.pop_calls(run_id)
@@ -144,7 +146,7 @@ class TestForwardingAndRecording:
     def test_pop_calls_deregisters_run(self, proxy_client):
         client, state, _ = proxy_client
         run_id = uuid4()
-        state.register_run(run_id, track="MAIN")
+        state.register_run(run_id, track="MAIN", miner_hotkey="5MinerHotkey")
         # Drain — re-using the run_id should now 401.
         state.pop_calls(run_id)
         resp = client.post(
@@ -153,6 +155,67 @@ class TestForwardingAndRecording:
             headers={"X-Run-Id": str(run_id)},
         )
         assert resp.status_code == 401
+
+    def test_llm_provider_payload_omits_compat_fields(self, proxy_client):
+        client, state, captured = proxy_client
+        run_id = uuid4()
+        state.register_run(run_id, track="MAIN", miner_hotkey="5MinerHotkey")
+
+        resp = client.post(
+            "/v1/call",
+            json={
+                "provider_id": "claude",
+                "call_type": "messages",
+                "params": {
+                    "model": "claude-sonnet-4-6",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            },
+            headers={"X-Run-Id": str(run_id)},
+        )
+        assert resp.status_code == 200
+        upstream = captured["requests"][-1]["body"]
+        assert upstream["provider"] == "claude"
+        assert "callType" not in upstream
+        assert "params" not in upstream
+
+    def test_new_completions_route_forwards_and_records(self, proxy_client):
+        client, state, captured = proxy_client
+        run_id = uuid4()
+        state.register_run(run_id, track="MAIN", miner_hotkey="5MinerHotkey")
+
+        resp = client.post(
+            "/v1/gateway/validator/completions",
+            json={
+                "provider": "openrouter",
+                "model": "anthropic/claude-3.5-sonnet",
+                "messages": [{"role": "system", "content": "Hello!"}],
+                "minerHotkey": "5MinerHotkey",
+            },
+            headers={"X-Run-Id": str(run_id)},
+        )
+        assert resp.status_code == 200
+        assert len(captured["requests"]) == 1
+        upstream = captured["requests"][0]
+        assert upstream["url"].endswith("/v1/gateway/validator/completions")
+        assert upstream["body"]["provider"] == "openrouter"
+        assert "minerHotkey" not in upstream["body"]
+        assert upstream["headers"]["x-miner-hotkey"] == "5MinerHotkey"
+        calls = state.pop_calls(run_id)
+        assert len(calls) == 1
+        assert calls[0].provider_id == "openrouter"
+
+    def test_missing_miner_hotkey_context_rejected(self, proxy_client):
+        client, state, _captured = proxy_client
+        run_id = uuid4()
+        state.register_run(run_id, track="MAIN")
+        resp = client.post(
+            "/v1/call",
+            json={"provider_id": "claude", "call_type": "messages", "params": {"x": 1}},
+            headers={"X-Run-Id": str(run_id)},
+        )
+        assert resp.status_code == 400
+        assert "missing miner hotkey" in resp.json()["detail"]
 
 
 class TestHealth:

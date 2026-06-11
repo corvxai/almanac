@@ -185,6 +185,18 @@ def gateway_app():
 
 
 class TestGatewaySignatureLogging:
+    def test_gateway_providers_endpoint_returns_capabilities(self, gateway_app):
+        resp = gateway_app.get("/v1/gateway/providers")
+        assert resp.status_code == 200
+        body = resp.json()
+        providers = body["providers"]
+        assert isinstance(providers, list)
+        stub = next(p for p in providers if p["id"] == "stub")
+        assert "models" in stub
+        assert "allowsAnyModel" in stub
+        assert "defaultCallType" in stub
+        assert "supportsCompletions" in stub
+
     def test_unsigned_request_accepted_when_not_required(self, gateway_app, monkeypatch):
         monkeypatch.delenv("REQUIRE_SIGNATURE", raising=False)
         resp = gateway_app.post(
@@ -216,3 +228,19 @@ class TestGatewaySignatureLogging:
             json={"provider_id": "stub", "call_type": "ping", "params": {}},
         )
         assert resp.status_code == 401
+
+    def test_validator_completions_defaults_call_type_for_llm_provider(self, gateway_app, monkeypatch):
+        monkeypatch.delenv("REQUIRE_SIGNATURE", raising=False)
+        gateway_server._providers["openrouter"] = _StubProvider()
+        resp = gateway_app.post(
+            "/v1/gateway/validator/completions",
+            headers={"x-miner-hotkey": "5MinerHotkey"},
+            json={
+                "provider": "openrouter",
+                "model": "anthropic/claude-3.5-sonnet",
+                "messages": [{"role": "system", "content": "Hello!"}],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["call_type"] == "chat_completion"
+

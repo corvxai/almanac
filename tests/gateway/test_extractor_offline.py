@@ -60,3 +60,37 @@ def test_call_and_extract_stub_matches_pipeline(maybe_pretty_print_raw) -> None:
     assert out_raw == raw
     expected = extract_from_raw(provider_id, call_type, raw)
     assert [e.model_dump() for e in evidence] == [e.model_dump() for e in expected]
+
+
+@pytest.mark.provider("openrouter")
+def test_openrouter_string_output_shape_extracts_without_crashing() -> None:
+    raw = {
+        "provider": "openrouter",
+        "model": "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "output": "PREDICTION: 0.6\nCONVICTION: 0.7\nREASONING: short rationale.",
+        "usage": {"promptTokens": 280, "completionTokens": 405, "totalTokens": 685},
+    }
+    evidence = extract_from_raw("openrouter", "chat_completion", raw)
+    assert_evidence_nonempty(evidence)
+    assert_evidence_covers_types(evidence, EvidenceType.PROBABILITY, EvidenceType.QUOTE_SUMMARY)
+
+
+@pytest.mark.provider("openrouter")
+def test_openrouter_markdown_output_lines_parse_prediction_and_confidence() -> None:
+    raw = {
+        "provider": "openrouter",
+        "model": "anthropic/claude-4.5-haiku-20251001",
+        "output": (
+            "**PREDICTION: 0.15**\n\n"
+            "**CONVICTION: 0.72**\n\n"
+            "**REASONING:** Tail risk remains possible."
+        ),
+    }
+    evidence = extract_from_raw("openrouter", "chat_completion", raw)
+    prob_values = [
+        e.numeric_value
+        for e in evidence
+        if e.evidence_type == EvidenceType.PROBABILITY and e.numeric_value is not None
+    ]
+    assert 0.15 in prob_values
+    assert 0.72 in prob_values

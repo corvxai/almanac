@@ -207,7 +207,7 @@ def build_prediction_submit_payload(
         yes_id: round(probability, 6),
         no_id: round(1.0 - probability, 6),
     }
-    submitted_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    submitted_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     provider_id, model = trace_primary_model_info(digest)
     invalid_reason = "; ".join(invalid_reasons) if invalid_reasons else None
 
@@ -229,10 +229,6 @@ def build_prediction_submit_payload(
             "executionMetadata": {
                 "model": model,
                 "latencyMs": digest.execution_context.execution_duration_ms,
-                "provider": provider_id,
-                "agentUploadId": assignment.agent.agentUploadId,
-                "agentVersion": digest.execution_context.agent_version,
-                "executionId": str(digest.execution_context.execution_id),
                 "predictionIsInvalid": not is_valid_prediction,
                 "predictionInvalidReason": invalid_reason,
                 "predictionValidation": {
@@ -244,17 +240,19 @@ def build_prediction_submit_payload(
         },
         "reasoningTrace": {
             "schemaVersion": "1.0",
-            "trace": digest.model_dump(mode="json"),
+            "trace": {
+                "steps": [
+                    "Fetched assignment via validator auth",
+                    "Executed assignment agent in sandbox",
+                    "Built prediction payload from execution digest",
+                ]
+            },
             "traceSummary": {
-                "execution_id": str(digest.execution_context.execution_id),
-                "reasoning_summary": digest.prediction_output.reasoning_summary,
-                "provider_calls": len(digest.provider_calls),
+                "strategy": "validator-assignment-pipeline",
             },
             "modelMetadata": {
                 "provider": provider_id,
                 "model": model,
-                "agentUploadId": assignment.agent.agentUploadId,
-                "agentSha256": assignment.agent.sha256,
             },
         },
     }
@@ -279,7 +277,11 @@ def process_single_assignment(
         raise RuntimeError("assignment has no agent.code")
 
     agent = build_sandbox_assignment_agent(assignment)
-    digest = orchestrator.run_agent(event, agent)
+    digest = orchestrator.run_agent(
+        event,
+        agent,
+        miner_hotkey=assignment.miner.minerHotkey,
+    )
     submit_payload = build_prediction_submit_payload(assignment, digest)
 
     submit_ack: SubmitPredictionResponse | None = None

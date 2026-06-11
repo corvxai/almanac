@@ -55,6 +55,9 @@ class StorageDefaults:
 class GatewayDefaults:
     default_timeout_ms: int = 30_000
     max_retries: int = 2
+    debug_log_raw_response: bool = True
+    # 0 means "no truncation" when debug logging is enabled.
+    debug_raw_response_max_chars: int = 0
 
 
 @dataclass(frozen=True)

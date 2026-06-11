@@ -120,32 +120,9 @@ class OpenRouterAgent(BaseAgent):
     agent_version = "0.1.0"
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
-        # --- Phase 1: Research ---
-        context_parts: list[str] = []
+        research_context = None
 
-        market = ctx.call_provider("polymarket", "get_market", {
-            "market_slug": ctx.event_title.lower().replace(" ", "-"),
-        })
-        price = market.get("price", 0.5)
-        volume = market.get("volume_24h", 0)
-        context_parts.append(
-            f"Polymarket: price={price:.4f}, 24h_volume={volume:,.0f}, "
-            f"implied_probability={market.get('probability', price):.4f}"
-        )
-
-        news = ctx.call_provider("web_search", "search", {
-            "query": ctx.event_title,
-            "num_results": 5,
-        })
-        for r in news.get("results", []):
-            snippet = r.get("snippet", "")
-            source = r.get("source", r.get("url", ""))
-            if snippet:
-                context_parts.append(f"[{source}] {snippet}")
-
-        research_context = "\n".join(context_parts)
-
-        # --- Phase 2: LLM inference via OpenRouter ---
+        # --- Phase 1: LLM inference via OpenRouter ---
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_prompt(
@@ -168,8 +145,8 @@ class OpenRouterAgent(BaseAgent):
 
         if llm_response is None:
             return AgentResult(
-                prediction=price,
-                reasoning=f"LLM unavailable. Falling back to market price: {price:.4f}",
+                prediction=None,
+                reasoning="LLM unavailable.",
             )
 
         content = _extract_text_from_openrouter_response(llm_response)
