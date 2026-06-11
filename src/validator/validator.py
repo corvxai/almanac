@@ -146,14 +146,19 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
     """Return a writable proxy socket path, falling back if a stale root-owned file exists."""
     socket_dir = config.validator.sandbox_socket_dir
     socket_path = socket_dir / "proxy.sock"
+    inputs_dir = socket_dir / "inputs"
     socket_dir.mkdir(parents=True, exist_ok=True)
-    # Restrict the proxy socket directory to the validator user. The UDS lets
-    # its holder drive provider calls; a world-traversable dir would let any
-    # local user connect. chmod explicitly since mkdir is subject to umask.
+    # Keep the runtime dir traversable by the sandbox user so it can read
+    # per-run payload files under `inputs/`.
     try:
-        os.chmod(socket_dir, 0o700)
+        os.chmod(socket_dir, 0o711)
     except OSError as exc:
         logger.warning("could not chmod proxy socket dir %s: %s", socket_dir, exc)
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(inputs_dir, 0o755)
+    except OSError as exc:
+        logger.warning("could not chmod proxy inputs dir %s: %s", inputs_dir, exc)
 
     if not socket_path.exists():
         return socket_path
@@ -163,9 +168,12 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
         return socket_path
     except PermissionError:
         fallback_dir = Path("/tmp") / "arcratio" / str(os.getuid())
+        fallback_inputs_dir = fallback_dir / "inputs"
         fallback_dir.mkdir(parents=True, exist_ok=True)
+        fallback_inputs_dir.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(fallback_dir, 0o700)
+            os.chmod(fallback_dir, 0o711)
+            os.chmod(fallback_inputs_dir, 0o755)
         except OSError as chmod_exc:
             logger.warning(
                 "could not chmod fallback proxy socket dir %s: %s", fallback_dir, chmod_exc
@@ -217,6 +225,10 @@ def start_local_proxy(config: AppConfig):
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if socket_path.exists():
+            try:
+                os.chmod(socket_path, 0o600)
+            except OSError as exc:
+                logger.warning("could not chmod proxy socket %s: %s", socket_path, exc)
             break
         time.sleep(0.05)
 
