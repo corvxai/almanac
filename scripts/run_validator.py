@@ -93,7 +93,42 @@ class _ColorColumnFormatter(_ColumnFormatter):
         return logging.Formatter.format(self, record)
 
 
-def _setup_logging(level: str, *, wire_debug: bool = False, color: bool = False) -> None:
+def _sync_bittensor_logging(level: str, formatter: logging.Formatter) -> None:
+    """Align ``bt.logging`` with the validator's column formatter and log level.
+
+    Bittensor is imported lazily (via the signing proxy or chain wiring), so
+    the first ``_setup_logging`` call often runs before ``bt.logging._listener``
+    exists. Call this again once bittensor is loaded to enable INFO/DEBUG
+    output from Almanac components (``MetadataManager``, scoring, etc.).
+    """
+    root_level = getattr(logging, level.upper(), logging.INFO)
+    bt_logger = logging.getLogger("bittensor")
+    bt_logger.setLevel(root_level)
+    bt_logger.propagate = False
+
+    try:
+        import bittensor as bt
+    except Exception:
+        return
+
+    if root_level <= logging.DEBUG:
+        bt.logging.enable_debug()
+    elif root_level <= logging.INFO:
+        bt.logging.enable_info()
+    else:
+        bt.logging.enable_default()
+
+    listener = getattr(bt.logging, "_listener", None)
+    if listener is not None:
+        for handler in getattr(listener, "handlers", ()):
+            try:
+                handler.setFormatter(formatter)
+                handler.setLevel(root_level)
+            except Exception:
+                pass
+
+
+def _setup_logging(level: str, *, wire_debug: bool = False, color: bool = False) -> logging.Formatter:
     root_level = getattr(logging, level.upper(), logging.INFO)
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
@@ -110,25 +145,7 @@ def _setup_logging(level: str, *, wire_debug: bool = False, color: bool = False)
     stream.setFormatter(formatter)
     root_logger.addHandler(stream)
 
-    # Keep bittensor's internal listener active (it manages state transitions),
-    # but prevent duplicate propagation into root and align formatter/style.
-    bt_logger = logging.getLogger("bittensor")
-    bt_logger.setLevel(root_level)
-    bt_logger.propagate = False
-    try:
-        import bittensor as bt  # type: ignore
-
-        listener = getattr(bt.logging, "_listener", None)
-        if listener is not None:
-            for h in getattr(listener, "handlers", ()):
-                try:
-                    h.setFormatter(formatter)
-                    h.setLevel(root_level)
-                except Exception:
-                    pass
-    except Exception:
-        # If bittensor is not importable yet, we still have sane root logging.
-        pass
+    _sync_bittensor_logging(level, formatter)
 
     wire_level = logging.DEBUG if wire_debug else logging.WARNING
     for noisy in (
@@ -140,6 +157,8 @@ def _setup_logging(level: str, *, wire_debug: bool = False, color: bool = False)
         "httpcore",
     ):
         logging.getLogger(noisy).setLevel(wire_level)
+
+    return formatter
 
 
 def _log_startup_config_table(log: logging.Logger, config: AppConfig, args: argparse.Namespace) -> None:
@@ -329,7 +348,7 @@ def main() -> None:
     if args.unsafe_no_signing:
         config.bittensor.signing_required = False
 
-    _setup_logging(
+    log_formatter = _setup_logging(
         config.log_level,
         wire_debug=args.wire_debug,
         color=args.logging_color,
@@ -356,6 +375,10 @@ def main() -> None:
             "Local signing proxy ready: %s",
             "ENABLED hotkey=" + kp.hotkey_ss58 if kp else "DISABLED (dev)",
         )
+
+    # Proxy startup imports bittensor; re-sync so bt.logging emits at INFO/DEBUG
+    # through the same column formatter as arcratio.* loggers.
+    _sync_bittensor_logging(config.log_level, log_formatter)
 
     store = JsonTraceStore(data_dir=config.storage.data_dir)
 
