@@ -146,12 +146,31 @@ def _load_hotkey_keypair(args: argparse.Namespace):
 
     try:
         bittensor = __import__("bittensor")
-    except Exception as exc:
-        print(f"bittensor is required for wallet signature auth but is not available: {exc}")
-        return None
+    except Exception:
+        # Fall back to the lightweight `bittensor_wallet` package, which exposes
+        # the same `Wallet`/`wallet` constructors and is sufficient for signing
+        # (mirrors the fallback already used in src/gateway/signing.py).
+        try:
+            bittensor = __import__("bittensor_wallet")
+        except Exception as exc:
+            print(
+                "bittensor or bittensor_wallet is required for wallet signature "
+                f"auth but neither is available: {exc}"
+            )
+            return None
 
     try:
-        wallet_ctor = getattr(bittensor, "wallet", None) or getattr(bittensor, "Wallet", None)
+        # Prefer a callable constructor. The full `bittensor` SDK exposes
+        # `wallet`/`Wallet` as classes, but in `bittensor_wallet` `wallet` is a
+        # submodule (not callable) while `Wallet` is the class.
+        wallet_ctor = next(
+            (
+                c
+                for c in (getattr(bittensor, "Wallet", None), getattr(bittensor, "wallet", None))
+                if callable(c)
+            ),
+            None,
+        )
         if wallet_ctor is None:
             print("failed to load bittensor wallet: module has no wallet constructor.")
             return None

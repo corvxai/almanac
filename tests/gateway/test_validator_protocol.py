@@ -50,6 +50,21 @@ def loaded():
     return LoadedKeypair(keypair=kp, hotkey_ss58=kp.ss58_address, coldkey_ss58=None)
 
 
+def test_canonical_json_matches_js_number_formatting() -> None:
+    # The gateway verifies signatures over canonicalJson(JSON.parse(body)), so our
+    # canonical encoding must match JS JSON.stringify: integral floats lose the
+    # decimal, object keys are sorted, non-finite -> null. Regression for the
+    # confidence=0.0 -> "0" mismatch that rejected validator prediction submits.
+    assert canonical_json(0.0) == "0"
+    assert canonical_json(1.0) == "1"
+    assert canonical_json(0.5) == "0.5"
+    assert canonical_json(-0.0) == "0"
+    assert canonical_json({"b": 0.0, "a": 1}) == '{"a":1,"b":0}'
+    assert canonical_json([True, False, None]) == "[true,false,null]"
+    assert canonical_json(float("nan")) == "null"
+    assert canonical_json(float("inf")) == "null"
+
+
 def test_sign_and_verify_roundtrip(loaded) -> None:
     payload = {"provider": "openrouter", "messages": [{"role": "system", "content": "Hello"}]}
     body = canonical_json(payload).encode("utf-8")

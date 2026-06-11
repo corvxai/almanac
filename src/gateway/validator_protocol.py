@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import secrets
 import time
 from dataclasses import dataclass
@@ -231,7 +232,30 @@ def _sr25519_crypto_type() -> int:
     return 1
 
 
+def _js_number(x: float) -> str:
+    """Render a float the way JS ``JSON.stringify`` does.
+
+    The gateway verifies signatures over ``canonicalJson(JSON.parse(body))``, so
+    our canonical encoding must match JS number formatting. The key divergence
+    is integral floats: Python renders ``0.0`` as ``"0.0"`` while JS renders
+    ``0`` (e.g. the missing-confidence sentinel ``0.0``). Non-finite values
+    become ``null``, matching ``JSON.stringify``.
+    """
+    if not math.isfinite(x):
+        return "null"
+    if x.is_integer():
+        return str(int(x))
+    return repr(x)
+
+
 def canonical_json(value: Any) -> str:
+    # bool before int/float (bool is an int subclass); float before the generic
+    # json.dumps so integral floats match JS. int/str/None fall through to
+    # json.dumps, which already matches JS for those types.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return _js_number(value)
     if value is None or not isinstance(value, (dict, list)):
         return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
     if isinstance(value, list):

@@ -13,6 +13,7 @@ import httpx
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from src.gateway.signing import LoadedKeypair
+from src.gateway.validator_protocol import canonical_json as _canonical_json
 
 AGENT_AND_EVENT_ENDPOINT = "/v1/validators/agent-and-event"
 PREDICTION_ENDPOINT = "/v1/validators/prediction"
@@ -260,18 +261,6 @@ def _http_error_detail(resp: httpx.Response) -> str:
     return text or "(empty body)"
 
 
-def _canonical_json(value: Any) -> str:
-    """Match the API's canonical JSON serialization for signing."""
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-    if isinstance(value, list):
-        return "[" + ",".join(_canonical_json(v) for v in value) + "]"
-    if isinstance(value, dict):
-        parts = []
-        for key in sorted(value.keys(), key=lambda k: str(k)):
-            parts.append(f"{json.dumps(str(key), ensure_ascii=False)}:{_canonical_json(value[key])}")
-        return "{" + ",".join(parts) + "}"
-    raise TypeError(f"unsupported value for canonical JSON: {type(value).__name__}")
 
 
 def fetch_scored_predictions_page(
