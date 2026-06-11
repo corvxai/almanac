@@ -27,7 +27,7 @@ API_VERSION = "2023-06-01"
 
 
 class ClaudeProvider(BaseProvider):
-    provider_id: str = "claude"
+    provider_id: str = "anthropic"
     provider_tier: ProviderTier = ProviderTier.INFERENCE
 
     def __init__(self, api_key: str | None = None):

@@ -35,7 +35,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="ID",
         help=(
             "Only run tests marked @pytest.mark.provider for this gateway id "
-            "(e.g. openrouter, claude, polymarket). Case-insensitive."
+            "(e.g. openrouter, anthropic, polymarket). Case-insensitive."
         ),
     )
     parser.addoption(

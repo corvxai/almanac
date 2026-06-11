@@ -419,7 +419,7 @@ def _forward_and_record(
 
 def _default_call_type(provider_id: str) -> str:
     defaults = {
-        "claude": "messages",
+        "anthropic": "messages",
         "openrouter": "chat_completion",
         "openai": "chat_completion",
         "grok": "chat_completion",

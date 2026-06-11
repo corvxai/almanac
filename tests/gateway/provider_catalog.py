@@ -5,7 +5,7 @@ Used by integration-style tests that invoke each adapter's ``call`` then run
 
 **Mock adapters** (no API keys): see ``MOCK_PROVIDER_IDS``.
 
-**Live adapter**: ``claude`` (Anthropic Messages API) — covered only under
+**Live adapter**: ``anthropic`` (Anthropic Messages API) — covered only under
 ``pytest --live`` with ``ANTHROPIC_API_KEY``.
 """
 

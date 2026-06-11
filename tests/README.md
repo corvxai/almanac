@@ -69,7 +69,7 @@ Only runs tests tagged for that provider (`@pytest.mark.provider`), case-insensi
 
 ```bash
 pytest --provider openrouter
-pytest --provider claude
+pytest --provider anthropic
 pytest --provider polymarket
 ```
 
@@ -79,7 +79,7 @@ When you only want the network smoke tests, use `--live-only`:
 
 ```bash
 pytest --live-only --provider openrouter --pretty-print -s
-pytest --live-only --provider claude --pretty-print -s
+pytest --live-only --provider anthropic --pretty-print -s
 ```
 
 Use built-in pytest substring filtering when needed:
@@ -99,7 +99,7 @@ Examples:
 ```bash
 # Live API shape only
 pytest --live-only --provider openrouter --pretty-print -s
-pytest --live-only --provider claude --pretty-print -s
+pytest --live-only --provider anthropic --pretty-print -s
 
 # Full provider slice (golden + mock + live)
 pytest --live --provider openrouter --pretty-print -s

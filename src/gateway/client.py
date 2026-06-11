@@ -23,7 +23,7 @@ from src.gateway.providers.base import BaseProvider
 _DEFAULT_TIERS: dict[str, ProviderTier] = {
     "polymarket": ProviderTier.FREE_SIGNAL,
     "web_search": ProviderTier.SEARCH,
-    "claude": ProviderTier.INFERENCE,
+    "anthropic": ProviderTier.INFERENCE,
     "openai": ProviderTier.INFERENCE,
     "gemini": ProviderTier.INFERENCE,
     "grok": ProviderTier.INFERENCE,
