@@ -139,7 +139,7 @@ class TestFilesystemLockdown:
             proxy_state.pop_calls(run_id)
 
         passwd = result.reasoning
-        assert "runner:x:10001" in passwd
+        assert "root:x:0:0:" in passwd
         # Sanity: host-only accounts must not appear.
         for forbidden in ("andy", "ubuntu", "ec2-user"):
             assert forbidden not in passwd
@@ -202,8 +202,8 @@ class TestProviderPolicy:
         assert exc is not None
         # Crucially the proxy refused before any upstream call.
         assert all(
-            r["body"]["provider_id"] != "claude" for r in captured["requests"]
-        ), "claude.* must never reach upstream when track=SIGNAL"
+            r["body"]["provider_id"] != "anthropic" for r in captured["requests"]
+        ), "anthropic.* must never reach upstream when track=SIGNAL"
 
 
 # ---------------------------------------------------------------------------

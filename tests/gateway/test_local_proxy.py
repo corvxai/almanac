@@ -94,11 +94,11 @@ class TestTrackAllowlist:
         state.register_run(run_id, track="SIGNAL")
         resp = client.post(
             "/v1/call",
-            json={"provider_id": "claude", "call_type": "messages", "params": {}},
+            json={"provider_id": "anthropic", "call_type": "messages", "params": {}},
             headers={"X-Run-Id": str(run_id)},
         )
         assert resp.status_code == 403
-        assert "claude" in resp.json()["detail"]
+        assert "anthropic" in resp.json()["detail"]
 
     def test_main_track_allows_everything(self, proxy_client):
         client, state, _ = proxy_client
@@ -106,7 +106,7 @@ class TestTrackAllowlist:
         state.register_run(run_id, track="MAIN", miner_hotkey="5MinerHotkey")
         resp = client.post(
             "/v1/call",
-            json={"provider_id": "claude", "call_type": "messages", "params": {"x": 1}},
+            json={"provider_id": "anthropic", "call_type": "messages", "params": {"x": 1}},
             headers={"X-Run-Id": str(run_id)},
         )
         assert resp.status_code == 200
@@ -164,7 +164,7 @@ class TestForwardingAndRecording:
         resp = client.post(
             "/v1/call",
             json={
-                "provider_id": "claude",
+                "provider_id": "anthropic",
                 "call_type": "messages",
                 "params": {
                     "model": "claude-sonnet-4-6",
@@ -175,9 +175,12 @@ class TestForwardingAndRecording:
         )
         assert resp.status_code == 200
         upstream = captured["requests"][-1]["body"]
-        assert upstream["provider"] == "claude"
+        assert upstream["provider"] == "anthropic"
         assert "callType" not in upstream
         assert "params" not in upstream
+        assert "temperature" not in upstream
+        assert "topP" not in upstream
+        assert "maxTokens" not in upstream
 
     def test_new_completions_route_forwards_and_records(self, proxy_client):
         client, state, captured = proxy_client
@@ -211,7 +214,7 @@ class TestForwardingAndRecording:
         state.register_run(run_id, track="MAIN")
         resp = client.post(
             "/v1/call",
-            json={"provider_id": "claude", "call_type": "messages", "params": {"x": 1}},
+            json={"provider_id": "anthropic", "call_type": "messages", "params": {"x": 1}},
             headers={"X-Run-Id": str(run_id)},
         )
         assert resp.status_code == 400

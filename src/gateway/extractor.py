@@ -23,7 +23,7 @@ def extract_evidence(provider_id: str, call_type: str, raw: dict[str, Any]) -> l
         "web_search": _extract_web_search,
         "grok": _extract_grok,
         "perplexity": _extract_perplexity,
-        "claude": _extract_claude,
+        "anthropic": _extract_anthropic,
         "openai": _extract_openai,
         "gemini": _extract_gemini,
         "openrouter": _extract_openrouter,
@@ -306,8 +306,8 @@ def _extract_perplexity(call_type: str, raw: dict[str, Any]) -> list[ExtractedEv
     return items
 
 
-def _extract_claude(call_type: str, raw: dict[str, Any]) -> list[ExtractedEvidence]:
-    """Claude: web_search_tool_result blocks with URLs + text citations."""
+def _extract_anthropic(call_type: str, raw: dict[str, Any]) -> list[ExtractedEvidence]:
+    """Anthropic: web_search_tool_result blocks with URLs + text citations."""
     items: list[ExtractedEvidence] = []
     text = _extract_llm_completion_text(raw)
 

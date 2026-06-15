@@ -67,14 +67,14 @@ def test_gateway_normalizes_claude_style_usage_tokens() -> None:
         "content": [{"type": "text", "text": "PREDICTION: 0.5\nREASONING: test"}],
     }
     provider = StubProvider(
-        provider_id="claude",
+        provider_id="anthropic",
         call_type="messages",
         raw=raw,
         tier=ProviderTier.INFERENCE,
     )
-    gateway = ProviderGateway(providers={"claude": provider})
+    gateway = ProviderGateway(providers={"anthropic": provider})
 
-    gateway.call_provider("claude", "messages", {"model": "claude-sonnet-4-6"})
+    gateway.call_provider("anthropic", "messages", {"model": "claude-sonnet-4-6"})
     call = gateway.call_log[0]
     assert call.usage_meta is not None
     assert call.usage_meta.input_tokens == 1200

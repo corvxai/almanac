@@ -41,7 +41,7 @@ _seen_validator_nonces: dict[tuple[str, str], int] = {}
 _NONCE_TTL_MS = 10 * 60 * 1000
 
 _PROVIDER_CAPABILITIES: dict[str, dict[str, Any]] = {
-    "claude": {
+    "anthropic": {
         "models": ["claude-sonnet-4-6"],
         "allowsAnyModel": False,
         "defaultCallType": "messages",
@@ -354,7 +354,7 @@ async def validator_completions(request: Request) -> dict[str, Any]:
 
 def _infer_default_call_type(provider_id: str) -> str:
     defaults = {
-        "claude": "messages",
+        "anthropic": "messages",
         "openrouter": "chat_completion",
         "openai": "chat_completion",
         "grok": "chat_completion",

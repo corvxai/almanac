@@ -10,7 +10,8 @@ strictest set of flags Docker offers:
 - `mem_limit`, `nano_cpus`, `pids_limit` — fail-closed resource ceilings.
 - `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]` — kernel
   surface area minimised.
-- `user="10001:10001"` — non-root, unprivileged.
+- `user="<host_uid>:<host_gid>"` when the validator runs unprivileged
+  (fallback `10001:10001` when host uid is root).
 - Single read-only bind mount: the validator-local proxy's UDS dir.
 - Optional gVisor (`runtime="runsc"`) for syscall-level isolation.
 
@@ -43,6 +44,7 @@ logger = logging.getLogger("arcratio.sandbox_docker")
 # mounted (read-only). Pairs with `runner_entrypoint._socket_path_from_env`.
 _SANDBOX_SOCKET_DIR = "/run/arcratio"
 _SANDBOX_SOCKET_URL = f"http+unix://{_SANDBOX_SOCKET_DIR}/proxy.sock"
+_SANDBOX_INPUT_DIR = f"{_SANDBOX_SOCKET_DIR}/inputs"
 
 # Upper bound on agent stdout we are willing to buffer/parse. A real
 # AgentResult JSON is a few KB; this is a generous ceiling to contain a
@@ -247,8 +249,9 @@ def run_agent_in_container(
     # read it via ARCRATIO_RUNNER_INPUT_FILE. Docker stdin attach + EOF is
     # unreliable; ``sys.stdin.read()`` in the runner would otherwise hang.
     payload_name = f".arcratio_stdin_{run_id}.json"
-    payload_host_path = cfg.sandbox_socket_dir / payload_name
-    payload_runner_path = f"{_SANDBOX_SOCKET_DIR}/{payload_name}"
+    payload_host_dir = cfg.sandbox_socket_dir / "inputs"
+    payload_host_path = payload_host_dir / payload_name
+    payload_runner_path = f"{_SANDBOX_INPUT_DIR}/{payload_name}"
 
     # docker.from_env() defaults to a 60s HTTP read timeout. Raise the client
     # timeout so long ``container.wait()`` calls are less likely to hit
@@ -274,6 +277,10 @@ def run_agent_in_container(
 
     bind_src = _sibling_socket_host_bind(cfg)
 
+    host_uid = os.getuid()
+    host_gid = os.getgid()
+    runner_user = f"{host_uid}:{host_gid}" if host_uid != 0 else "10001:10001"
+
     container_kwargs: dict[str, Any] = dict(
         image=cfg.sandbox_image,
         stdin_open=False,
@@ -286,7 +293,7 @@ def run_agent_in_container(
         pids_limit=cfg.sandbox_pids_limit,
         cap_drop=["ALL"],
         security_opt=["no-new-privileges:true"],
-        user="10001:10001",
+        user=runner_user,
         volumes={
             bind_src: {
                 "bind": _SANDBOX_SOCKET_DIR,
@@ -310,6 +317,11 @@ def run_agent_in_container(
 
     container: Any | None = None
     try:
+        payload_host_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(payload_host_dir, 0o755)
+        except OSError:
+            pass
         payload_host_path.write_text(
             json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
@@ -324,7 +336,7 @@ def run_agent_in_container(
             flush=True,
         )
         logger.info(
-            "Launching sandbox: container=%s image=%s runtime=%s run_id=%s agent=%s.%s host_bind=%s",
+            "Launching sandbox: container=%s image=%s runtime=%s run_id=%s agent=%s.%s host_bind=%s user=%s",
             container.id,
             cfg.sandbox_image,
             runtime or "runc",
@@ -332,6 +344,7 @@ def run_agent_in_container(
             agent_module,
             agent_class,
             bind_src,
+            runner_user,
         )
 
         container.start()

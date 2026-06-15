@@ -112,9 +112,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--agent", "-a",
-        choices=["simple", "openrouter", "claude", "all"],
-        default="claude",
-        help="Which agent to run (default: claude)",
+        choices=["simple", "openrouter", "anthropic", "all"],
+        default="openrouter",
+        help="Which agent to run (default: openrouter)",
     )
     parser.add_argument(
         "--all-events",
@@ -199,7 +199,7 @@ def main() -> None:
     agent_map = {
         "simple": SimpleAgent,
         "openrouter": OpenRouterAgent,
-        "claude": ClaudeAgent,
+        "anthropic": ClaudeAgent,
     }
     if args.agent == "all":
         agents = [cls() for cls in agent_map.values()]

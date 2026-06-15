@@ -59,7 +59,7 @@ class _Digest:
         )
         self.provider_calls = [
             SimpleNamespace(provider_id="polymarket", model=None),
-            SimpleNamespace(provider_id="claude", model="claude-sonnet-4-6"),
+            SimpleNamespace(provider_id="anthropic", model="claude-sonnet-4-6"),
         ]
 
     def model_dump(self, mode: str = "json"):
@@ -98,7 +98,7 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert prediction["executionMetadata"]["predictionInvalidReason"] is None
     assert prediction["executionMetadata"]["predictionValidation"]["isValid"] is True
     assert prediction["executionMetadata"]["predictionValidation"]["reasons"] == []
-    assert payload["reasoningTrace"]["modelMetadata"]["provider"] == "claude"
+    assert payload["reasoningTrace"]["modelMetadata"]["provider"] == "anthropic"
     assert payload["reasoningTrace"]["modelMetadata"]["model"] == "claude-sonnet-4-6"
     assert payload["reasoningTrace"]["schemaVersion"] == "1.0"
     assert payload["reasoningTrace"]["traceSummary"]["strategy"] == "validator-assignment-pipeline"

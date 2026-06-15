@@ -1,7 +1,7 @@
 """Attack: call a provider that the run's track does not allow.
 
 The run is registered with track="SIGNAL" which only permits
-`polymarket` + `web_search`; this agent calls `claude.messages` and the
+`polymarket` + `web_search`; this agent calls `anthropic.messages` and the
 local proxy must respond with HTTP 403.
 """
 
@@ -19,5 +19,5 @@ class AllowlistBypassAttack(BaseAgent):
     agent_version = "attack/allowlist_bypass/1"
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
-        ctx.call_provider("claude", "messages", {"messages": []})
+        ctx.call_provider("anthropic", "messages", {"messages": []})
         return AgentResult(prediction=0.5, reasoning="bypassed allowlist")

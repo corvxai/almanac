@@ -10,7 +10,7 @@ from tests.gateway.harness import assert_evidence_nonempty, call_and_extract, re
 
 
 @pytest.mark.live
-@pytest.mark.provider("claude")
+@pytest.mark.provider("anthropic")
 def test_claude_messages_live_smoke(maybe_pretty_print_raw) -> None:
     require_env_vars("ANTHROPIC_API_KEY")
     params = {
@@ -28,7 +28,7 @@ def test_claude_messages_live_smoke(maybe_pretty_print_raw) -> None:
         ],
     }
     raw, evidence = call_and_extract(ClaudeProvider(), "messages", params)
-    maybe_pretty_print_raw(raw, banner="claude.messages (live API)")
+    maybe_pretty_print_raw(raw, banner="anthropic.messages (live API)")
     assert isinstance(raw, dict)
     assert raw.get("content"), "expected Claude Messages API content blocks"
     assert_evidence_nonempty(evidence)

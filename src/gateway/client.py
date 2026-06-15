@@ -23,7 +23,7 @@ from src.gateway.providers.base import BaseProvider
 _DEFAULT_TIERS: dict[str, ProviderTier] = {
     "polymarket": ProviderTier.FREE_SIGNAL,
     "web_search": ProviderTier.SEARCH,
-    "claude": ProviderTier.INFERENCE,
+    "anthropic": ProviderTier.INFERENCE,
     "openai": ProviderTier.INFERENCE,
     "gemini": ProviderTier.INFERENCE,
     "grok": ProviderTier.INFERENCE,
@@ -131,6 +131,29 @@ def _http_error_detail(resp: httpx.Response) -> str:
     return text or "(no response body)"
 
 
+def optional_completions_fields(params: dict[str, Any]) -> dict[str, Any]:
+    """Pass through agent-set LLM fields only — no relay defaults."""
+    out: dict[str, Any] = {}
+    if "model" in params:
+        out["model"] = params["model"]
+    if "messages" in params:
+        out["messages"] = params["messages"]
+    if "maxTokens" in params:
+        out["maxTokens"] = params["maxTokens"]
+    elif "max_tokens" in params:
+        out["maxTokens"] = params["max_tokens"]
+    if "temperature" in params:
+        out["temperature"] = params["temperature"]
+    if "topP" in params:
+        out["topP"] = params["topP"]
+    elif "top_p" in params:
+        out["topP"] = params["top_p"]
+    if "stop" in params:
+        stop = params["stop"]
+        out["stop"] = stop if isinstance(stop, list) else [str(stop)]
+    return out
+
+
 def _build_completions_payload(
     provider_id: str,
     call_type: str,
@@ -139,36 +162,12 @@ def _build_completions_payload(
     default_call_type: str,
     supports_completions: bool,
 ) -> dict[str, Any]:
-    messages = params.get("messages")
-    if not isinstance(messages, list) or not messages:
-        messages = [
-            {
-                "role": "user",
-                "content": default_message_content(call_type, params),
-            }
-        ]
-    max_tokens = params.get("maxTokens", params.get("max_tokens", 1024))
-    top_p = params.get("topP", params.get("top_p", 1))
-    stop = params.get("stop", [])
-    model = params.get("model", "")
-    payload = {
-        "provider": provider_id,
-        "model": model,
-        "messages": messages,
-        "maxTokens": max_tokens,
-        "temperature": params.get("temperature", 1),
-        "topP": top_p,
-        "stop": stop if isinstance(stop, list) else [str(stop)],
-    }
+    payload: dict[str, Any] = {"provider": provider_id}
+    payload.update(optional_completions_fields(params))
     if not supports_completions:
         payload["callType"] = call_type or default_call_type
         payload["params"] = params
     return payload
-
-
-def default_message_content(call_type: str, params: dict[str, Any]) -> str:
-    parts = [f"{k}={v}" for k, v in sorted(params.items())]
-    return f"{call_type}({', '.join(parts)})"
 
 
 def discover_provider_descriptors(gateway_url: str | None = None) -> list[ProviderDescriptor]:

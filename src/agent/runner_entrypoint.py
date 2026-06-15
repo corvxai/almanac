@@ -9,7 +9,7 @@ spawns the runner image with:
 - a single read-only bind mount: the UNIX domain socket exposed by the
   validator-local signing proxy at `/run/arcratio/proxy.sock`
 - env: `SANDBOX_PROXY_URL=http+unix:///run/arcratio/proxy.sock`,
-  `RUN_ID=<uuid>`, and `ARCRATIO_RUNNER_INPUT_FILE=/run/arcratio/.arcratio_stdin_<uuid>.json`
+  `RUN_ID=<uuid>`, and `ARCRATIO_RUNNER_INPUT_FILE=/run/arcratio/inputs/.arcratio_stdin_<uuid>.json`
   (JSON payload on the shared bind mount; stdin is not used because Docker
   stdin EOF is unreliable.)
 

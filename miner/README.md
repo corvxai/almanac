@@ -19,7 +19,7 @@ Use this guide to build an agent and interact with gateway orchestrator miner en
 pip install -r requirements.txt
 ```
 
-## Agent contract
+## Creating agents
 
 Your agent should follow the project contract in `src/agent/base.py`:
 
@@ -28,6 +28,57 @@ Your agent should follow the project contract in `src/agent/base.py`:
 - Implement `predict(ctx: ForecastingContext)`
 
 Reference implementations are in `src/agent/examples/`.
+
+### Calling providers
+
+Use `ctx.call_provider(provider_id, call_type, params)` to reach external data and LLM APIs. Every key in `params` is forwarded as-is through the validator gateway — **the platform does not inject defaults** for LLM sampling or token limits. If you omit a param, it is not sent upstream.
+
+Example:
+
+```python
+ctx.call_provider("openrouter", "chat_completion", {
+    "model": "anthropic/claude-sonnet-4-6",
+    "messages": [{"role": "user", "content": prompt}],
+    "max_tokens": 1024,
+    "temperature": 0.2,
+})
+```
+
+Common `provider_id` / `call_type` pairs:
+
+| Provider | `call_type` | Typical use |
+|---|---|---|
+| `anthropic` | `messages` | Claude Messages API (tools, web search) |
+| `openrouter` | `chat_completion` | OpenAI-compatible chat via OpenRouter |
+| `openai` | `chat_completion` | OpenAI chat completions |
+| `gemini` | `generate_content` | Google Gemini |
+| `perplexity` | `chat_completion` | Perplexity Sonar |
+| `polymarket` | `get_market` | Market odds and metadata |
+| `web_search` | `search` | Web search results |
+
+Provider-specific params (for example `system`, `tools`, `grounding`) are also pass-through — include them in `params` when your chosen provider supports them. See the example agents and `src/gateway/providers/` for what each adapter accepts.
+
+### LLM params you must define
+
+These are the most common params for inference providers. **Only params you set in your agent code are forwarded.** Calibrate them per provider and model — some models reject certain sampling params entirely (for example newer Claude models may 400 on `temperature` or `top_p`).
+
+| Param | Type | Description |
+|---|---|---|
+| `model` | `str` | Model ID for the provider (required for LLM calls). |
+| `messages` | `list[dict]` | Chat messages, typically `[{"role": "user", "content": "..."}]`. |
+| `max_tokens` | `int` | Maximum tokens in the completion. Omit only if you accept the provider adapter's own fallback. |
+| `temperature` | `float` | Randomness (lower = more deterministic). Often `0.1`–`0.3` for forecasting. Omit on models that reject sampling params. |
+| `top_p` | `float` | Nucleus sampling alternative to temperature. Use one or the other, not both, on Claude 4+ models. |
+| `stop` | `list[str]` | Sequences that stop generation when encountered. |
+
+Anthropic-only params (pass-through when using `anthropic` / `messages`):
+
+| Param | Type | Description |
+|---|---|---|
+| `system` | `str` | System prompt. |
+| `tools` | `list[dict]` | Tool definitions (for example web search). |
+
+You are responsible for choosing values that work with your target model, testing them locally, and handling provider errors when a model rejects a param combination.
 
 ## Quick start
 

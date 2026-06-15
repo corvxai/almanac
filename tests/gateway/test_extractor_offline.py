@@ -22,7 +22,7 @@ OFFLINE_FIXTURE_CASES: list[tuple[str, str, tuple[EvidenceType, ...]]] = [
     ("web_search", "search", (EvidenceType.QUOTE_SUMMARY, EvidenceType.STATISTIC)),
     ("grok", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("perplexity", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.QUOTE_SUMMARY)),
-    ("claude", "messages", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
+    ("anthropic", "messages", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("openai", "responses", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("gemini", "generate_content", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("openrouter", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.QUOTE_SUMMARY)),
