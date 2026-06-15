@@ -7,6 +7,7 @@ import hashlib
 import logging
 import math
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 from uuid import NAMESPACE_URL, uuid5
 
@@ -26,6 +27,51 @@ from src.validator.orchestrator_event_mapper import assignment_to_event
 MAX_ASSIGNMENT_AGENT_CODE_BYTES = 2 * 1024 * 1024  # 2MB
 INVALID_PREDICTION_SENTINEL = 0.0
 INVALID_CONFIDENCE_SENTINEL = 0.0
+
+
+def _to_camel_case(value: str) -> str:
+    parts = value.split("_")
+    if len(parts) == 1:
+        return value
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+def _camelize(value: object) -> object:
+    if isinstance(value, dict):
+        return {_to_camel_case(str(k)): _camelize(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_camelize(v) for v in value]
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _reasoning_step_payload(raw_step: dict[str, object]) -> dict[str, object]:
+    return {
+        "stepType": raw_step.get("step_type"),
+        "providerCallIndex": raw_step.get("provider_call_index"),
+        "providerId": raw_step.get("provider_id"),
+        "inputEvidenceRefs": raw_step.get("input_evidence_refs") or [],
+        "reasoningText": raw_step.get("reasoning_text"),
+        "agentInterpretation": raw_step.get("agent_interpretation"),
+        "intermediateProbability": raw_step.get("intermediate_probability"),
+        "confidenceDelta": raw_step.get("confidence_delta"),
+        "conflictSignals": raw_step.get("conflict_signals"),
+        "inferenceModelUsed": raw_step.get("inference_model_used"),
+        "stage": None,
+        "origin": "reasoningChain",
+    }
+
+
+def _build_reasoning_steps(raw_reasoning_chain: list[dict[str, object]]) -> list[dict[str, object]]:
+    steps = [_reasoning_step_payload(step) for step in raw_reasoning_chain]
+    for idx, step in enumerate(steps):
+        step["stepIndex"] = idx
+    return steps
+
+
+def _build_provider_calls(raw_provider_calls: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [_camelize(call) for call in raw_provider_calls]
 
 
 class _InlineCodeSandboxAgent(BaseAgent):
@@ -194,6 +240,20 @@ def build_prediction_submit_payload(
     assignment: OrchestratorAssignment,
     digest: EvidenceDigest,
 ) -> dict:
+    digest_dump = digest.model_dump(mode="json")
+    raw_provider_calls = [
+        call for call in digest_dump.get("provider_calls", []) if isinstance(call, dict)
+    ]
+    raw_reasoning_chain = [
+        step for step in digest_dump.get("reasoning_chain", []) if isinstance(step, dict)
+    ]
+    provider_calls = _build_provider_calls(raw_provider_calls)
+    steps = _build_reasoning_steps(raw_reasoning_chain)
+    execution_context = digest_dump.get("execution_context", {})
+    trace_integrity = digest_dump.get("trace_integrity", {})
+    prediction_output = digest_dump.get("prediction_output", {})
+    evidence_digest = _camelize(digest_dump)
+
     yes_id, no_id = resolve_binary_outcome_ids(assignment)
     (
         probability,
@@ -241,18 +301,30 @@ def build_prediction_submit_payload(
         "reasoningTrace": {
             "schemaVersion": "1.0",
             "trace": {
-                "steps": [
-                    "Fetched assignment via validator auth",
-                    "Executed assignment agent in sandbox",
-                    "Built prediction payload from execution digest",
-                ]
+                "providerCalls": provider_calls,
+                "steps": steps,
+                "evidenceDigest": evidence_digest,
             },
             "traceSummary": {
                 "strategy": "validator-assignment-pipeline",
+                "executionId": execution_context.get("execution_id"),
+                "traceHash": trace_integrity.get("trace_hash"),
+                "providerCallCount": len(provider_calls),
+                "reasoningStepCount": len(steps),
+                "totalEvidenceItems": trace_integrity.get("total_evidence_items"),
+                "totalProviderCost": trace_integrity.get("total_provider_cost"),
+                "usageTotals": _camelize(trace_integrity.get("usage_totals")),
+                "reasoningSummary": prediction_output.get("reasoning_summary"),
+                "keyDrivers": prediction_output.get("key_drivers") or [],
+                "keyUncertainties": prediction_output.get("key_uncertainties") or [],
+                "contrarianFlag": prediction_output.get("contrarian_flag"),
             },
             "modelMetadata": {
                 "provider": provider_id,
                 "model": model,
+                "agentId": execution_context.get("agent_id"),
+                "agentVersion": execution_context.get("agent_version"),
+                "validatorId": execution_context.get("validator_id"),
             },
         },
     }
