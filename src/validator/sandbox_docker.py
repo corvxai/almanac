@@ -279,7 +279,10 @@ def run_agent_in_container(
 
     host_uid = os.getuid()
     host_gid = os.getgid()
-    runner_user = f"{host_uid}:{host_gid}" if host_uid != 0 else "10001:10001"
+    # Prefer identity alignment with the validator process for shared UDS access.
+    # If the validator itself is root inside a container, sibling containers also
+    # need root to access a root-owned 0600 proxy.sock on the shared bind mount.
+    runner_user = f"{host_uid}:{host_gid}" if host_uid != 0 else "0:0"
 
     container_kwargs: dict[str, Any] = dict(
         image=cfg.sandbox_image,

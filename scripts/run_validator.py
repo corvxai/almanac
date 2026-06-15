@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -24,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from tabulate import tabulate
 
 from src.core.config import AppConfig
+from src.gateway.constants import gateway_service_url
 from src.storage.json_store import JsonTraceStore
 from src.validator.validator import Validator, start_local_proxy
 
@@ -196,11 +199,38 @@ def _log_startup_config_table(log: logging.Logger, config: AppConfig, args: argp
         ("validator_loop", "write_trading_history", config.loop.write_trading_history),
         ("validator_loop", "db_score_logging", config.loop.db_score_logging),
         ("validator_loop", "wandb_enabled", config.loop.wandb_enabled),
+        ("validator_loop", "set_weights_enabled", config.loop.set_weights_enabled),
         ("runtime", "proxy_enabled", not args.no_proxy),
         ("runtime", "data_dir", str(config.storage.data_dir)),
     ]
     table = tabulate(rows, headers=("section", "key", "value"), tablefmt="simple_outline")
     log.info("Startup config:\n%s", table)
+
+
+def _running_in_container() -> bool:
+    return Path("/.dockerenv").exists()
+
+
+def _rewrite_loopback_url_for_container(url: str) -> str:
+    """Map host-loopback URLs to Docker host gateway when containerized."""
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    parsed = urlparse(raw)
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return raw
+    # Keep scheme/path/query/port exactly as configured; only swap host.
+    host = "host.docker.internal"
+    if parsed.port is not None:
+        netloc = f"{host}:{parsed.port}"
+    else:
+        netloc = host
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        netloc = f"{auth}@{netloc}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def main() -> None:
@@ -259,6 +289,15 @@ def main() -> None:
         dest="metadata_manager_off",
         action="store_true",
         help="Disable Almanac metadata manager thread for this run.",
+    )
+    parser.add_argument(
+        "--setweights.off",
+        dest="setweights_off",
+        action="store_true",
+        help=(
+            "Score and blend as usual but skip the on-chain set_weights call "
+            "(dry-run for dev/testing)."
+        ),
     )
     parser.add_argument(
         "--wire.debug",
@@ -343,6 +382,8 @@ def main() -> None:
         config.loop.write_trading_history = True
     if args.metadata_manager_off:
         config.loop.metadata_manager_enabled = False
+    if args.setweights_off:
+        config.loop.set_weights_enabled = False
 
     config.storage.data_dir = args.data_dir
     if args.unsafe_no_signing:
@@ -365,6 +406,35 @@ def main() -> None:
         config.loop.arcratio_enabled,
         config.loop.arcratio_weight_share,
     )
+
+    if _running_in_container():
+        mounted_run_dir = Path("/var/run/arcratio")
+        if mounted_run_dir.is_dir() and config.validator.sandbox_socket_dir != mounted_run_dir:
+            log.info(
+                "Container runtime detected; rewriting sandbox socket dir %s -> %s",
+                config.validator.sandbox_socket_dir,
+                mounted_run_dir,
+            )
+            config.validator.sandbox_socket_dir = mounted_run_dir
+
+        rewritten = _rewrite_loopback_url_for_container(config.validator.orchestrator_api_url)
+        if rewritten != config.validator.orchestrator_api_url:
+            log.info(
+                "Container runtime detected; rewriting orchestrator URL %s -> %s",
+                config.validator.orchestrator_api_url,
+                rewritten,
+            )
+            config.validator.orchestrator_api_url = rewritten
+        gateway_base = gateway_service_url()
+        gateway_rewritten = _rewrite_loopback_url_for_container(gateway_base)
+        if gateway_rewritten != gateway_base:
+            log.info(
+                "Container runtime detected; rewriting gateway URL %s -> %s",
+                gateway_base,
+                gateway_rewritten,
+            )
+            os.environ["GATEWAY_SERVICE_URL"] = gateway_rewritten
+
     _log_startup_config_table(log, config, args)
 
     state = None
@@ -379,6 +449,12 @@ def main() -> None:
     # Proxy startup imports bittensor; re-sync so bt.logging emits at INFO/DEBUG
     # through the same column formatter as arcratio.* loggers.
     _sync_bittensor_logging(config.log_level, log_formatter)
+
+    log.info(
+        "Effective service URLs: orchestrator=%s gateway=%s",
+        config.validator.orchestrator_api_url,
+        gateway_service_url(),
+    )
 
     store = JsonTraceStore(data_dir=config.storage.data_dir)
 

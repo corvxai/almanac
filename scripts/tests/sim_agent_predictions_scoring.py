@@ -5,10 +5,16 @@ Run from repo root:
 
     python3 scripts/tests/sim_agent_predictions_scoring.py
     python3 scripts/tests/sim_agent_predictions_scoring.py --generate-mock-data
+    python3 scripts/tests/sim_agent_predictions_scoring.py --fetch-live
+    python3 scripts/tests/sim_agent_predictions_scoring.py --fetch-live --wallet.name <vali-cold> --wallet.hotkey <vali-hot>
 
 By default, this script reads/writes:
 
     scripts/tests/agent_predictions.json
+
+``--fetch-live`` pulls scored predictions from the orchestrator API (same path
+the validator uses during its loop) and saves them locally. A normal run then
+scores that snapshot.
 """
 
 from __future__ import annotations
@@ -24,7 +30,13 @@ from types import SimpleNamespace
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.validator.orchestrator_api import ScoredPredictionsPage
+from src.core.config import AppConfig
+from src.gateway.signing import load_hotkey
+from src.validator.orchestrator_api import (
+    ScoredPredictionItem,
+    ScoredPredictionsPage,
+    fetch_all_scored_predictions,
+)
 from src.validator.scoring import DEFAULT_ROLLING_WINDOW_DAYS, score_agent_predictions
 
 DEFAULT_AGENT_PREDICTIONS_FILE = (
@@ -124,6 +136,52 @@ def _generate_mock_predictions(now: datetime) -> list[dict]:
     return rows
 
 
+def _serialize_scored_predictions(rows: list[ScoredPredictionItem]) -> list[dict]:
+    return [row.model_dump(mode="json") for row in rows]
+
+
+def _write_scored_predictions(path: Path, rows: list[ScoredPredictionItem]) -> int:
+    payload = _serialize_scored_predictions(rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return len(payload)
+
+
+def _fetch_live_predictions(
+    *,
+    base_url: str,
+    days: int,
+    timeout_seconds: float,
+    wallet_name: str | None,
+    wallet_hotkey: str | None,
+    wallet_path: Path | None,
+) -> list[ScoredPredictionItem]:
+    cfg = AppConfig.load_default()
+    if wallet_name:
+        cfg.bittensor.wallet_name = wallet_name
+    if wallet_hotkey:
+        cfg.bittensor.wallet_hotkey = wallet_hotkey
+    if wallet_path is not None:
+        cfg.bittensor.wallet_path = wallet_path
+
+    loaded_hotkey = load_hotkey(cfg.bittensor)
+    if loaded_hotkey is None:
+        raise RuntimeError(
+            "validator hotkey signing is unavailable; configure wallet settings "
+            "or enable signing_required."
+        )
+
+    return fetch_all_scored_predictions(
+        base_url=base_url,
+        loaded_hotkey=loaded_hotkey,
+        days=days,
+        include_trace_summary=False,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def _write_mock_predictions(path: Path) -> int:
     now = datetime.now(timezone.utc)
     rows = _generate_mock_predictions(now)
@@ -153,13 +211,87 @@ def main() -> int:
         help="Generate mock agent_predictions.json (combined rows list) and exit.",
     )
     parser.add_argument(
+        "--fetch-live",
+        action="store_true",
+        help=(
+            "Fetch scored predictions from orchestrator API and save to --input-file, "
+            "then exit."
+        ),
+    )
+    parser.add_argument(
         "--input-file",
         default=str(DEFAULT_AGENT_PREDICTIONS_FILE),
-        help=f"Path to input JSON file (default: {DEFAULT_AGENT_PREDICTIONS_FILE}).",
+        help=f"Path to input/output JSON file (default: {DEFAULT_AGENT_PREDICTIONS_FILE}).",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Override orchestrator base URL. Defaults to validator.orchestrator_api_url.",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Rolling window days for live fetch. Defaults to loop.rolling_window_days.",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=15.0,
+        help="HTTP timeout for live orchestrator fetch.",
+    )
+    parser.add_argument(
+        "--wallet.name",
+        dest="wallet_name",
+        default=None,
+        help="Override bittensor wallet name for live fetch signing.",
+    )
+    parser.add_argument(
+        "--wallet.hotkey",
+        dest="wallet_hotkey",
+        default=None,
+        help="Override bittensor wallet hotkey for live fetch signing.",
+    )
+    parser.add_argument(
+        "--wallet.path",
+        dest="wallet_path",
+        type=Path,
+        default=None,
+        help="Override bittensor wallet path for live fetch signing.",
     )
     args = parser.parse_args()
 
     input_path = Path(args.input_file)
+    if args.generate_mock_data and args.fetch_live:
+        print("choose only one of --generate-mock-data or --fetch-live")
+        return 2
+
+    if args.fetch_live:
+        cfg = AppConfig.load_default()
+        base_url = (args.base_url or cfg.validator.orchestrator_api_url).strip()
+        if not base_url:
+            print("missing orchestrator API URL in validator config")
+            return 2
+        days = args.days if args.days is not None else cfg.loop.rolling_window_days
+        try:
+            rows = _fetch_live_predictions(
+                base_url=base_url,
+                days=days,
+                timeout_seconds=args.timeout_seconds,
+                wallet_name=args.wallet_name,
+                wallet_hotkey=args.wallet_hotkey,
+                wallet_path=args.wallet_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"failed to fetch scored predictions from {base_url}: {exc}")
+            return 1
+
+        count = _write_scored_predictions(input_path, rows)
+        print(f"Fetched {count} scored prediction rows from {base_url}")
+        print(f"Wrote snapshot to {input_path}")
+        print(f"Config: days={days}, include_trace_summary=False")
+        return 0
+
     if args.generate_mock_data:
         return _write_mock_predictions(input_path)
 

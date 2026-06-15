@@ -64,10 +64,10 @@ class GatewayDefaults:
 class ValidatorLoopDefaults:
     loop_enabled: bool = True
     almanac_enabled: bool = True
-    arcratio_enabled: bool = False
+    arcratio_enabled: bool = True
     metadata_manager_enabled: bool = True
-    almanac_weight_share: float = 1.0
-    arcratio_weight_share: float = 0.0
+    almanac_weight_share: float = 0.95
+    arcratio_weight_share: float = 0.05
     almanac_api_url: str | None = None
     use_synthetic_trading_data: bool = False
     write_trading_history: bool = False
@@ -79,6 +79,7 @@ class ValidatorLoopDefaults:
     metadata_batch_delay_seconds: float = 2.0
     metadata_per_uid_delay_seconds: float = 0.1
     metadata_use_bulk_commitments: bool = True
+    set_weights_enabled: bool = True
 
 
 VALIDATOR = ValidatorDefaults()

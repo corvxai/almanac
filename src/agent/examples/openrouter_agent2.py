@@ -1,4 +1,4 @@
-"""OpenRouter agent — gathers market data + news, then calls an LLM via
+"""OpenRouter agent v2 — gathers market data + news, then calls an LLM via
 OpenRouter to synthesise a prediction.
 
 Two-phase flow:

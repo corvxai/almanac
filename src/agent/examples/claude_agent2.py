@@ -1,4 +1,4 @@
-"""Claude agent — uses Anthropic's Messages API with the web_search server
+"""Claude agent v2 — uses Anthropic's Messages API with the web_search server
 tool for grounded, citation-backed predictions.
 
 Two-phase flow:
