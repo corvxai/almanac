@@ -40,7 +40,7 @@ services:
       dockerfile: docker/validator.Dockerfile
     environment:
       # Central provider gateway target
-      GATEWAY_SERVICE_URL: ${GATEWAY_SERVICE_URL:-https://gateway.arcratio.ai}
+      GATEWAY_SERVICE_URL: ${GATEWAY_SERVICE_URL:-http://localhost:4000}
       # Omit agent-runner log tails after each exit (default is print).
       ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET: ${ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET:-}
       # Agent provider keys passed through to the central gateway are NOT

@@ -328,8 +328,9 @@ class Validator:
 
         logger.info("=========== STARTING ARCRATIO VALIDATOR LOOP ===========")
         logger.info(
-            "Scoring/set_weights will run once per hour at minute %d (UTC). "
+            "Scoring%s will run once per hour at minute %d (UTC). "
             "Almanac enabled=%s, Arcratio enabled=%s",
+            "/set_weights" if self._config.loop.set_weights_enabled else " (dry-run, no set_weights)",
             self._scoring_minute,
             self._config.loop.almanac_enabled,
             self._config.loop.arcratio_enabled,
@@ -598,7 +599,14 @@ class Validator:
 
         weights = combine_weights(weights_almanac, weights_arcratio, blend_cfg)
 
-        self._set_weights(weights)
+        if loop_cfg.set_weights_enabled:
+            self._set_weights(weights)
+        else:
+            logger.info(
+                "set_weights disabled; dry-run epoch complete (subnet=%d, size=%d).",
+                self._config.bittensor.netuid,
+                len(weights),
+            )
         return weights
 
     def _score_almanac(self) -> Optional[np.ndarray]:

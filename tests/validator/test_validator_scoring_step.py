@@ -219,3 +219,21 @@ def test_validator_rejects_both_mechanisms_disabled() -> None:
 
     with pytest.raises(ValueError, match="both mechanisms disabled"):
         Validator(config=cfg, store=None, bt_objects=bt, metadata_manager=None)
+
+
+def test_set_weights_disabled_skips_chain_submission(monkeypatch, store):
+    bt = _bt_objects(uids=[0, 1, 2])
+    cfg = _config(almanac=True, arcratio=False)
+    cfg.loop.set_weights_enabled = False
+
+    monkeypatch.setattr(
+        "src.validator.almanac.score_almanac",
+        lambda **kw: np.array([0.1, 0.4, 0.5], dtype=float),
+    )
+
+    v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
+    weights = v.run_scoring_step()
+
+    assert bt.metagraph.synced == 1
+    assert not bt.subtensor.calls
+    np.testing.assert_allclose(weights, np.array([0.1, 0.4, 0.5]))
