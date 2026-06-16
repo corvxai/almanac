@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from uuid import UUID
 
+from src.core.config import StorageConfig
 from src.core.schemas import EvidenceDigest, ResolutionRecord
 from src.storage.store import TraceStore
 
@@ -43,6 +44,34 @@ def _atomic_write_text(path: Path, text: str) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+class NullTraceStore(TraceStore):
+    """No-op trace store for production runs that submit to the orchestrator only."""
+
+    def save_trace(self, digest: EvidenceDigest) -> None:
+        return None
+
+    def get_trace(self, execution_id: UUID) -> EvidenceDigest | None:
+        return None
+
+    def list_traces_by_event(self, event_id: UUID) -> list[EvidenceDigest]:
+        return []
+
+    def list_traces_by_agent(self, agent_id: UUID) -> list[EvidenceDigest]:
+        return []
+
+    def save_resolution(self, event_id: UUID, record: ResolutionRecord) -> None:
+        return None
+
+    def get_resolution(self, event_id: UUID) -> ResolutionRecord | None:
+        return None
+
+
+def build_trace_store(config: StorageConfig) -> TraceStore:
+    if config.persist_traces:
+        return JsonTraceStore(data_dir=config.data_dir)
+    return NullTraceStore()
 
 
 class JsonTraceStore(TraceStore):

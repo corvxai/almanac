@@ -49,6 +49,8 @@ class BittensorDefaults:
 class StorageDefaults:
     backend: str = "json"
     data_dir: Path = field(default_factory=lambda: _PROJECT_ROOT / "data")
+    # When False, traces are not written under data/traces;
+    persist_traces: bool = False
 
 
 @dataclass(frozen=True)

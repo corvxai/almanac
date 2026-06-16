@@ -65,6 +65,7 @@ class BittensorConfig(BaseModel):
 class StorageConfig(BaseModel):
     backend: str = constants.STORAGE.backend
     data_dir: Path = constants.STORAGE.data_dir
+    persist_traces: bool = constants.STORAGE.persist_traces
 
 
 class GatewayConfig(BaseModel):

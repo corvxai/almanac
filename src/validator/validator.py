@@ -41,7 +41,7 @@ from src.core.schemas import EvidenceDigest
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
-from src.storage.json_store import JsonTraceStore
+from src.storage.store import TraceStore
 from src.validator.assignment_pipeline import (
     build_prediction_submit_payload,
     build_sandbox_assignment_agent,
@@ -252,7 +252,7 @@ class Validator:
     def __init__(
         self,
         config: AppConfig,
-        store: JsonTraceStore,
+        store: TraceStore,
         *,
         bt_objects=None,
         metadata_manager=_AUTO,
