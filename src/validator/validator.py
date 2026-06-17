@@ -631,6 +631,7 @@ class Validator:
                     else None
                 ),
                 db_score_logging=loop_cfg.db_score_logging,
+                budget_share=loop_cfg.almanac_weight_share,
             )
         except Exception:
             logger.exception("Almanac scoring failed for this epoch.")

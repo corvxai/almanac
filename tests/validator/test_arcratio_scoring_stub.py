@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from src.validator.scoring import score_agent_predictions
+from src.validator.scoring import PARETO_BOOST, PARETO_MU, _apply_pareto, score_agent_predictions
 
 
 class _StubMetagraph:
@@ -53,7 +53,9 @@ def _row(
             "predictionIsInvalid": invalid,
             "resolutionStatus": "resolved" if resolved else "voided",
             "scoredAt": now - timedelta(hours=1),
+            "marketId": f"mkt_{miner_uid}",
             "outcomeProbabilities": {"yes": p_win, "no": 1.0 - p_win},
+            "predictedOutcomeId": "yes",
             "resolvedOutcomeId": "yes",
         },
     )()
@@ -66,15 +68,15 @@ def test_empty_rows_returns_zeros() -> None:
     np.testing.assert_allclose(out, np.zeros(3))
 
 
-def test_perfect_prediction_yields_score_of_one() -> None:
+def test_perfect_prediction_yields_pareto_floor_score() -> None:
     metagraph = _StubMetagraph(uids=[0, 1, 2])
 
     now = datetime.now(timezone.utc)
-    rows = [_row(miner_uid=1, p_win=1.0, now=now)]
+    rows = [_row(miner_uid=1, p_win=1.0, now=now) for _ in range(12)]
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
 
     assert out[0] == 0.0
-    assert pytest.approx(out[1]) == 1.0
+    assert out[1] == pytest.approx(PARETO_MU)
     assert out[2] == 0.0
 
 
@@ -88,18 +90,18 @@ def test_worst_prediction_yields_score_of_zero() -> None:
     assert pytest.approx(out[0]) == 0.0
 
 
-def test_multiple_rows_average_their_briers() -> None:
+def test_multiple_rows_average_then_pareto_floor() -> None:
     metagraph = _StubMetagraph(uids=[5])
 
     now = datetime.now(timezone.utc)
     rows = [
         _row(miner_uid=5, p_win=1.0, now=now),
         _row(miner_uid=5, p_win=0.0, now=now),
-    ]
+    ] * 6
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
 
-    # Brier_avg = (0 + 1) / 2 = 0.5 -> score = 1 - 0.5 = 0.5
-    assert pytest.approx(out[0]) == 0.5
+    # Mean Brier = 0.5 is baseline-or-worse, so miner gets no positive reward.
+    assert out[0] == pytest.approx(0.0)
 
 
 def test_row_outside_rolling_window_is_ignored() -> None:
@@ -119,6 +121,30 @@ def test_unresolved_row_is_ignored() -> None:
     rows = [_row(miner_uid=0, p_win=1.0, now=now, resolved=False)]
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
     np.testing.assert_allclose(out, np.zeros(1))
+
+
+def test_apply_pareto_stretches_positive_scores() -> None:
+    raw = np.array([0.0, 0.4, 0.6, 0.8], dtype=float)
+    out = _apply_pareto(raw, mu=1.0, boost=0.30, knee=0.5, sharpness=8.0, tail=1.2)
+
+    np.testing.assert_allclose(out[0], 0.0)
+    np.testing.assert_allclose(out[1], 1.0)
+    np.testing.assert_allclose(out[3], 1.3)
+    assert out[1] < out[2] < out[3]
+
+
+def test_apply_pareto_defaults_cap_at_mu_plus_boost() -> None:
+    raw = np.array([0.1, 0.2, 0.3], dtype=float)
+    out = _apply_pareto(raw)
+    assert np.max(out) == pytest.approx(PARETO_MU + PARETO_BOOST)
+
+
+def test_baseline_brier_gets_zero_score() -> None:
+    metagraph = _StubMetagraph(uids=[1])
+    now = datetime.now(timezone.utc)
+    rows = [_row(miner_uid=1, p_win=0.5, now=now) for _ in range(12)]
+    out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
+    np.testing.assert_allclose(out, np.array([0.0]))
 
 
 def test_unmapped_uid_is_skipped_not_counted() -> None:

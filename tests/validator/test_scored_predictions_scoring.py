@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.validator import scoring
 
@@ -34,7 +35,9 @@ def _row(
         predictionIsInvalid=invalid,
         resolutionStatus="resolved" if resolved else "voided",
         scoredAt=now - timedelta(hours=1),
+        marketId=f"mkt_{uid}",
         outcomeProbabilities={"yes": p_win, "no": 1.0 - p_win},
+        predictedOutcomeId="yes",
         resolvedOutcomeId="yes",
     )
 
@@ -42,10 +45,8 @@ def _row(
 def test_score_agent_predictions_basic() -> None:
     now = datetime.now(timezone.utc)
     metagraph = _StubMetagraph([0, 1, 2])
-    rows = [
-        _row(uid=1, p_win=1.0, now=now),
-        _row(uid=1, p_win=0.0, now=now),
-        _row(uid=2, p_win=0.75, now=now),
+    rows = [_row(uid=1, p_win=0.60, now=now) for _ in range(12)] + [
+        _row(uid=2, p_win=0.90, now=now) for _ in range(12)
     ]
     out = scoring.score_agent_predictions(
         metagraph=metagraph,
@@ -53,9 +54,10 @@ def test_score_agent_predictions_basic() -> None:
         rolling_window_days=30,
         now=now,
     )
-    # uid=1 mean sq_err=(0^2 + 1^2)/2=0.5 => score=0.5
-    # uid=2 mean sq_err=(1-0.75)^2=0.0625 => score=0.9375
-    np.testing.assert_allclose(out, np.array([0.0, 0.5, 0.9375]))
+    # UID 2 has consistently stronger probability on the resolved side than UID 1.
+    assert out[0] == 0.0
+    assert 0.0 < out[1] < out[2]
+    assert out[1] == pytest.approx(scoring.PARETO_MU)
 
 
 def test_score_agent_predictions_filters_invalid_rows() -> None:

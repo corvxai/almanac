@@ -129,3 +129,41 @@ def test_all_zero_shares_falls_back_to_equal_weighting_with_warning(caplog) -> N
 
     np.testing.assert_allclose(out, np.array([0.5, 0.5]))
     assert any("equal weighting" in m for m in caplog.messages)
+
+
+def test_blend_identity_matches_expected_convex_combination() -> None:
+    w_almanac = np.array([0.5, 0.3, 0.2])
+    w_arcratio = np.array([0.2, 0.7, 0.1])
+    cfg = _cfg(almanac_share=2.0, arcratio_share=1.0)
+
+    out = combine_weights(w_almanac, w_arcratio, cfg)
+    expected = (2.0 / 3.0) * w_almanac + (1.0 / 3.0) * w_arcratio
+
+    np.testing.assert_allclose(out, expected)
+    assert pytest.approx(out.sum(), abs=1e-9) == 1.0
+
+
+def test_blend_applies_shares_once_no_double_scaling() -> None:
+    w_almanac = np.array([1.0, 0.0])
+    w_arcratio = np.array([0.0, 1.0])
+
+    out = combine_weights(
+        w_almanac, w_arcratio, _cfg(almanac_share=0.8, arcratio_share=0.2)
+    )
+
+    # Guardrail: if share were accidentally applied twice to Almanac,
+    # this would drift away from [0.8, 0.2].
+    np.testing.assert_allclose(out, np.array([0.8, 0.2]))
+
+
+def test_blend_preserves_expected_burn_uid_contribution() -> None:
+    # Index 2 stands in for BURN_UID in this deterministic blend test.
+    w_almanac = np.array([0.7, 0.0, 0.3])
+    w_arcratio = np.array([0.0, 1.0, 0.0])
+
+    out = combine_weights(
+        w_almanac, w_arcratio, _cfg(almanac_share=0.6, arcratio_share=0.4)
+    )
+
+    np.testing.assert_allclose(out, np.array([0.42, 0.4, 0.18]))
+    assert out[2] == pytest.approx(0.18)
