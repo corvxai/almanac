@@ -10,11 +10,14 @@ rolling window of resolved predictions:
     4. Ensemble        - does the agent move the swarm consensus toward truth
                          (leave-one-out contribution within each market)?
 
-Two eligibility gates run before scoring:
+Eligibility and confidence handling before final shaping:
     * Invalid-rate gate : >= INVALID_RATE_THRESHOLD of a miner's in-window
                           predictions are invalid -> score 0.
-    * Minimum-sample gate: fewer than MIN_VALID_PREDICTIONS valid resolved
+    * Minimum-sample gate: fewer than MIN_VALID_PREDICTIONS_HARD_FLOOR valid
                           predictions in window -> score 0.
+    * Baseline-accuracy gate: baseline-or-worse Brier -> score 0.
+    * Time-based significance: score is scaled by ``rho`` from a recency-weighted
+      effective prediction count within the rolling window.
 
 Invalid predictions that don't trip the rate gate are simply excluded from every
 pillar; they are never scored at a baseline (which would quietly reward laziness).
@@ -51,8 +54,18 @@ WEIGHT_EARLY_SIGNAL = 0.30
 WEIGHT_ENSEMBLE = 0.10
 
 # Eligibility gates.
-MIN_VALID_PREDICTIONS = 10        # < this many valid resolved preds in window -> 0
-INVALID_RATE_THRESHOLD = 0.15     # >= this fraction invalid in window         -> 0
+MIN_VALID_PREDICTIONS_HARD_FLOOR = 10 # tiny-sample floor; below this scoring is too noisy
+INVALID_RATE_THRESHOLD = 0.15         # >= this fraction invalid in window -> 0
+
+# Time-based significance (rho) controls confidence from sample size + recency.
+RHO_THRESHOLD_PREDICTIONS = 25.0      # effective count where rho ~= 0.5 (relaxed)
+RHO_ALPHA = 0.06                      # gentler logistic ramp around the threshold
+RHO_HALF_LIFE_DAYS = 14.0             # slower recency decay for effective count
+RHO_FLOOR = 0.10                      # minimum rho once miner passes hard gates
+
+# Inactivity policy (separate from rho): fade stale miners then switch off.
+INACTIVITY_GRACE_HOURS = 24.0         # no inactivity penalty while within grace
+INACTIVITY_ZERO_HOURS = 72.0          # score forced to 0 after this staleness age
 
 # Accuracy hardening.
 ACCURACY_BASELINE_BRIER = 0.25
@@ -86,6 +99,7 @@ class _Record:
     p_win: float              # agent prob assigned to the resolved (winning) outcome
     p_pred: float             # agent prob assigned to its own predicted outcome
     hit: int                  # 1 if predicted outcome == resolved outcome else 0
+    scored_at: datetime       # when this resolved prediction was scored
     market_p_win: Optional[float]  # market price on the winning outcome at prediction
     market_p_pred: Optional[float]  # market price on predicted side at prediction
 
@@ -148,7 +162,7 @@ def score_agent_predictions(
             invalid_in_window[idx] += 1
             continue
 
-        record = _parse_record(item, idx)
+        record = _parse_record(item, idx, scored_at=scored_at)
         if record is None:
             continue
         records_by_idx[idx].append(record)
@@ -161,9 +175,14 @@ def score_agent_predictions(
     ensemble = _ensemble_scores(records_by_idx, records_by_market, n)
 
     scores = np.zeros(n, dtype=float)
+    rho_by_idx = np.zeros(n, dtype=float)
+    effective_n_by_idx = np.zeros(n, dtype=float)
+    inactivity_mult_by_idx = np.zeros(n, dtype=float)
+    latest_age_hours_by_idx = np.full(n, np.nan, dtype=float)
     gated_invalid = 0
     gated_sample = 0
     gated_baseline = 0
+    gated_inactive = 0
     scored_miners = 0
 
     for idx in range(n):
@@ -175,8 +194,9 @@ def score_agent_predictions(
             gated_invalid += 1
             continue
 
-        valid_count = len(records_by_idx[idx])
-        if valid_count < MIN_VALID_PREDICTIONS:
+        recs = records_by_idx[idx]
+        valid_count = len(recs)
+        if valid_count < MIN_VALID_PREDICTIONS_HARD_FLOOR:
             gated_sample += 1
             continue
 
@@ -185,13 +205,31 @@ def score_agent_predictions(
             gated_baseline += 1
             continue
 
+        effective_n = _effective_prediction_count(recs, now=now)
+        rho = compute_significance_score(
+            num_miner_predictions=effective_n,
+            num_threshold_predictions=RHO_THRESHOLD_PREDICTIONS,
+            alpha=RHO_ALPHA,
+        )
+        latest_age_hours = _latest_prediction_age_hours(recs, now=now)
+        inactivity_mult = _inactivity_multiplier(latest_age_hours)
+        effective_n_by_idx[idx] = effective_n
+        rho_by_idx[idx] = rho
+        inactivity_mult_by_idx[idx] = inactivity_mult
+        if latest_age_hours is not None:
+            latest_age_hours_by_idx[idx] = latest_age_hours
+
+        if inactivity_mult <= 0.0:
+            gated_inactive += 1
+            continue
+
         raw_score = (
             WEIGHT_ACCURACY * accuracy[idx]
             + WEIGHT_CALIBRATION * _centered_pillar(float(calibration[idx]))
             + WEIGHT_EARLY_SIGNAL * _centered_pillar(float(early_signal[idx]))
             + WEIGHT_ENSEMBLE * _centered_pillar(float(ensemble[idx]))
         )
-        scores[idx] = max(0.0, raw_score)
+        scores[idx] = max(0.0, raw_score * rho * inactivity_mult)
         scored_miners += 1
 
     scores = np.clip(scores, 0.0, 1.0)
@@ -200,13 +238,15 @@ def score_agent_predictions(
 
     logger.info(
         "arcratio composite scoring: %d valid rows | %d miners scored, "
-        "%d gated (invalid-rate), %d gated (min-sample), %d gated (baseline-accuracy) "
+        "%d gated (invalid-rate), %d gated (min-sample-hard-floor), %d gated (baseline-accuracy), "
+        "%d gated (inactive) "
         "| cutoff=%s window=%dd",
         sum(len(r) for r in records_by_idx),
         scored_miners,
         gated_invalid,
         gated_sample,
         gated_baseline,
+        gated_inactive,
         cutoff.isoformat(),
         rolling_window_days,
     )
@@ -217,6 +257,9 @@ def score_agent_predictions(
         calibration=calibration,
         early_signal=early_signal,
         ensemble=ensemble,
+        rho_by_idx=rho_by_idx,
+        effective_n_by_idx=effective_n_by_idx,
+        latest_age_hours_by_idx=latest_age_hours_by_idx,
         records_by_idx=records_by_idx,
         total_in_window=total_in_window,
         invalid_in_window=invalid_in_window,
@@ -230,7 +273,7 @@ def score_agent_predictions(
 # Parsing                                                                      #
 # --------------------------------------------------------------------------- #
 
-def _parse_record(item, idx: int) -> Optional[_Record]:
+def _parse_record(item, idx: int, scored_at: datetime) -> Optional[_Record]:
     """Normalize a single DTO row into a ``_Record``, or ``None`` if unusable."""
     outcome_probs = getattr(item, "outcomeProbabilities", None) or {}
     resolved_outcome_id = getattr(item, "resolvedOutcomeId", None)
@@ -275,6 +318,7 @@ def _parse_record(item, idx: int) -> Optional[_Record]:
         p_win=p_win,
         p_pred=p_pred,
         hit=hit,
+        scored_at=scored_at,
         market_p_win=market_p_win,
         market_p_pred=market_p_pred,
     )
@@ -478,6 +522,54 @@ def _centered_pillar(value: float) -> float:
     return float(np.clip((value - NEUTRAL_PILLAR_SCORE) / NEUTRAL_PILLAR_SCORE, -1.0, 1.0))
 
 
+def compute_significance_score(
+    num_miner_predictions: float,
+    num_threshold_predictions: float,
+    alpha: float,
+    floor: float = RHO_FLOOR,
+) -> float:
+    """Relaxed logistic significance score with configurable floor."""
+    exponent = -alpha * (num_miner_predictions - num_threshold_predictions)
+    exponent = float(np.clip(exponent, -60.0, 60.0))
+    denominator = 1.0 + math.exp(exponent)
+    raw = 1.0 / denominator
+    floor = float(np.clip(floor, 0.0, 1.0))
+    return max(floor, raw)
+
+
+def _effective_prediction_count(records: list[_Record], *, now: datetime) -> float:
+    """Recency-weighted prediction count using exponential half-life decay."""
+    if not records:
+        return 0.0
+    half_life = max(RHO_HALF_LIFE_DAYS, 1e-6)
+    decay_rate = math.log(2.0) / half_life
+    total = 0.0
+    for r in records:
+        age_days = max(0.0, (now - r.scored_at).total_seconds() / 86400.0)
+        total += math.exp(-decay_rate * age_days)
+    return total
+
+
+def _latest_prediction_age_hours(records: list[_Record], *, now: datetime) -> Optional[float]:
+    """Hours since miner's latest valid prediction, or None if no records."""
+    if not records:
+        return None
+    latest = max(r.scored_at for r in records)
+    return max(0.0, (now - latest).total_seconds() / 3600.0)
+
+
+def _inactivity_multiplier(age_hours: Optional[float]) -> float:
+    """Linear fade after grace window; hard off at inactivity zero threshold."""
+    if age_hours is None:
+        return 0.0
+    if age_hours <= INACTIVITY_GRACE_HOURS:
+        return 1.0
+    if age_hours >= INACTIVITY_ZERO_HOURS:
+        return 0.0
+    span = max(INACTIVITY_ZERO_HOURS - INACTIVITY_GRACE_HOURS, 1e-6)
+    return float(np.clip(1.0 - ((age_hours - INACTIVITY_GRACE_HOURS) / span), 0.0, 1.0))
+
+
 def _metagraph_uids(metagraph) -> list[int]:
     uids = getattr(metagraph, "uids", None)
     if uids is None:
@@ -552,6 +644,9 @@ def _log_score_table(
     calibration: np.ndarray,
     early_signal: np.ndarray,
     ensemble: np.ndarray,
+    rho_by_idx: np.ndarray,
+    effective_n_by_idx: np.ndarray,
+    latest_age_hours_by_idx: np.ndarray,
     records_by_idx: list[list[_Record]],
     total_in_window: np.ndarray,
     invalid_in_window: np.ndarray,
@@ -564,6 +659,7 @@ def _log_score_table(
         reverse=True,
     )
     any_invalid_gate = False
+    any_stale_age = False
     for rank, (idx, uid, score) in enumerate(ranked, start=1):
         total = int(total_in_window[idx])
         invalid = int(invalid_in_window[idx])
@@ -591,6 +687,15 @@ def _log_score_table(
         if pnl_trades > 0:
             roi = pnl / float(pnl_trades)
 
+        age_h = latest_age_hours_by_idx[idx]
+        age_display: object = "-"
+        if not np.isnan(age_h):
+            rounded_age = int(round(float(age_h)))
+            age_display = str(rounded_age)
+            if float(age_h) > INACTIVITY_GRACE_HOURS:
+                age_display = f"{age_display}\u2020"
+                any_stale_age = True
+
         rows.append(
             [
                 rank,
@@ -600,10 +705,13 @@ def _log_score_table(
                 float(calibration[idx]),
                 float(early_signal[idx]),
                 float(ensemble[idx]),
-                total,
                 raw_brier,
                 #pnl,
                 roi,
+                total,
+                float(rho_by_idx[idx]),
+                float(effective_n_by_idx[idx]),
+                age_display,
                 invalid_preds,
             ]
         )
@@ -616,18 +724,23 @@ def _log_score_table(
         "rank",
         "uid",
         "score",
-        f"accuracy ({w_acc:.0f}%)",
-        f"calibration ({w_cal:.0f}%)",
-        f"early signal ({w_early:.0f}%)",
-        f"ensemble ({w_ens:.0f}%)",
-        "# preds",
+        f"acc. ({w_acc:.0f}%)",
+        f"calib. ({w_cal:.0f}%)",
+        f"e sig. ({w_early:.0f}%)",
+        f"ens. ({w_ens:.0f}%)",
         "brier",
         #"PnL",
         "roi",
+        "# preds",
+        "rho",
+        "eff_n",
+        "age_h",
         "invalid",
     ]
-    #floatfmt = (".0f", ".0f", ".3f", ".3f", ".3f", ".3f", ".3f", ".0f", ".3f", ".3f", ".3f", "")
-    floatfmt = (".0f", ".0f", ".3f", ".3f", ".3f", ".3f", ".3f", ".0f", ".3f", ".3f", "")
+    floatfmt = (
+        ".0f", ".0f", ".3f", ".3f", ".3f", ".3f", ".3f",
+        ".3f", ".3f", ".0f", ".3f", ".0f", "", "",
+    )
     table = tabulate(
         rows,
         headers=headers,
@@ -635,11 +748,14 @@ def _log_score_table(
         stralign="right",
         floatfmt=floatfmt,
     )
+    legends: list[str] = []
     if any_invalid_gate:
-        logger.info(
-            "arcratio scoring miner table:\n%s\n* too many invalid predictions tripped the INVALID_RATE_THRESHOLD gate. Setting score to 0.",
-            table,
-        )
+        legends.append("* too many invalid predictions tripped the INVALID_RATE_THRESHOLD gate. Setting score to 0.")
+    if any_stale_age:
+        legends.append(f"\u2020 age_h > {INACTIVITY_GRACE_HOURS:.0f}h (inactivity decay region).")
+
+    if legends:
+        logger.info("arcratio scoring miner table:\n%s\n%s", table, "\n".join(legends))
     else:
         logger.info("arcratio scoring miner table:\n%s", table)
     

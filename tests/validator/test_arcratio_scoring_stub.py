@@ -147,6 +147,39 @@ def test_baseline_brier_gets_zero_score() -> None:
     np.testing.assert_allclose(out, np.array([0.0]))
 
 
+def test_time_based_rho_rewards_recent_volume() -> None:
+    metagraph = _StubMetagraph(uids=[1, 2])
+    now = datetime.now(timezone.utc)
+
+    low_volume = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(12)]
+    high_volume = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(40)]
+
+    out = score_agent_predictions(
+        metagraph=metagraph,
+        scored_predictions=low_volume + high_volume,
+        now=now,
+    )
+    assert out[1] > out[0] > 0.0
+
+
+def test_inactivity_gate_zeroes_stale_miner() -> None:
+    metagraph = _StubMetagraph(uids=[1, 2])
+    now = datetime.now(timezone.utc)
+
+    fresh = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
+    stale = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(20)]
+    for row in stale:
+        row.scoredAt = now - timedelta(hours=120)
+
+    out = score_agent_predictions(
+        metagraph=metagraph,
+        scored_predictions=fresh + stale,
+        now=now,
+    )
+    assert out[0] > 0.0
+    assert out[1] == 0.0
+
+
 def test_unmapped_uid_is_skipped_not_counted() -> None:
     metagraph = _StubMetagraph(uids=[0])
 
