@@ -82,6 +82,7 @@ class ValidatorLoopDefaults:
     metadata_per_uid_delay_seconds: float = 0.1
     metadata_use_bulk_commitments: bool = True
     set_weights_enabled: bool = True
+    assignment_execution_cooldown_seconds: int = 60
 
 
 VALIDATOR = ValidatorDefaults()

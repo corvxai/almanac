@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from types import SimpleNamespace
 
 import httpx
@@ -250,3 +251,70 @@ def test_validator_polling_calls_assignment_handler(monkeypatch) -> None:
     validator._poll_orchestrator_assignment()
     assert len(seen) == 1
     assert seen[0].agentPredictionId == "pred_123"
+
+
+def test_validator_polling_skips_during_assignment_execution_cooldown(monkeypatch) -> None:
+    cfg = AppConfig()
+    cfg.loop.loop_enabled = False
+    cfg.loop.arcratio_enabled = True
+    cfg.loop.assignment_execution_cooldown_seconds = 180
+
+    now = datetime.datetime(2026, 6, 5, 15, 0, 0, tzinfo=datetime.timezone.utc)
+    validator = Validator(
+        config=cfg,
+        store=None,
+        bt_objects=_bt_objects(),
+        metadata_manager=None,
+        clock=lambda: now,
+    )
+    cfg.validator.orchestrator_api_url = ORCHESTRATOR_API_URL
+    validator._last_assignment_execution_at = now - datetime.timedelta(seconds=60)
+
+    fetch_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.validator.validator.fetch_agent_event_assignment",
+        lambda **kw: fetch_calls.append(kw) or AgentAndEventResponse(
+            assignment=None,
+            reason="none_available",
+        ),
+    )
+
+    validator._poll_orchestrator_assignment()
+    assert fetch_calls == []
+
+
+def test_validator_polling_runs_after_assignment_execution_cooldown(monkeypatch) -> None:
+    cfg = AppConfig()
+    cfg.loop.loop_enabled = False
+    cfg.loop.arcratio_enabled = True
+    cfg.loop.assignment_execution_cooldown_seconds = 180
+
+    now = datetime.datetime(2026, 6, 5, 15, 0, 0, tzinfo=datetime.timezone.utc)
+    validator = Validator(
+        config=cfg,
+        store=None,
+        bt_objects=_bt_objects(),
+        metadata_manager=None,
+        clock=lambda: now,
+    )
+    cfg.validator.orchestrator_api_url = ORCHESTRATOR_API_URL
+    validator._last_assignment_execution_at = now - datetime.timedelta(seconds=181)
+
+    fake_loaded = SimpleNamespace(
+        keypair=_FakeKeypair(),
+        hotkey_ss58="5ValidatorHotkey",
+        coldkey_ss58=None,
+    )
+    monkeypatch.setattr("src.validator.validator.load_hotkey", lambda _cfg: fake_loaded)
+
+    fetch_calls: list[dict] = []
+    monkeypatch.setattr(
+        "src.validator.validator.fetch_agent_event_assignment",
+        lambda **kw: fetch_calls.append(kw) or AgentAndEventResponse(
+            assignment=None,
+            reason="none_available",
+        ),
+    )
+
+    validator._poll_orchestrator_assignment()
+    assert len(fetch_calls) == 1

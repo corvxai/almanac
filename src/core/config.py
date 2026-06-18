@@ -102,6 +102,7 @@ class ValidatorLoopConfig(BaseModel):
     metadata_per_uid_delay_seconds: float = constants.VALIDATOR_LOOP.metadata_per_uid_delay_seconds
     metadata_use_bulk_commitments: bool = constants.VALIDATOR_LOOP.metadata_use_bulk_commitments
     set_weights_enabled: bool = constants.VALIDATOR_LOOP.set_weights_enabled
+    assignment_execution_cooldown_seconds: int = constants.VALIDATOR_LOOP.assignment_execution_cooldown_seconds
 
 
 class AppConfig(BaseModel):
