@@ -27,7 +27,7 @@ from tabulate import tabulate
 
 from src.core.config import AppConfig
 from src.gateway.constants import gateway_service_url
-from src.storage.json_store import JsonTraceStore
+from src.storage.json_store import build_trace_store
 from src.validator.validator import Validator, start_local_proxy
 
 
@@ -201,6 +201,7 @@ def _log_startup_config_table(log: logging.Logger, config: AppConfig, args: argp
         ("validator_loop", "wandb_enabled", config.loop.wandb_enabled),
         ("validator_loop", "set_weights_enabled", config.loop.set_weights_enabled),
         ("runtime", "proxy_enabled", not args.no_proxy),
+        ("storage", "persist_traces", config.storage.persist_traces),
         ("runtime", "data_dir", str(config.storage.data_dir)),
     ]
     table = tabulate(rows, headers=("section", "key", "value"), tablefmt="simple_outline")
@@ -456,7 +457,7 @@ def main() -> None:
         gateway_service_url(),
     )
 
-    store = JsonTraceStore(data_dir=config.storage.data_dir)
+    store = build_trace_store(config.storage)
 
     if not config.loop.loop_enabled:
         log.warning(

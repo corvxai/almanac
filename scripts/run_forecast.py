@@ -25,7 +25,7 @@ from src.gateway.constants import DEFAULT_GATEWAY_SERVICE_URL, gateway_service_u
 from src.agent.examples.simple_agent import SimpleAgent
 from src.agent.examples.openrouter_agent import OpenRouterAgent
 from src.agent.examples.claude_agent import ClaudeAgent
-from src.storage.json_store import JsonTraceStore
+from src.storage.json_store import build_trace_store
 from src.validator.orchestrator import Orchestrator
 from src.validator.validator import start_local_proxy as _start_local_proxy
 
@@ -170,7 +170,7 @@ def main() -> None:
             "intended for local development only."
         )
 
-    store = JsonTraceStore(data_dir=config.storage.data_dir)
+    store = build_trace_store(config.storage)
 
     print(f"Connecting to gateway at {gateway_url} ...")
     try:
@@ -247,7 +247,10 @@ def main() -> None:
             trace_idx += 1
 
     print(f"\n{'='*70}")
-    print(f"  Completed {trace_idx} trace(s). Saved to {config.storage.data_dir / 'traces'}")
+    if config.storage.persist_traces:
+        print(f"  Completed {trace_idx} trace(s). Saved to {config.storage.data_dir / 'traces'}")
+    else:
+        print(f"  Completed {trace_idx} trace(s). Local trace persistence is disabled.")
     print(f"{'='*70}")
 
 

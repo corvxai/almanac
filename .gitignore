@@ -20,3 +20,4 @@ data/traces/
 data/validator_state_*.json
 
 scripts/tests/agent_predictions.json
+scripts/tests/pareto_scores.png

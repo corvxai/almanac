@@ -41,7 +41,7 @@ from src.core.schemas import EvidenceDigest
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
-from src.storage.json_store import JsonTraceStore
+from src.storage.store import TraceStore
 from src.validator.assignment_pipeline import (
     build_prediction_submit_payload,
     build_sandbox_assignment_agent,
@@ -252,7 +252,7 @@ class Validator:
     def __init__(
         self,
         config: AppConfig,
-        store: JsonTraceStore,
+        store: TraceStore,
         *,
         bt_objects=None,
         metadata_manager=_AUTO,
@@ -291,6 +291,7 @@ class Validator:
         self._orchestrator_poll_signing_warned = False
         self._assignment_orchestrator: Orchestrator | None = None
         self._assignment_local_proxy_state = local_proxy_state
+        self._last_assignment_execution_at: datetime.datetime | None = None
 
         if self._metadata_manager is not None and self._metadata_owned:
             self._metadata_manager.start()
@@ -381,7 +382,26 @@ class Validator:
         stats = self._metadata_manager.get_stats()
         logger.info("Metadata Manager Stats: %s", stats)
 
+    def _assignment_execution_cooldown_active(self, now: datetime.datetime) -> bool:
+        if self._last_assignment_execution_at is None:
+            return False
+        cooldown = datetime.timedelta(
+            seconds=self._config.loop.assignment_execution_cooldown_seconds,
+        )
+        return now - self._last_assignment_execution_at < cooldown
+
     def _poll_orchestrator_assignment(self) -> None:
+        now = self._clock()
+        if self._assignment_execution_cooldown_active(now):
+            elapsed = (now - self._last_assignment_execution_at).total_seconds()
+            logger.info(
+                "Skipping agent and event assignment execution: last successful was "
+                "%.0fs ago (cooldown=%ds).",
+                elapsed,
+                self._config.loop.assignment_execution_cooldown_seconds,
+            )
+            return
+
         base_url = self._config.validator.orchestrator_api_url.strip()
         if not base_url:
             if not self._orchestrator_poll_config_warned:
@@ -481,6 +501,7 @@ class Validator:
             )
             return
 
+        self._last_assignment_execution_at = self._clock()
         logger.info(
             "Assignment processed id=%s status=%s miner_uid=%s source=%s source_id=%s "
             "event_id=%s execution_id=%s submit_status=%s",
@@ -631,6 +652,7 @@ class Validator:
                     else None
                 ),
                 db_score_logging=loop_cfg.db_score_logging,
+                budget_share=loop_cfg.almanac_weight_share,
             )
         except Exception:
             logger.exception("Almanac scoring failed for this epoch.")

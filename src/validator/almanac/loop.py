@@ -26,12 +26,13 @@ from .metadata_manager import MetadataManager
 # time. Defer the import to ``score_almanac`` so the rest of the package
 # is usable on installs that don't need the Almanac scoring math.
 
-logger = logging.getLogger("arcratio.almanac")
+logger = logging.getLogger("almanac.market")
 
 
 _DEFAULT_TRADING_HISTORY_ENDPOINT_PROD = "https://api.almanac.market/api/v1/trading/trading-history"
 #_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "https://test-api.almanac.market/api/v1/trading/trading-history"
-_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "http://localhost:3001/api/v1/trading/trading-history"
+#_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "http://localhost:3001/api/v1/trading/trading-history"
+_DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "http://host.docker.internal:3001/api/v1/trading/trading-history"
 _DEFAULT_TRADING_HISTORY_BATCH_LIMIT = 1000
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 _TAO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
@@ -301,6 +302,7 @@ def score_almanac(
     write_trading_history_to: Optional[Path] = None,
     print_stats: bool = True,
     db_score_logging: bool = False,
+    budget_share: float = 1.0,
 ) -> Optional[np.ndarray]:
     """Compute the Almanac scores for the current epoch.
 
@@ -333,7 +335,14 @@ def score_almanac(
         logger.info("TAO price: %.2f USD", tao_price_usd)
 
         current_epoch_budget = compute_epoch_budget(metagraph, tao_price_usd)
-        logger.info("Current epoch (24h) budget: %.2f USD", current_epoch_budget)
+        share = float(np.clip(budget_share, 0.0, 1.0))
+        effective_epoch_budget = current_epoch_budget * share
+        logger.info(
+            "Current epoch (24h) budget: %.2f USD (share=%.4f, effective=%.2f USD)",
+            current_epoch_budget,
+            share,
+            effective_epoch_budget,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to fetch required Almanac data for scoring: %s", exc)
         logger.warning("Skipping Almanac scoring for this epoch.")
@@ -353,7 +362,7 @@ def score_almanac(
         general_pool_scores,
         miner_budget,
         general_pool_budget,
-    ) = score_miners(all_uids, all_hotkeys, trading_history, current_epoch_budget)
+    ) = score_miners(all_uids, all_hotkeys, trading_history, effective_epoch_budget)
 
     if print_stats:
         print("\n############################## OVERALL POOL STATS ##############################")
@@ -376,7 +385,7 @@ def score_almanac(
     weights = calculate_weights(
         miners_scores,
         general_pool_scores,
-        current_epoch_budget,
+        effective_epoch_budget,
         miner_budget,
         general_pool_budget,
         miners_to_penalize,

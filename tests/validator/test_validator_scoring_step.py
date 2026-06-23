@@ -164,6 +164,24 @@ def test_almanac_only_scoring_step_sets_weights_from_almanac_vector(monkeypatch,
     np.testing.assert_allclose(bt.subtensor.calls[0]["weights"], np.array([0.1, 0.4, 0.5]))
 
 
+def test_score_almanac_forwards_budget_share(monkeypatch, store):
+    bt = _bt_objects(uids=[0])
+    cfg = _config(almanac=True, arcratio=False, almanac_share=0.37)
+    seen: dict[str, object] = {}
+
+    def _fake_score_almanac(**kw):
+        seen.update(kw)
+        return np.array([1.0], dtype=float)
+
+    monkeypatch.setattr("src.validator.almanac.score_almanac", _fake_score_almanac)
+
+    v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
+    out = v._score_almanac()
+
+    np.testing.assert_allclose(out, np.array([1.0]))
+    assert seen["budget_share"] == pytest.approx(0.37)
+
+
 def test_arcratio_only_scoring_step_scores_resolved_traces(store):
     bt = _bt_objects(uids=[0, 1])
     cfg = _config(almanac=False, arcratio=True)
@@ -194,6 +212,29 @@ def test_both_enabled_blends_score_vectors(monkeypatch, store):
     weights = v.run_scoring_step()
 
     np.testing.assert_allclose(weights, np.array([0.5, 0.5]))
+
+
+def test_blended_scoring_step_keeps_expected_burn_weight(monkeypatch, store):
+    bt = _bt_objects(uids=[0, 1, 210])
+    cfg = _config(almanac=True, arcratio=True, almanac_share=0.6, arcratio_share=0.4)
+
+    # Almanac vector includes burn at uid=210.
+    monkeypatch.setattr(
+        "src.validator.almanac.score_almanac",
+        lambda **kw: np.array([0.7, 0.0, 0.3], dtype=float),
+    )
+    # Arcratio gives all weight to uid=1 (stubbed to keep test offline).
+    monkeypatch.setattr(
+        Validator,
+        "_score_agent_predictions",
+        lambda self: np.array([0.0, 1.0, 0.0], dtype=float),
+    )
+
+    v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
+    weights = v.run_scoring_step()
+
+    np.testing.assert_allclose(weights, np.array([0.42, 0.4, 0.18]))
+    assert pytest.approx(float(weights.sum()), abs=1e-9) == 1.0
 
 
 def test_almanac_score_failure_returns_none_and_falls_back_to_arcratio(monkeypatch, store):

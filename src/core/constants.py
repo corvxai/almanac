@@ -49,6 +49,8 @@ class BittensorDefaults:
 class StorageDefaults:
     backend: str = "json"
     data_dir: Path = field(default_factory=lambda: _PROJECT_ROOT / "data")
+    # When False, traces are not written under data/traces;
+    persist_traces: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class ValidatorLoopDefaults:
     metadata_per_uid_delay_seconds: float = 0.1
     metadata_use_bulk_commitments: bool = True
     set_weights_enabled: bool = True
+    assignment_execution_cooldown_seconds: int = 60
 
 
 VALIDATOR = ValidatorDefaults()

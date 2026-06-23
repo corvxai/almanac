@@ -50,7 +50,9 @@ def test_fetch_scored_predictions_page_parses_payload_and_signs_path_query() -> 
                         "marketId": "cmcz0b6h90002v6b8r5n1k3qf",
                         "sourceMarketId": "0xabc123...",
                         "predictedOutcomeId": "yes",
+                        "predictedAt": "2026-06-08T15:10:00.000Z",
                         "confidence": 0.71,
+                        "outcomePricesAtPrediction": {"yes": 0.64, "no": 0.36},
                         "outcomeProbabilities": {"yes": 0.71, "no": 0.29},
                         "resolvedOutcomeId": "yes",
                         "finalOutcomePrices": {"yes": 1, "no": 0},
@@ -78,6 +80,8 @@ def test_fetch_scored_predictions_page_parses_payload_and_signs_path_query() -> 
     )
     assert len(page.items) == 1
     assert page.items[0].agentPredictionId == "ap_01JX9F8KQ4R2M7N6T3V1W5Y8Z"
+    assert page.items[0].predictedAt is not None
+    assert page.items[0].outcomePricesAtPrediction == {"yes": 0.64, "no": 0.36}
     assert page.items[0].predictionValidation is not None
     assert page.items[0].predictionValidation.isValid is True
     assert page.nextCursor == "abc"
@@ -108,7 +112,9 @@ def test_fetch_all_scored_predictions_paginates_to_completion() -> None:
                             "marketId": "m1",
                             "sourceMarketId": "s1",
                             "predictedOutcomeId": "yes",
+                            "predictedAt": "2026-06-08T10:00:00.000Z",
                             "confidence": 0.8,
+                            "outcomePricesAtPrediction": {"yes": 0.58, "no": 0.42},
                             "outcomeProbabilities": {"yes": 0.8, "no": 0.2},
                             "resolvedOutcomeId": "yes",
                             "finalOutcomePrices": {"yes": 1, "no": 0},
@@ -130,7 +136,9 @@ def test_fetch_all_scored_predictions_paginates_to_completion() -> None:
                         "marketId": "m2",
                         "sourceMarketId": "s2",
                         "predictedOutcomeId": "no",
+                        "predictedAt": "2026-06-08T12:30:00.000Z",
                         "confidence": 0.6,
+                        "outcomePricesAtPrediction": {"yes": 0.4, "no": 0.6},
                         "outcomeProbabilities": {"yes": 0.4, "no": 0.6},
                         "resolvedOutcomeId": "yes",
                         "finalOutcomePrices": {"yes": 1, "no": 0},
@@ -149,4 +157,7 @@ def test_fetch_all_scored_predictions_paginates_to_completion() -> None:
         http_client=client,
     )
     assert [it.agentPredictionId for it in items] == ["ap_1", "ap_2"]
+    assert all(it.predictedAt is not None for it in items)
+    assert items[0].outcomePricesAtPrediction == {"yes": 0.58, "no": 0.42}
+    assert items[1].outcomePricesAtPrediction == {"yes": 0.4, "no": 0.6}
     assert seen_cursors == [None, "next1"]
