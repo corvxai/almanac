@@ -58,12 +58,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements-ci-security.txt
 
-      - name: Install dependencies
+      - name: Install dependencies (slim — sandbox suite needs no scoring/bittensor stack)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements-ci-security.txt
 
       - name: Docker sanity check
         run: |
