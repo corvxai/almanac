@@ -27,6 +27,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 from src.core.config import AppConfig
 from src.core.schemas import ProviderCall, ProviderTier
@@ -203,15 +204,10 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
         provider_id = body.get("provider_id")
         call_type = body.get("call_type")
         params = body.get("params", {}) or {}
-        miner_hotkey_override = body.get("minerHotkey")
-        if not isinstance(miner_hotkey_override, str) or not miner_hotkey_override.strip():
-            miner_hotkey_override = (
-                params.get("minerHotkey")
-                if isinstance(params, dict)
-                and isinstance(params.get("minerHotkey"), str)
-                and str(params.get("minerHotkey")).strip()
-                else None
-            )
+        # The billed/signed identity is fixed by the validator at run
+        # registration (run.miner_hotkey). A `minerHotkey` in the agent-supplied
+        # body is deliberately ignored: the untrusted sandbox must not be able to
+        # choose whose hotkey the validator signs over.
 
         if not isinstance(provider_id, str) or not isinstance(call_type, str):
             raise HTTPException(status_code=400, detail="provider_id and call_type are required strings")
@@ -230,14 +226,17 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
                 detail=f"provider '{provider_id}' not allowed under track '{run.track}'",
             )
 
-        return _forward_and_record(
+        # _forward_and_record makes a blocking (sync httpx) upstream call. Run it
+        # in a worker thread so a slow provider does not stall the proxy's event
+        # loop and serialize every other concurrent run (and /health).
+        return await run_in_threadpool(
+            _forward_and_record,
             state,
             run,
             provider_id=provider_id,
             call_type=call_type,
             params=params,
             completion_payload=None,
-            miner_hotkey_override=miner_hotkey_override,
         )
 
     @app.post("/v1/gateway/validator/completions")
@@ -262,9 +261,8 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
         if not isinstance(provider_id, str) or not provider_id.strip():
             raise HTTPException(status_code=400, detail="provider is required")
         provider_id = provider_id.strip()
-        miner_hotkey_override = body.get("minerHotkey")
-        if not isinstance(miner_hotkey_override, str) or not miner_hotkey_override.strip():
-            miner_hotkey_override = None
+        # Any `minerHotkey` in the body is ignored for billing/signing; the
+        # identity comes only from run.miner_hotkey (see _forward_and_record).
         call_type = body.get("callType")
         if not isinstance(call_type, str) or not call_type.strip():
             call_type = _default_call_type(provider_id)
@@ -287,14 +285,14 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
             )
 
         completion_payload = dict(body) if isinstance(body, dict) else {}
-        return _forward_and_record(
+        return await run_in_threadpool(
+            _forward_and_record,
             state,
             run,
             provider_id=provider_id,
             call_type=call_type,
             params=params,
             completion_payload=completion_payload,
-            miner_hotkey_override=miner_hotkey_override,
         )
 
     return app
@@ -308,17 +306,18 @@ def _forward_and_record(
     call_type: str,
     params: dict[str, Any],
     completion_payload: dict[str, Any] | None,
-    miner_hotkey_override: str | None = None,
 ) -> dict[str, Any]:
     """Sign the outbound POST, forward upstream, build a `ProviderCall`."""
     upstream = f"{gateway_service_url()}/v1/gateway/validator/completions"
-    miner_hotkey = miner_hotkey_override or run.miner_hotkey
+    # Identity is fixed by the validator at run registration; the untrusted
+    # sandbox cannot influence whose hotkey we sign over.
+    miner_hotkey = run.miner_hotkey
     if not isinstance(miner_hotkey, str) or not miner_hotkey.strip():
         raise HTTPException(
             status_code=400,
             detail=(
                 "missing miner hotkey for gateway billing context; "
-                "register run with miner_hotkey or include minerHotkey in request body"
+                "register run with miner_hotkey"
             ),
         )
     miner_hotkey = miner_hotkey.strip()
@@ -432,7 +431,6 @@ def _params_from_completions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "temperature": payload.get("temperature"),
         "top_p": payload.get("topP"),
         "stop": payload.get("stop"),
-        "minerHotkey": payload.get("minerHotkey"),
     }
     return {k: v for k, v in params.items() if v is not None}
 

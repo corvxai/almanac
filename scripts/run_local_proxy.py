@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -80,6 +81,13 @@ def main() -> None:
     print("=" * 60)
     print()
 
+    # The sandbox runs as a fixed unprivileged uid (10001), distinct from this
+    # proxy's uid, and connects to this UDS through a read-only bind mount. A
+    # default-umask socket (0755) is not connectable by another uid, so widen
+    # the umask to 0 right before bind: uvicorn creates the UDS as 0777, letting
+    # the sandbox connect(). The socket is still gated by X-Run-Id, and per-run
+    # mount isolation means a sandbox only ever knows its own run id.
+    os.umask(0o000)
     uvicorn.run(app, uds=str(socket_path), log_level="info")
 
 

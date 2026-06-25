@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import socket
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -79,10 +80,17 @@ def runner_image(docker_enabled) -> str:
 
 
 @pytest.fixture
-def proxy_socket_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "arcratio_run"
-    d.mkdir()
-    return d
+def proxy_socket_dir() -> Path:
+    # The proxy binds a UNIX domain socket inside this dir. macOS (BSD) caps
+    # AF_UNIX paths at 104 bytes, and pytest's tmp_path under
+    # /private/var/folders/.../pytest-of-<user>/pytest-NN/<test>/ blows past
+    # that, so the bind fails with "AF_UNIX path too long" and every test in
+    # this suite errors in the local_proxy fixture. Use a short base dir.
+    base = Path(tempfile.mkdtemp(prefix="arc", dir="/tmp"))
+    try:
+        yield base
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 @pytest.fixture
@@ -142,6 +150,11 @@ def local_proxy(proxy_socket_dir: Path, upstream_capture):
             break
         time.sleep(0.05)
     assert socket_path.exists(), "proxy UDS failed to start"
+    # The sandbox runs as the unprivileged uid 10001 and connects to this UDS
+    # through a bind mount; a default-umask socket (0755) is not connectable by
+    # another uid. run_local_proxy widens the umask in production; mirror that
+    # here by making the test socket world-connectable.
+    os.chmod(socket_path, 0o666)
 
     yield proxy_state, state
 

@@ -1,16 +1,21 @@
-"""Gateway HTTP server — the provider proxy service.
+"""Gateway HTTP server — SIMULATED provider proxy service (local test double).
 
-Runs as a standalone process. Holds API keys, registers all provider adapters,
-and exposes a single endpoint for the validator to call through.
+This is **not** the production gateway service (that lives in its own repo). It
+is the local stand-in used so validators and miners can exercise the full
+validator → local proxy → gateway → provider path. Launched via
+``scripts/run_gateway.py``, which runs it mock-by-default (no keys, no network,
+no spend) unless ``--live`` is passed.
 
-The validator never touches external APIs directly — everything flows through
-this gateway, which is the only component that needs secrets.
+Runs as a standalone process, registers provider adapters, and exposes a single
+endpoint for the validator to call through. The validator never touches external
+APIs directly — everything flows through this gateway, which is the only
+component that needs secrets (and only in live mode).
 
 Signature headers (`X-Validator-Hotkey`, `X-Signature`, etc.) are logged on
 every request. In v1 the gateway *does not* enforce them — verification will
 be enabled (with metagraph membership checks against our netuid) in a
 follow-up phase. The wire format is finalised today; only the policy is
-permissive.
+permissive. (Real enforcement is the production gateway's responsibility.)
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from src.gateway.validator_protocol import verify_validator_completions_request
 
 logger = logging.getLogger("arcratio.gateway")
 
-app = FastAPI(title="Arcratio Provider Gateway", version="0.1.0")
+app = FastAPI(title="Arcratio Provider Gateway (Simulated)", version="0.1.0")
 
 # Max accepted request body for /v1/call. The body is buffered fully in
 # memory before parsing, so without a cap a single large POST can OOM the

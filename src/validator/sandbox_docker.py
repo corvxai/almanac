@@ -10,13 +10,17 @@ strictest set of flags Docker offers:
 - `mem_limit`, `nano_cpus`, `pids_limit` — fail-closed resource ceilings.
 - `cap_drop=["ALL"]`, `security_opt=["no-new-privileges:true"]` — kernel
   surface area minimised.
-- `user="<host_uid>:<host_gid>"` when the validator runs unprivileged
-  (fallback `10001:10001` when host uid is root).
-- Single read-only bind mount: the validator-local proxy's UDS dir.
+- `user="10001:10001"` — a fixed unprivileged uid, **never root**, even when
+  the validator itself runs as root (the proxy UDS is made connectable by this
+  uid, see `scripts/run_local_proxy.py`), so a container escape lands
+  unprivileged on the host.
+- Two read-only **file** binds: the proxy UDS and *this run's* input JSON. The
+  whole socket dir is deliberately NOT mounted — that would expose every
+  concurrent run's payload and defeat X-Run-Id isolation.
 - Optional gVisor (`runtime="runsc"`) for syscall-level isolation.
 
-Stdin: not used for the validator-spawned path (payload is a JSON file on the
-shared bind mount). Manual ``docker run -i`` may still pipe JSON to stdin.
+Stdin: not used for the validator-spawned path (payload is a JSON file bind-
+mounted read-only). Manual ``docker run -i`` may still pipe JSON to stdin.
 Stdout: `AgentResult.model_dump_json()`.
 Stderr: free-form diagnostics (never trusted for the trace).
 """
@@ -28,6 +32,7 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -44,7 +49,15 @@ logger = logging.getLogger("arcratio.sandbox_docker")
 # mounted (read-only). Pairs with `runner_entrypoint._socket_path_from_env`.
 _SANDBOX_SOCKET_DIR = "/run/arcratio"
 _SANDBOX_SOCKET_URL = f"http+unix://{_SANDBOX_SOCKET_DIR}/proxy.sock"
-_SANDBOX_INPUT_DIR = f"{_SANDBOX_SOCKET_DIR}/inputs"
+# Per-run mounts are bound as individual files (not the whole dir) so a sibling
+# never sees another run's payload — these are the in-container target paths.
+_SANDBOX_SOCKET_FILE = f"{_SANDBOX_SOCKET_DIR}/proxy.sock"
+_SANDBOX_INPUT_FILE = f"{_SANDBOX_SOCKET_DIR}/input.json"
+
+# Fixed unprivileged identity for the sandbox. Never root, regardless of the
+# validator's own uid — a container escape must not land as host root.
+_SANDBOX_RUNNER_UID = 10001
+_SANDBOX_RUNNER_GID = 10001
 
 # Upper bound on agent stdout we are willing to buffer/parse. A real
 # AgentResult JSON is a few KB; this is a generous ceiling to contain a
@@ -73,10 +86,24 @@ def _mountinfo_host_root_for_mountpoint(
     host daemon. Binds must use the **host** path of the proxy socket directory
     (the same inode the validator sees via compose), not e.g. ``/var/run/arcratio``
     resolved on the host filesystem.
+
+    Handles the case where `mountpoint` is a *subdirectory* of a bind mount
+    rather than the mountpoint itself: the closest ancestor mount is matched and
+    the trailing path segment is appended to its host-side root. Without this,
+    a socket dir nested under a bind mount would resolve to ``None`` and the
+    caller would silently bind a wrong (container-internal) path.
     """
     target = str(mountpoint.resolve())
-    bind_match: str | None = None
-    fallback: str | None = None
+
+    def _is_ancestor(mp: str, child: str) -> bool:
+        return child == mp or child.startswith(mp.rstrip("/") + "/")
+
+    # Among all mounts whose mountpoint is `target` or an ancestor dir of it,
+    # pick the most specific (longest mountpoint); prefer a real bind entry over
+    # a non-bind fallback (e.g. the overlay root) at equal specificity.
+    best_root: str | None = None
+    best_mp: str | None = None
+    best_is_bind = False
     mi_path = _mountinfo_path or Path("/proc/self/mountinfo")
     try:
         with mi_path.open(encoding="utf-8") as fh:
@@ -93,15 +120,24 @@ def _mountinfo_host_root_for_mountpoint(
                     continue
                 root = _decode_proc_mount_token(parts[3])
                 mp = _decode_proc_mount_token(parts[4])
-                if mp != target:
+                if not _is_ancestor(mp, target):
                     continue
-                if fstype == "bind":
-                    bind_match = root
-                else:
-                    fallback = root
+                is_bind = fstype == "bind"
+                better = (
+                    best_mp is None
+                    or len(mp) > len(best_mp)
+                    or (len(mp) == len(best_mp) and is_bind and not best_is_bind)
+                )
+                if better:
+                    best_root, best_mp, best_is_bind = root, mp, is_bind
     except OSError:
         return None
-    return bind_match or fallback
+    if best_root is None or best_mp is None:
+        return None
+    rel = target[len(best_mp):].lstrip("/")
+    if not rel:
+        return best_root
+    return str(Path(best_root) / rel)
 
 
 def _sibling_socket_host_bind(cfg: ValidatorConfig) -> str:
@@ -112,6 +148,35 @@ def _sibling_socket_host_bind(cfg: ValidatorConfig) -> str:
     if resolved:
         return resolved
     return str(cfg.sandbox_socket_dir)
+
+
+def _sandbox_runner_user() -> str:
+    """uid:gid for the sandbox — always a fixed non-root identity.
+
+    The previous logic dropped to ``0:0`` whenever the validator ran as root
+    (the default compose deployment), silently running every untrusted agent as
+    in-container root so a runc/kernel escape would land as root on the host.
+    We pin an unprivileged uid instead; socket access no longer requires root
+    because the proxy UDS is made world-connectable (see run_local_proxy).
+    """
+    return f"{_SANDBOX_RUNNER_UID}:{_SANDBOX_RUNNER_GID}"
+
+
+def _sandbox_volumes(bind_src: str, payload_name: str) -> dict[str, dict[str, str]]:
+    """Read-only mount plan for a sibling: ONLY the proxy socket and this run's input.
+
+    `bind_src` is the Docker *host* path of the proxy socket directory. Binding
+    that whole directory would expose ``inputs/`` — every concurrent run's
+    payload — into each sibling, letting a hostile agent read a neighbour's
+    RUN_ID and agent_code and issue calls under it (defeating X-Run-Id). Instead
+    bind the two files individually so no sibling can enumerate or read another
+    run. The input file lives at ``<socket_dir>/inputs/<name>`` on the host and
+    is presented to the runner at a fixed in-container path.
+    """
+    return {
+        f"{bind_src}/proxy.sock": {"bind": _SANDBOX_SOCKET_FILE, "mode": "ro"},
+        f"{bind_src}/inputs/{payload_name}": {"bind": _SANDBOX_INPUT_FILE, "mode": "ro"},
+    }
 
 
 _LOG_TAIL_LINES = 400
@@ -251,7 +316,6 @@ def run_agent_in_container(
     payload_name = f".arcratio_stdin_{run_id}.json"
     payload_host_dir = cfg.sandbox_socket_dir / "inputs"
     payload_host_path = payload_host_dir / payload_name
-    payload_runner_path = f"{_SANDBOX_INPUT_DIR}/{payload_name}"
 
     # docker.from_env() defaults to a 60s HTTP read timeout. Raise the client
     # timeout so long ``container.wait()`` calls are less likely to hit
@@ -276,13 +340,7 @@ def run_agent_in_container(
     runtime = "runsc" if cfg.sandbox_type == "docker_gvisor" else None
 
     bind_src = _sibling_socket_host_bind(cfg)
-
-    host_uid = os.getuid()
-    host_gid = os.getgid()
-    # Prefer identity alignment with the validator process for shared UDS access.
-    # If the validator itself is root inside a container, sibling containers also
-    # need root to access a root-owned 0600 proxy.sock on the shared bind mount.
-    runner_user = f"{host_uid}:{host_gid}" if host_uid != 0 else "0:0"
+    runner_user = _sandbox_runner_user()
 
     container_kwargs: dict[str, Any] = dict(
         image=cfg.sandbox_image,
@@ -297,17 +355,12 @@ def run_agent_in_container(
         cap_drop=["ALL"],
         security_opt=["no-new-privileges:true"],
         user=runner_user,
-        volumes={
-            bind_src: {
-                "bind": _SANDBOX_SOCKET_DIR,
-                "mode": "ro",
-            }
-        },
+        volumes=_sandbox_volumes(bind_src, payload_name),
         environment={
             "SANDBOX_PROXY_URL": _SANDBOX_SOCKET_URL,
             "RUN_ID": str(run_id),
             "PYTHONUNBUFFERED": "1",
-            "ARCRATIO_RUNNER_INPUT_FILE": payload_runner_path,
+            "ARCRATIO_RUNNER_INPUT_FILE": _SANDBOX_INPUT_FILE,
         },
         labels={
             "arcratio.run_id": str(run_id),
@@ -322,13 +375,26 @@ def run_agent_in_container(
     try:
         payload_host_dir.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(payload_host_dir, 0o755)
+            # Owner-only dir: it holds orchestrator-injected agent source and
+            # event payloads for in-flight runs. World-readable (0o755) let any
+            # other local user or container on the host read them. 0o700 keeps
+            # other host users out (they cannot traverse it).
+            os.chmod(payload_host_dir, 0o700)
         except OSError:
             pass
         payload_host_path.write_text(
             json.dumps(payload, separators=(",", ":")),
             encoding="utf-8",
         )
+        try:
+            # The file itself is bind-mounted read-only into the sandbox, which
+            # runs as the unprivileged uid 10001 — distinct from the validator's
+            # uid — so it must be world-readable to be read through the bind. It
+            # stays protected from other host users by the 0o700 parent dir, and
+            # from other runs by per-file mounting (see _sandbox_volumes).
+            os.chmod(payload_host_path, 0o644)
+        except OSError:
+            pass
         container = client.containers.create(**container_kwargs)
         cid = (container.id or "")[:12]
         print(
@@ -376,24 +442,25 @@ def run_agent_in_container(
                 container, f"runner finished (exit_code={exit_code})"
             )
 
-        stdout = container.logs(stdout=True, stderr=False)
-        stderr = container.logs(stdout=False, stderr=True)
+        # The agent is untrusted: a hostile (or buggy) agent can flood stdout to
+        # force the validator to buffer, decode, and JSON-scan an arbitrarily
+        # large string. Stream stdout and abort the moment it crosses the ceiling
+        # so we never materialise the whole blob in memory. A legitimate
+        # AgentResult is a few KB. stderr is only ever used as a bounded tail, so
+        # read it with `tail` rather than pulling the whole (also untrusted) log.
+        try:
+            stdout_raw = _read_capped_stdout(container, _MAX_SANDBOX_STDOUT_BYTES)
+        except _SandboxStdoutTooLarge as exc:
+            raise RuntimeError(
+                f"Agent sandbox stdout exceeded {_MAX_SANDBOX_STDOUT_BYTES} bytes "
+                f"({exc.total_bytes}+ bytes); refusing to buffer/parse."
+            ) from exc
+        stderr = container.logs(stdout=False, stderr=True, tail=_LOG_TAIL_LINES)
 
         if exit_code != 0:
             stderr_text = (stderr or b"").decode("utf-8", errors="replace")[-4000:]
             raise RuntimeError(
                 f"Agent sandbox exited with code {exit_code}. stderr tail:\n{stderr_text}"
-            )
-
-        # The agent is untrusted: a hostile (or buggy) agent can flood stdout
-        # to force the validator to buffer, decode, and JSON-scan an arbitrarily
-        # large string (the O(n) `_last_json_object` walk + pydantic parse). A
-        # legitimate AgentResult is small, so reject anything implausibly large.
-        stdout_raw = stdout or b""
-        if len(stdout_raw) > _MAX_SANDBOX_STDOUT_BYTES:
-            raise RuntimeError(
-                f"Agent sandbox stdout exceeded {_MAX_SANDBOX_STDOUT_BYTES} bytes "
-                f"({len(stdout_raw)} bytes); refusing to parse."
             )
 
         stdout_text = stdout_raw.decode("utf-8", errors="replace").strip()
@@ -420,6 +487,47 @@ def run_agent_in_container(
             _safe_remove(container)
 
 
+class _SandboxStdoutTooLarge(RuntimeError):
+    """Raised when agent stdout exceeds the buffer ceiling mid-stream."""
+
+    def __init__(self, total_bytes: int) -> None:
+        self.total_bytes = total_bytes
+        super().__init__(f"sandbox stdout exceeded cap at {total_bytes}+ bytes")
+
+
+def _cap_log_stream(chunks: Iterable[bytes], max_bytes: int) -> bytes:
+    """Accumulate `chunks` but abort as soon as the total exceeds `max_bytes`.
+
+    Pulling ``container.logs(stdout=True)`` in one shot buffers the agent's
+    entire (possibly hostile) stdout into memory before any size check — an
+    untrusted agent can flood it to OOM the validator. Streaming chunk-by-chunk
+    and bailing early bounds the buffer to ~max_bytes + one chunk.
+    """
+    out: list[bytes] = []
+    total = 0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > max_bytes:
+            raise _SandboxStdoutTooLarge(total)
+        out.append(chunk)
+    return b"".join(out)
+
+
+def _read_capped_stdout(container: Any, max_bytes: int) -> bytes:
+    """Read the sibling's stdout without buffering more than `max_bytes`."""
+    try:
+        stream = container.logs(stdout=True, stderr=False, stream=True, follow=False)
+    except TypeError:
+        # docker-py too old for stream kw: fall back to a bounded one-shot read.
+        data = container.logs(stdout=True, stderr=False) or b""
+        if len(data) > max_bytes:
+            raise _SandboxStdoutTooLarge(len(data))
+        return data
+    return _cap_log_stream(stream, max_bytes)
+
+
 def _force_kill(container: Any) -> None:
     try:
         container.kill(signal="SIGKILL")
@@ -435,25 +543,42 @@ def _safe_remove(container: Any) -> None:
 
 
 def _last_json_object(text: str) -> str:
-    """Return the last `{...}` JSON object in `text`.
+    """Return the last balanced `{...}` JSON object in `text`.
 
     The runner's ENTRYPOINT writes a single JSON payload to stdout, but the
     agent's own code (or `print()` debug from any of the curated runner deps
     like httpx) may also write to stdout before that. The real payload is
     always the trailing balanced `{...}`. Be tolerant.
+
+    Brace counting is **string-aware**: braces appearing inside JSON string
+    values (e.g. a reasoning field containing ``"use {curly} braces"``) are
+    ignored, with standard ``\\`` escape handling. A naive brace walk would
+    miscount those and reject an otherwise-valid AgentResult.
     """
     text = text.strip()
-    if text.startswith("{") and text.endswith("}"):
-        return text
-    # Walk backwards looking for a balanced `{...}` at the tail.
+    start: int | None = None
+    last: str | None = None
     depth = 0
-    end = len(text)
-    for i in range(len(text) - 1, -1, -1):
-        ch = text[i]
-        if ch == "}":
-            depth += 1
+    in_str = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
         elif ch == "{":
-            depth -= 1
             if depth == 0:
-                return text[i:end]
-    return text  # last-ditch — let the JSON parser produce the error
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    last = text[start : i + 1]
+    return last if last is not None else text  # last-ditch — let the parser error
