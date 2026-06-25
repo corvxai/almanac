@@ -150,11 +150,9 @@ def local_proxy(proxy_socket_dir: Path, upstream_capture):
             break
         time.sleep(0.05)
     assert socket_path.exists(), "proxy UDS failed to start"
-    # The sandbox runs as the unprivileged uid 10001 and connects to this UDS
-    # through a bind mount; a default-umask socket (0755) is not connectable by
-    # another uid. run_local_proxy widens the umask in production; mirror that
-    # here by making the test socket world-connectable.
-    os.chmod(socket_path, 0o666)
+    from src.validator.proxy_socket import make_proxy_socket_connectable
+
+    make_proxy_socket_connectable(socket_path)
 
     yield proxy_state, state
 

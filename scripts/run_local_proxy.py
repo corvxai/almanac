@@ -30,6 +30,7 @@ import uvicorn  # noqa: E402
 
 from src.core.config import AppConfig  # noqa: E402
 from src.gateway.local_proxy import create_app  # noqa: E402
+from src.validator.proxy_socket import proxy_socket_bind_umask  # noqa: E402
 
 
 logging.basicConfig(
@@ -81,14 +82,11 @@ def main() -> None:
     print("=" * 60)
     print()
 
-    # The sandbox runs as a fixed unprivileged uid (10001), distinct from this
-    # proxy's uid, and connects to this UDS through a read-only bind mount. A
-    # default-umask socket (0755) is not connectable by another uid, so widen
-    # the umask to 0 right before bind: uvicorn creates the UDS as 0777, letting
-    # the sandbox connect(). The socket is still gated by X-Run-Id, and per-run
-    # mount isolation means a sandbox only ever knows its own run id.
-    os.umask(0o000)
-    uvicorn.run(app, uds=str(socket_path), log_level="info")
+    old_umask = proxy_socket_bind_umask()
+    try:
+        uvicorn.run(app, uds=str(socket_path), log_level="info")
+    finally:
+        os.umask(old_umask)
 
 
 if __name__ == "__main__":
