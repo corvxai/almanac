@@ -32,7 +32,8 @@ Bittensor chain.
 
 ## Tags
 
-- `latest` — most recent release (multi-arch: `linux/amd64`, `linux/arm64`).
+- `latest` — most recent release (`linux/amd64`; validators run on Linux
+  amd64 hosts).
 - `X.Y.Z` — pinned release versions.
 - `sha-<gitsha>` — exact commit builds.
 
