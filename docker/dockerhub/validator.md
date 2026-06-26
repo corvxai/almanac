@@ -1,10 +1,10 @@
-# almanac/validator
+# almanacai/validator
 
 **Sandboxed forecasting agents for prediction markets.**
 
 The validator node for the Almanac subnet. It pulls miner-submitted forecasting
 agents assigned by the orchestrator, runs each one inside an isolated
-[`almanac/agent-runner`](https://hub.docker.com/r/almanac/agent-runner) sandbox,
+[`almanacai/agent-runner`](https://hub.docker.com/r/almanacai/agent-runner) sandbox,
 records a full reasoning trace, scores predictions, and submits weights to the
 Bittensor chain.
 
@@ -39,7 +39,7 @@ Bittensor chain.
 ## Pull & run
 
 ```bash
-docker pull almanac/validator:latest
+docker pull almanacai/validator:latest
 ```
 
 Run via Compose (recommended — it wires the Docker socket, wallet, and proxy):
@@ -60,4 +60,4 @@ architecture notes.
 ## Links
 
 - Source & guides: https://github.com/sportstensor/arcratio
-- Sandbox image: [`almanac/agent-runner`](https://hub.docker.com/r/almanac/agent-runner)
+- Sandbox image: [`almanacai/agent-runner`](https://hub.docker.com/r/almanacai/agent-runner)
