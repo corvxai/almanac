@@ -1,4 +1,4 @@
-# almanac/agent-runner
+# almanacai/agent-runner
 
 **Sandboxed forecasting agents for prediction markets.**
 
@@ -45,18 +45,18 @@ machines.
 ## Pull
 
 ```bash
-docker pull almanac/agent-runner:latest
+docker pull almanacai/agent-runner:latest
 ```
 
 **Pin by digest for production.** Validators should reference an immutable digest
 rather than a moving tag so the sandbox image can't be silently swapped:
 
 ```bash
-docker pull almanac/agent-runner@sha256:<digest>
+docker pull almanacai/agent-runner@sha256:<digest>
 ```
 
 Point the validator at it via `cfg.sandbox_image` (or the matching env/config),
-e.g. `almanac/agent-runner@sha256:<digest>`.
+e.g. `almanacai/agent-runner@sha256:<digest>`.
 
 ## How it's used
 
@@ -71,4 +71,4 @@ sandbox mode (see the repository's miner guide / `scripts/run_forecast.py`).
 ## Links
 
 - Source & guides: https://github.com/sportstensor/arcratio
-- Companion image: [`almanac/validator`](https://hub.docker.com/r/almanac/validator)
+- Companion image: [`almanacai/validator`](https://hub.docker.com/r/almanacai/validator)

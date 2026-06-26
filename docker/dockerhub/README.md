@@ -7,8 +7,8 @@ manually, or have the image-publish workflow push it automatically (e.g. via
 
 | File | Docker Hub repo | Purpose |
 |------|-----------------|---------|
-| [`agent-runner.md`](agent-runner.md) | `almanac/agent-runner` | The hardened sandbox that runs one untrusted forecasting agent. |
-| [`validator.md`](validator.md) | `almanac/validator` | The validator node that orchestrates agent runs and sets weights. |
+| [`agent-runner.md`](agent-runner.md) | `almanacai/agent-runner` | The hardened sandbox that runs one untrusted forecasting agent. |
+| [`validator.md`](validator.md) | `almanacai/validator` | The validator node that orchestrates agent runs and sets weights. |
 
 ## Org short description (≤100 chars)
 
