@@ -442,10 +442,6 @@ class Validator:
             return
 
         if response.assignment is None:
-            logger.debug(
-                "No orchestrator assignment available (reason=%s).",
-                response.reason or "none_available",
-            )
             return
 
         self._handle_orchestrator_assignment(response.assignment)
