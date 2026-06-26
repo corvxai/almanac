@@ -200,9 +200,20 @@ class Orchestrator:
         self,
         event: Event,
         agents: list[BaseAgent],
+        *,
+        miner_hotkey: str | None = None,
     ) -> list[EvidenceDigest]:
-        """Run multiple agents on the same event, returning all traces."""
-        return [self.run_agent(event, agent) for agent in agents]
+        """Run multiple agents on the same event, returning all traces.
+
+        `miner_hotkey` is forwarded to `run_agent` so the local proxy has a
+        billing/attribution identity for docker_* sandbox runs. Dropping it
+        here would make every provider call 400 under the docker path, since
+        the signed identity now comes solely from run registration.
+        """
+        return [
+            self.run_agent(event, agent, miner_hotkey=miner_hotkey)
+            for agent in agents
+        ]
 
     def _collect_market_baseline(self, event: Event) -> dict[str, Any] | None:
         """Fetch latest YES/NO baseline prices from direct Polymarket lookup."""

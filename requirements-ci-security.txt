@@ -1,0 +1,16 @@
+# Minimal deps for the `docker-security` CI job (pytest tests/security --docker).
+#
+# The sandbox lockdown suite only needs the validator-side orchestration deps:
+# it builds the agent-runner image (which carries its OWN deps) and drives
+# sibling containers + the local proxy from the host. It does NOT import the
+# scoring/almanac stack (cvxpy/scipy/pandas/tabulate/matplotlib) or bittensor
+# (signing imports it lazily and tests run unsigned), so we skip the heavy
+# install that dominates a cold-cache run. Verified by importing the full
+# tests/security chain — none of those packages load.
+pydantic>=2.0,<3.0
+httpx>=0.27
+fastapi>=0.115
+uvicorn>=0.34
+python-dotenv>=1.0
+docker>=7.1
+pytest>=8.0,<9

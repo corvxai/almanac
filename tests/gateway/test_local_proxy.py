@@ -208,6 +208,48 @@ class TestForwardingAndRecording:
         assert len(calls) == 1
         assert calls[0].provider_id == "openrouter"
 
+    def test_body_miner_hotkey_cannot_override_registered_identity(self, proxy_client):
+        """A malicious sandbox cannot choose whose hotkey the validator signs.
+
+        Regression for the billing/attribution spoofing hole: the signed
+        `x-miner-hotkey` must come from the run registration, never the body.
+        """
+        client, state, captured = proxy_client
+        run_id = uuid4()
+        state.register_run(run_id, track="MAIN", miner_hotkey="5RealMiner")
+
+        # /v1/call — attacker plants minerHotkey at both body and params levels.
+        resp = client.post(
+            "/v1/call",
+            json={
+                "provider_id": "anthropic",
+                "call_type": "messages",
+                "minerHotkey": "5AttackerTopLevel",
+                "params": {"model": "claude-sonnet-4-6", "minerHotkey": "5AttackerInParams"},
+            },
+            headers={"X-Run-Id": str(run_id)},
+        )
+        assert resp.status_code == 200
+        upstream = captured["requests"][-1]
+        assert upstream["headers"]["x-miner-hotkey"] == "5RealMiner"
+        assert "minerHotkey" not in upstream["body"]
+
+        # /v1/gateway/validator/completions — same attempt on the other route.
+        resp = client.post(
+            "/v1/gateway/validator/completions",
+            json={
+                "provider": "openrouter",
+                "model": "anthropic/claude-3.5-sonnet",
+                "messages": [{"role": "system", "content": "hi"}],
+                "minerHotkey": "5AttackerCompletions",
+            },
+            headers={"X-Run-Id": str(run_id)},
+        )
+        assert resp.status_code == 200
+        upstream = captured["requests"][-1]
+        assert upstream["headers"]["x-miner-hotkey"] == "5RealMiner"
+        assert "minerHotkey" not in upstream["body"]
+
     def test_missing_miner_hotkey_context_rejected(self, proxy_client):
         client, state, _captured = proxy_client
         run_id = uuid4()
