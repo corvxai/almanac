@@ -36,6 +36,24 @@ class LoadedEvent:
     event: Event
 
 
+def _dev_miner_hotkey(local_proxy_state, config: AppConfig) -> str | None:
+    """Billing/attribution identity for the local proxy in docker_* dev runs.
+
+    The local proxy now requires a miner hotkey for every provider call (the
+    signed identity comes solely from run registration, never the agent body).
+    In this dev CLI the validator runs reference agents itself, so it bills
+    under its own loaded hotkey; when signing is disabled there is no real
+    keypair, so fall back to a clearly-marked dev placeholder. Returns None in
+    in_process mode where no proxy/billing context exists.
+    """
+    if local_proxy_state is None:
+        return None
+    kp = getattr(local_proxy_state, "loaded_keypair", None)
+    if kp is not None:
+        return kp.hotkey_ss58
+    return f"dev-local-{config.validator.validator_id}"
+
+
 def load_events(data_dir: Path) -> list[LoadedEvent]:
     events_dir = data_dir / "events"
     events: list[LoadedEvent] = []
@@ -195,6 +213,7 @@ def main() -> None:
         providers=providers,
         local_proxy_state=local_proxy_state,
     )
+    miner_hotkey = _dev_miner_hotkey(local_proxy_state, config)
 
     agent_map = {
         "simple": SimpleAgent,
@@ -235,7 +254,7 @@ def main() -> None:
                 "  Baseline: gathering validator-side market signal "
                 f"(source={event.source or 'n/a'}, source_id={event.source_id or 'n/a'}) ..."
             )
-            digest = orchestrator.run_agent(event, agent)
+            digest = orchestrator.run_agent(event, agent, miner_hotkey=miner_hotkey)
             baseline = None
             if digest.prediction_output.metadata:
                 baseline = digest.prediction_output.metadata.get("market_baseline")

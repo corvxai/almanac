@@ -38,6 +38,10 @@ import numpy as np
 
 from src.core.config import AppConfig
 from src.core.schemas import EvidenceDigest
+from src.validator.proxy_socket import (
+    make_proxy_socket_connectable,
+    proxy_socket_bind_umask,
+)
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
@@ -220,17 +224,23 @@ def start_local_proxy(config: AppConfig):
         name="arcratio-local-proxy",
         daemon=True,
     )
-    thread.start()
+    old_umask = proxy_socket_bind_umask()
+    try:
+        thread.start()
 
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if socket_path.exists():
-            try:
-                os.chmod(socket_path, 0o600)
-            except OSError as exc:
-                logger.warning("could not chmod proxy socket %s: %s", socket_path, exc)
-            break
-        time.sleep(0.05)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if socket_path.exists():
+                try:
+                    make_proxy_socket_connectable(socket_path)
+                except OSError as exc:
+                    logger.warning(
+                        "could not chmod proxy socket %s: %s", socket_path, exc
+                    )
+                break
+            time.sleep(0.05)
+    finally:
+        os.umask(old_umask)
 
     return state
 

@@ -30,6 +30,45 @@ def test_mountinfo_host_root_prefers_bind(tmp_path: Path) -> None:
     assert got == host_src
 
 
+def test_mountinfo_host_root_resolves_subdir_of_bind(tmp_path: Path) -> None:
+    """A socket dir nested *under* a bind mount resolves to host_root/<subdir>.
+
+    Regression: previously only an exact mountpoint match resolved, so a socket
+    dir like ``/var/run/arcratio`` under a ``/var/run`` bind returned None and
+    the caller silently bound a wrong (container-internal) path.
+    """
+    mount_root = tmp_path / "run"
+    sock_dir = mount_root / "arcratio"
+    sock_dir.mkdir(parents=True)
+    host_src = "/host/proj/var/run"
+    mi = (
+        f"1 0 252:0 / / rw,relatime - overlay overlay rw\n"
+        f"2 1 252:0 {host_src} {mount_root} rw,nosuid - bind {host_src} rw\n"
+    )
+    mi_path = tmp_path / "mountinfo"
+    mi_path.write_text(mi, encoding="utf-8")
+
+    got = sd._mountinfo_host_root_for_mountpoint(sock_dir, _mountinfo_path=mi_path)
+    assert got == f"{host_src}/arcratio"
+
+
+def test_mountinfo_host_root_prefers_most_specific_mount(tmp_path: Path) -> None:
+    """When both an ancestor and the exact mountpoint match, the deeper one wins."""
+    mount_root = tmp_path / "run"
+    sock_dir = mount_root / "arcratio"
+    sock_dir.mkdir(parents=True)
+    mi = (
+        f"1 0 252:0 / / rw - overlay overlay rw\n"
+        f"2 1 252:0 /host/run {mount_root} rw - bind /host/run rw\n"
+        f"3 1 252:0 /host/sock {sock_dir} rw - bind /host/sock rw\n"
+    )
+    mi_path = tmp_path / "mountinfo"
+    mi_path.write_text(mi, encoding="utf-8")
+
+    got = sd._mountinfo_host_root_for_mountpoint(sock_dir, _mountinfo_path=mi_path)
+    assert got == "/host/sock"
+
+
 def test_sibling_socket_host_bind_explicit_config(tmp_path: Path) -> None:
     cfg = ValidatorConfig(
         sandbox_socket_dir=tmp_path,

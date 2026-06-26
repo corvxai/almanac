@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,7 @@ import uvicorn  # noqa: E402
 
 from src.core.config import AppConfig  # noqa: E402
 from src.gateway.local_proxy import create_app  # noqa: E402
+from src.validator.proxy_socket import proxy_socket_bind_umask  # noqa: E402
 
 
 logging.basicConfig(
@@ -80,7 +82,11 @@ def main() -> None:
     print("=" * 60)
     print()
 
-    uvicorn.run(app, uds=str(socket_path), log_level="info")
+    old_umask = proxy_socket_bind_umask()
+    try:
+        uvicorn.run(app, uds=str(socket_path), log_level="info")
+    finally:
+        os.umask(old_umask)
 
 
 if __name__ == "__main__":

@@ -64,7 +64,10 @@ def _run_attack_in_sandbox(
     event = _sample_event()
     ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
     run_id = uuid4()
-    proxy_state.register_run(run_id, track)
+    # Register with a miner_hotkey: the proxy derives the signed billing identity
+    # solely from the run registration (the agent body can no longer override it),
+    # so a provider call with no registered hotkey is rejected with a 400.
+    proxy_state.register_run(run_id, track, miner_hotkey="5TestMiner")
     try:
         run_agent_in_container(agent, ctx, cfg.validator, run_id)
     except Exception as exc:  # noqa: BLE001
@@ -132,7 +135,7 @@ class TestFilesystemLockdown:
         event = _sample_event()
         ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
         run_id = uuid4()
-        proxy_state.register_run(run_id, "MAIN")
+        proxy_state.register_run(run_id, "MAIN", miner_hotkey="5TestMiner")
         try:
             result = run_agent_in_container(FsEtcPasswdAttack(), ctx, cfg.validator, run_id)
         finally:
@@ -154,7 +157,7 @@ class TestFilesystemLockdown:
         event = _sample_event()
         ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
         run_id = uuid4()
-        proxy_state.register_run(run_id, "MAIN")
+        proxy_state.register_run(run_id, "MAIN", miner_hotkey="5TestMiner")
         try:
             result = run_agent_in_container(FsWalletAttack(), ctx, cfg.validator, run_id)
         finally:
@@ -224,7 +227,7 @@ class TestPositiveEndToEnd:
         event = _sample_event()
         ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
         run_id = uuid4()
-        proxy_state.register_run(run_id, "MAIN")
+        proxy_state.register_run(run_id, "MAIN", miner_hotkey="5TestMiner")
         try:
             result = run_agent_in_container(SimpleAgent(), ctx, cfg.validator, run_id)
             calls = proxy_state.pop_calls(run_id)
