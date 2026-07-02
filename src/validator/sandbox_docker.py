@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterable
@@ -140,12 +141,29 @@ def _mountinfo_host_root_for_mountpoint(
     return str(Path(best_root) / rel)
 
 
-def _sibling_socket_host_bind(cfg: ValidatorConfig) -> str:
+# A mountinfo root landing inside a named volume's data dir. The root token is
+# relative to the backing device's filesystem root, so when the daemon keeps
+# /var/lib/docker on its own device (e.g. Docker Desktop's VM) the resolved
+# path is missing that prefix — the daemon's Mountpoint for the volume is the
+# authoritative host path.
+_VOLUME_DATA_ROOT_RE = re.compile(r"(?:^|/)docker/volumes/([^/]+)/_data(/.*)?$")
+
+
+def _sibling_socket_host_bind(cfg: ValidatorConfig, client: Any | None = None) -> str:
     """Filesystem path on the Docker *host* to bind into the agent container."""
     if cfg.sandbox_socket_host_bind:
         return cfg.sandbox_socket_host_bind
     resolved = _mountinfo_host_root_for_mountpoint(cfg.sandbox_socket_dir)
     if resolved:
+        volume_match = _VOLUME_DATA_ROOT_RE.search(resolved)
+        if volume_match and client is not None:
+            try:
+                volume = client.volumes.get(volume_match.group(1))
+                mountpoint = (volume.attrs or {}).get("Mountpoint")
+            except Exception:  # noqa: BLE001 — fall back to the raw path
+                mountpoint = None
+            if mountpoint:
+                return mountpoint.rstrip("/") + (volume_match.group(2) or "")
         return resolved
     return str(cfg.sandbox_socket_dir)
 
@@ -339,7 +357,7 @@ def run_agent_in_container(
 
     runtime = "runsc" if cfg.sandbox_type == "docker_gvisor" else None
 
-    bind_src = _sibling_socket_host_bind(cfg)
+    bind_src = _sibling_socket_host_bind(cfg, client)
     runner_user = _sandbox_runner_user()
 
     container_kwargs: dict[str, Any] = dict(
