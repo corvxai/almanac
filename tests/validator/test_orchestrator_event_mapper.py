@@ -27,6 +27,16 @@ def _assignment(*, description: str | None = "Binary event", source_market_id: s
                 "question": "Will the White House call a full lid by 6:30PM on June 3?",
                 "description": description,
                 "endDate": "2026-06-06T16:00:00Z",
+                "outcomes": [
+                    {
+                        "outcomeId": "50021132755437548153440115538135773388691694036974767046675729697249853152385",
+                        "name": "Yes",
+                    },
+                    {
+                        "outcomeId": "44067735420073091208102132584206540755478475924816968380795164046445880451653",
+                        "name": "No",
+                    },
+                ],
                 "currentOutcomePrices": {
                     "44067735420073091208102132584206540755478475924816968380795164046445880451653": 0.26,
                     "50021132755437548153440115538135773388691694036974767046675729697249853152385": 0.74,
@@ -56,6 +66,25 @@ def test_assignment_to_event_maps_core_fields() -> None:
     assert event.source == "polymarket"
     assert event.source_id == "2411919"
     assert event.event_id == uuid5(NAMESPACE_URL, "polymarket:2411919")
+
+
+def test_assignment_to_event_passes_market_snapshot_through() -> None:
+    event = assignment_to_event(_assignment())
+
+    assert event.outcomes == [
+        {
+            "outcomeId": "50021132755437548153440115538135773388691694036974767046675729697249853152385",
+            "name": "Yes",
+        },
+        {
+            "outcomeId": "44067735420073091208102132584206540755478475924816968380795164046445880451653",
+            "name": "No",
+        },
+    ]
+    assert event.current_outcome_prices == {
+        "44067735420073091208102132584206540755478475924816968380795164046445880451653": 0.26,
+        "50021132755437548153440115538135773388691694036974767046675729697249853152385": 0.74,
+    }
 
 
 def test_assignment_to_event_fallbacks_description_and_source_id() -> None:

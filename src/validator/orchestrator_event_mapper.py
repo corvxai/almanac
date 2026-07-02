@@ -44,6 +44,12 @@ def assignment_to_event(
         source_id=source_id,
         source_url=None,
         tags=[],
+        outcomes=[
+            {str(k): str(v) for k, v in o.items() if isinstance(v, str)}
+            for o in assignment.event.outcomes
+            if isinstance(o, dict)
+        ],
+        current_outcome_prices=dict(assignment.event.currentOutcomePrices),
     )
 
 
