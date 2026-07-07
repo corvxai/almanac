@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from src.validator.scoring import PARETO_BOOST, PARETO_MU, _apply_pareto, score_agent_predictions
+from src.validator.scoring import PARETO_BOOST, PARETO_MU, _apply_pareto, _apply_pareto_by_rank, score_agent_predictions
 
 
 class _StubMetagraph:
@@ -68,7 +68,7 @@ def test_empty_rows_returns_zeros() -> None:
     np.testing.assert_allclose(out, np.zeros(3))
 
 
-def test_perfect_prediction_yields_pareto_floor_score() -> None:
+def test_perfect_prediction_yields_pareto_leader_score() -> None:
     metagraph = _StubMetagraph(uids=[0, 1, 2])
 
     now = datetime.now(timezone.utc)
@@ -76,7 +76,7 @@ def test_perfect_prediction_yields_pareto_floor_score() -> None:
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
 
     assert out[0] == 0.0
-    assert out[1] == pytest.approx(PARETO_MU)
+    assert out[1] == pytest.approx(PARETO_MU + PARETO_BOOST)
     assert out[2] == 0.0
 
 
@@ -124,8 +124,18 @@ def test_unresolved_row_is_ignored() -> None:
 
 
 def test_apply_pareto_stretches_positive_scores() -> None:
+    raw = np.array([0.0, 0.2, 0.4, 0.8], dtype=float)
+    out = _apply_pareto(raw, mu=0.0, boost=1.0, gamma=2.0)
+
+    np.testing.assert_allclose(out[0], 0.0)
+    np.testing.assert_allclose(out[3], 1.0)
+    np.testing.assert_allclose(out[1], 0.0625)
+    assert out[1] < out[2] < out[3]
+
+
+def test_apply_pareto_by_rank_stretches_positive_scores() -> None:
     raw = np.array([0.0, 0.4, 0.6, 0.8], dtype=float)
-    out = _apply_pareto(raw, mu=1.0, boost=0.30, knee=0.5, sharpness=8.0, tail=1.2)
+    out = _apply_pareto_by_rank(raw, mu=1.0, boost=0.30, knee=0.5, sharpness=8.0, tail=1.2)
 
     np.testing.assert_allclose(out[0], 0.0)
     np.testing.assert_allclose(out[1], 1.0)

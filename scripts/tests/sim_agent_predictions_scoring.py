@@ -12,6 +12,13 @@ By default, this script reads/writes:
 
     scripts/tests/agent_predictions.json
 
+Mock generation synthesizes six miner archetypes (market huggers, skilled
+contrarians, skilled independents, bad contrarians, noise traders, average)
+with per-miner traits for skill, market independence, contrarian affinity,
+calibration bias, and invalid-rate. Skilled contrarians are designed to
+oppose mispriced markets and rank among the top scorers; bad contrarians
+oppose the market with negative skill and rank near zero.
+
 A normal scoring run also writes:
 
     scripts/tests/pareto_scores.png
@@ -62,12 +69,19 @@ SCORE_TIER_LABELS = ("Bottom quartile", "Lower-mid quartile", "Upper-mid quartil
 # Mock data generation constants.
 MOCK_RANDOM_SEED = 29
 MOCK_MINER_COUNT = 100
-MOCK_MIN_PREDICTIONS_PER_MINER = 5
-MOCK_MAX_PREDICTIONS_PER_MINER = 100
+# Volume range spans the new rho curve (RHO_THRESHOLD_PREDICTIONS = 150
+# effective, ~14d half-life): low-count miners sit near the rho floor,
+# high-count miners saturate. Sized for orchestrator-metered cadence of
+# roughly 5-15 predictions/miner/day over the 30-day window.
+MOCK_MIN_PREDICTIONS_PER_MINER = 50
+MOCK_MAX_PREDICTIONS_PER_MINER = 1200
 MOCK_MAX_AGE_DAYS = 30
 MOCK_START_UID = 1
-# Fraction of predictions that reuse an existing market (enables ensemble signal).
+# Fraction of predictions that reuse an existing market (payload realism).
 MOCK_SHARED_MARKET_RATE = 0.75
+# Market price noise vs latent truth (wider than before so edge pillar can
+# separate informed contrarians from market huggers).
+MOCK_MARKET_NOISE_SIGMA = 0.18
 
 
 logger = logging.getLogger("arcratio.sim_scoring")
@@ -86,21 +100,94 @@ def _sigmoid(value: float) -> float:
     return 1.0 / (1.0 + math.exp(-value))
 
 
-def _miner_profile(uid: int) -> dict[str, float]:
-    """Stable per-miner traits: skill (edge toward truth), noise, invalid-rate."""
+def _miner_profile(uid: int) -> dict[str, float | str]:
+    """Stable per-miner traits for diverse scoring-pillar exercise.
+
+    Archetypes (approximate population shares):
+      - market_hugger (12%): copies market; passes gates but middling raw.
+      - skilled_contrarian (14%): opposes mispriced markets and leans to truth.
+      - skilled_independent (8%): truth-seeking without always fighting market.
+      - bad_contrarian (22%): opposes market with negative skill; baseline-gated.
+      - noise_trader (18%): mediocre skill, high noise; mostly gated or floor.
+      - average (26%): baseline; wide outcome from volume + luck.
+
+    ``volume_factor`` scales prediction count per miner (orchestrator cadence
+    is uniform, but registration tenure / uptime varies in production).
+    """
     profile_rng = random.Random(MOCK_RANDOM_SEED * 10_000 + uid)
+    roll = profile_rng.random()
+
+    if roll < 0.12:
+        archetype = "market_hugger"
+        skill = profile_rng.uniform(-0.45, 0.15)
+        market_alpha = profile_rng.uniform(0.0, 0.06)
+        contrarian_affinity = profile_rng.uniform(0.0, 0.08)
+        calibration_bias = profile_rng.uniform(-0.02, 0.10)
+        noise = profile_rng.uniform(0.35, 0.58)
+        invalid_rate = profile_rng.uniform(0.0, 0.05)
+        volume_factor = profile_rng.uniform(0.55, 1.0)
+    elif roll < 0.26:
+        archetype = "skilled_contrarian"
+        skill = profile_rng.uniform(0.65, 1.1)
+        market_alpha = profile_rng.uniform(0.70, 1.0)
+        contrarian_affinity = profile_rng.uniform(0.70, 1.0)
+        calibration_bias = profile_rng.uniform(-0.14, 0.10)
+        noise = profile_rng.uniform(0.08, 0.26)
+        invalid_rate = profile_rng.uniform(0.0, 0.05)
+        volume_factor = profile_rng.uniform(0.92, 1.0)
+    elif roll < 0.34:
+        archetype = "skilled_independent"
+        skill = profile_rng.uniform(0.50, 1.0)
+        market_alpha = profile_rng.uniform(0.45, 0.90)
+        contrarian_affinity = profile_rng.uniform(0.0, 0.30)
+        calibration_bias = profile_rng.uniform(-0.12, 0.08)
+        noise = profile_rng.uniform(0.18, 0.38)
+        invalid_rate = profile_rng.uniform(0.0, 0.04)
+        volume_factor = profile_rng.uniform(0.80, 1.0)
+    elif roll < 0.52:
+        archetype = "noise_trader"
+        skill = profile_rng.uniform(-0.55, 0.30)
+        market_alpha = profile_rng.uniform(0.25, 0.65)
+        contrarian_affinity = profile_rng.uniform(0.20, 0.60)
+        calibration_bias = profile_rng.uniform(-0.05, 0.22)
+        noise = profile_rng.uniform(0.40, 0.70)
+        invalid_rate = profile_rng.uniform(0.02, 0.10)
+        volume_factor = profile_rng.uniform(0.35, 0.85)
+    elif roll < 0.74:
+        archetype = "bad_contrarian"
+        skill = profile_rng.uniform(-1.1, -0.50)
+        market_alpha = profile_rng.uniform(0.50, 1.0)
+        contrarian_affinity = profile_rng.uniform(0.60, 1.0)
+        calibration_bias = profile_rng.uniform(0.10, 0.30)
+        noise = profile_rng.uniform(0.30, 0.62)
+        invalid_rate = profile_rng.uniform(0.03, 0.12)
+        volume_factor = profile_rng.uniform(0.40, 0.95)
+    else:
+        archetype = "average"
+        skill = profile_rng.uniform(-0.75, 0.15)
+        market_alpha = profile_rng.uniform(0.10, 0.35)
+        contrarian_affinity = profile_rng.uniform(0.0, 0.20)
+        calibration_bias = profile_rng.uniform(-0.18, 0.20)
+        noise = profile_rng.uniform(0.35, 0.65)
+        invalid_rate = profile_rng.uniform(0.01, 0.10)
+        volume_factor = profile_rng.uniform(0.35, 0.80)
+
     return {
-        "skill": profile_rng.uniform(-1.1, 1.1),
-        "noise": profile_rng.uniform(0.20, 0.65),
-        "invalid_rate": profile_rng.uniform(0.0, 0.07),
+        "archetype": archetype,
+        "skill": skill,
+        "noise": noise,
+        "invalid_rate": invalid_rate,
+        "calibration_bias": calibration_bias,
+        "market_alpha": market_alpha,
+        "contrarian_affinity": contrarian_affinity,
+        "volume_factor": volume_factor,
     }
 
 
 def _sample_market_event(rng: random.Random) -> tuple[float, float, str]:
     """Return (true_yes_prob, market_yes_price, resolved_outcome_id)."""
     true_yes = _clamp_prob(rng.betavariate(2.4, 2.4))
-    # Market is efficient-ish: price tracks latent truth with small noise.
-    market_yes = _clamp_prob(true_yes + rng.gauss(0.0, 0.05))
+    market_yes = _clamp_prob(true_yes + rng.gauss(0.0, MOCK_MARKET_NOISE_SIGMA))
     resolved_outcome = "yes" if rng.random() < true_yes else "no"
     return true_yes, market_yes, resolved_outcome
 
@@ -111,16 +198,47 @@ def _agent_yes_probability(
     market_yes: float,
     skill: float,
     noise: float,
+    market_alpha: float,
+    contrarian_affinity: float,
     rng: random.Random,
 ) -> float:
-    """Skilled miners lean toward truth; unskilled miners stay near market + noise."""
+    """Synthesize agent YES probability from miner traits and latent event.
+
+    Skilled miners lean toward truth; ``market_alpha`` controls independence
+    from the market anchor. When the market is on the wrong side of 0.5 vs
+    truth, ``contrarian_affinity`` amplifies divergence — toward truth when
+    skill is positive (rewardable contrarian), away from truth when skill is
+    negative (manufactured contrarian / anti-forecast).
+    """
     logit_market = _logit(market_yes)
     logit_truth = _logit(true_yes)
     skill_weight = max(0.0, min(1.0, abs(skill) / 1.1))
     direction = 1.0 if skill >= 0.0 else -1.0
-    target = logit_market + direction * skill_weight * (logit_truth - logit_market)
-    noisy = target + rng.gauss(0.0, noise)
-    return round(_clamp_prob(_sigmoid(noisy)), 4)
+
+    logit_informed = logit_market + direction * skill_weight * (logit_truth - logit_market)
+    logit_target = (1.0 - market_alpha) * logit_market + market_alpha * logit_informed
+
+    market_side_yes = market_yes >= 0.5
+    truth_side_yes = true_yes >= 0.5
+    if market_side_yes != truth_side_yes and contrarian_affinity > 0.0:
+        gap = abs(logit_truth - logit_market)
+        if skill >= 0.0:
+            logit_target += direction * contrarian_affinity * skill_weight * gap * 1.25
+        else:
+            logit_target -= direction * contrarian_affinity * skill_weight * gap * 0.90
+
+    noisy = logit_target + rng.gauss(0.0, noise)
+    return _clamp_prob(_sigmoid(noisy))
+
+
+def _apply_calibration_bias(p_yes: float, *, bias: float) -> tuple[float, float]:
+    """Skew stated confidence on the chosen side (+ bias = overconfident)."""
+    predicted_yes = p_yes >= 0.5
+    p_pred = p_yes if predicted_yes else (1.0 - p_yes)
+    p_pred_biased = _clamp_prob(0.5 + (p_pred - 0.5) * (1.0 + bias) + bias * 0.15)
+    if predicted_yes:
+        return round(p_pred_biased, 4), round(1.0 - p_pred_biased, 4)
+    return round(1.0 - p_pred_biased, 4), round(p_pred_biased, 4)
 
 
 def _load_scored_predictions(path: Path):
@@ -159,7 +277,16 @@ def _generate_mock_predictions(now: datetime) -> list[dict]:
 
     for uid in range(MOCK_START_UID, MOCK_START_UID + MOCK_MINER_COUNT):
         profile = _miner_profile(uid)
-        count = rng.randint(MOCK_MIN_PREDICTIONS_PER_MINER, MOCK_MAX_PREDICTIONS_PER_MINER)
+        volume_factor = float(profile["volume_factor"])
+        count_lo = max(
+            MOCK_MIN_PREDICTIONS_PER_MINER,
+            int(MOCK_MIN_PREDICTIONS_PER_MINER * volume_factor),
+        )
+        count_hi = max(
+            count_lo,
+            int(MOCK_MAX_PREDICTIONS_PER_MINER * volume_factor),
+        )
+        count = rng.randint(count_lo, count_hi)
         for miner_idx in range(count):
             global_idx += 1
             age_seconds = rng.randint(0, max_age_seconds)
@@ -181,15 +308,19 @@ def _generate_mock_predictions(now: datetime) -> list[dict]:
             p_yes = _agent_yes_probability(
                 true_yes=true_yes,
                 market_yes=market_yes,
-                skill=profile["skill"],
-                noise=profile["noise"],
+                skill=float(profile["skill"]),
+                noise=float(profile["noise"]),
+                market_alpha=float(profile["market_alpha"]),
+                contrarian_affinity=float(profile["contrarian_affinity"]),
                 rng=rng,
             )
-            p_no = round(1.0 - p_yes, 4)
+            p_yes, p_no = _apply_calibration_bias(
+                p_yes, bias=float(profile["calibration_bias"])
+            )
             predicted_outcome = "yes" if p_yes >= 0.5 else "no"
             confidence = round(max(p_yes, p_no), 4)
 
-            is_invalid = rng.random() < profile["invalid_rate"]
+            is_invalid = rng.random() < float(profile["invalid_rate"])
             invalid_reason = "confidence_missing" if is_invalid else None
             if is_invalid:
                 confidence = 0.0
@@ -231,7 +362,13 @@ def _generate_mock_predictions(now: datetime) -> list[dict]:
                     "scoredAt": scored_at.isoformat().replace("+00:00", "Z"),
                     "resolutionStatus": "resolved",
                     "traceSummary": {
-                        "strategy": "mock-sim-latent-skill",
+                        "strategy": "mock-sim-archetypes",
+                        "archetype": profile["archetype"],
+                        "skill": round(float(profile["skill"]), 3),
+                        "marketAlpha": round(float(profile["market_alpha"]), 3),
+                        "contrarianAffinity": round(float(profile["contrarian_affinity"]), 3),
+                        "calibrationBias": round(float(profile["calibration_bias"]), 3),
+                        "volumeFactor": round(volume_factor, 3),
                     },
                 }
             )
@@ -390,6 +527,7 @@ def _write_mock_predictions(path: Path) -> int:
         f" miners={MOCK_MINER_COUNT},"
         f" predictions_per_miner={MOCK_MIN_PREDICTIONS_PER_MINER}-{MOCK_MAX_PREDICTIONS_PER_MINER},"
         f" max_age_days={MOCK_MAX_AGE_DAYS},"
+        f" market_noise_sigma={MOCK_MARKET_NOISE_SIGMA},"
         f" seed={MOCK_RANDOM_SEED}"
     )
     return 0
