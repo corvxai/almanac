@@ -32,7 +32,14 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# gcc/libc6-dev: ``ecos`` ships no aarch64 wheel, so arm64 builds compile it
+# from source. Purged after install to keep the runtime image slim.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && pip install --no-cache-dir -r /app/requirements.txt \
+ && apt-get purge -y gcc libc6-dev \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY . /app
 
