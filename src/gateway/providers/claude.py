@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from src.core import constants
 from src.core.schemas import ProviderTier
 from src.gateway.providers.base import BaseProvider
 
@@ -115,7 +116,7 @@ class ClaudeProvider(BaseProvider):
             "content-type": "application/json",
         }
 
-        with httpx.Client(timeout=90.0) as client:
+        with httpx.Client(timeout=float(constants.GATEWAY.call_timeout_seconds)) as client:
             resp = client.post(API_URL, json=body, headers=headers)
             try:
                 resp.raise_for_status()

@@ -1,0 +1,11 @@
+# Local (macOS Docker Desktop) override: put the proxy-socket run dir on a
+# named volume instead of a host bind. A UNIX socket bound on a virtiofs
+# host mount fails with ENOTSUP; a named volume lives in the Docker VM's own
+# filesystem, so the validator and its sibling agent-runners can share it.
+services:
+  validator:
+    volumes:
+      - arcratio-run:/var/run/arcratio
+
+volumes:
+  arcratio-run:

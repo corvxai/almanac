@@ -55,8 +55,9 @@ class StorageDefaults:
 
 @dataclass(frozen=True)
 class GatewayDefaults:
-    default_timeout_ms: int = 30_000
-    max_retries: int = 2
+    # HTTP timeout for every provider-call hop (agent → proxy → gateway → upstream).
+    # Keep aligned with ``ValidatorDefaults.sandbox_timeout_seconds``.
+    call_timeout_seconds: int = 240
     debug_log_raw_response: bool = True
     # 0 means "no truncation" when debug logging is enabled.
     debug_raw_response_max_chars: int = 0
@@ -82,7 +83,7 @@ class ValidatorLoopDefaults:
     metadata_per_uid_delay_seconds: float = 0.1
     metadata_use_bulk_commitments: bool = True
     set_weights_enabled: bool = True
-    assignment_execution_cooldown_seconds: int = 60
+    assignment_execution_cooldown_seconds: int = 300
 
 
 VALIDATOR = ValidatorDefaults()
