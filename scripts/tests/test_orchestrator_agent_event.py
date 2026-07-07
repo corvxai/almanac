@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -48,6 +49,10 @@ def _code_preview(code: str, *, preview_chars: int = 50) -> str:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Fetch one validator agent/event assignment.")
     parser.add_argument(
         "--base-url",
@@ -146,7 +151,6 @@ def main() -> int:
         return 1
 
     if response.assignment is None:
-        print(f"No assignment: {response.reason or 'none_available'}")
         return 0
 
     print(f"Got assignment: {response.assignment.agentPredictionId}")
