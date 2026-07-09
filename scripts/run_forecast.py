@@ -24,6 +24,7 @@ from src.gateway.client import build_remote_providers
 from src.gateway.constants import DEFAULT_GATEWAY_SERVICE_URL, gateway_service_url
 from src.agent.examples.simple_agent import SimpleAgent
 from src.agent.examples.openrouter_agent import OpenRouterAgent
+from src.agent.examples.openrouter_agent2 import OpenRouterAgent as OpenRouterAgent2
 from src.agent.examples.claude_agent import ClaudeAgent
 from src.storage.json_store import build_trace_store
 from src.validator.orchestrator import Orchestrator
@@ -103,14 +104,6 @@ def print_summary(digest, idx: int) -> None:
         lo, hi = pred.confidence_interval
         print(f"  │  95% CI:         [{lo:.3f}, {hi:.3f}]")
     print(f"  │  Contrarian:     {pred.contrarian_flag}")
-    if pred.key_drivers:
-        print(f"  │  Key drivers:")
-        for d in pred.key_drivers:
-            print(f"  │    • {d}")
-    if pred.key_uncertainties:
-        print(f"  │  Key uncertainties:")
-        for u in pred.key_uncertainties:
-            print(f"  │    • {u}")
     print(f"  └────────────────────────────────────────────────")
     print()
 
@@ -118,7 +111,6 @@ def print_summary(digest, idx: int) -> None:
     print(f"    Schema version:    {integrity.trace_schema_version}")
     print(f"    Trace hash:        {integrity.trace_hash[:16]}...")
     print(f"    Hash valid:        {digest.verify_integrity()}")
-    print(f"    Evidence items:    {integrity.total_evidence_items}")
     print(f"    Provider cost:     {integrity.total_provider_cost}")
 
 
@@ -130,7 +122,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--agent", "-a",
-        choices=["simple", "openrouter", "anthropic", "all"],
+        choices=["simple", "openrouter", "openrouter2", "anthropic", "all"],
         default="openrouter",
         help="Which agent to run (default: openrouter)",
     )
@@ -198,6 +190,13 @@ def main() -> None:
         print("Start the gateway first:  python scripts/run_gateway.py")
         sys.exit(1)
 
+    # DEV: unsigned local-gateway calls still need a miner-hotkey header for
+    # attribution. Inject our local alma-miner hotkey so the gateway accepts them.
+    import os as _os
+    _dev_miner_hk = _os.environ.get("DEV_MINER_HOTKEY", "5Exgnozdp8BfVXq6cuzmE2B8CXpQAqr7q7St2zE9RNcdzdyH")
+    for _p in providers:
+        _p._headers = {**getattr(_p, "_headers", {}), "x-miner-hotkey": _dev_miner_hk}
+
     print(f"  Gateway providers: {[p.provider_id for p in providers]}")
 
     local_proxy_state = None
@@ -218,6 +217,7 @@ def main() -> None:
     agent_map = {
         "simple": SimpleAgent,
         "openrouter": OpenRouterAgent,
+        "openrouter2": OpenRouterAgent2,
         "anthropic": ClaudeAgent,
     }
     if args.agent == "all":

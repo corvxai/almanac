@@ -16,10 +16,7 @@ from src.core.schemas import AgentResult, ReasoningStepType
 from src.agent.examples._v1_common import (
     BASIC_LLM,
     BASIC_SEARCH,
-    SYSTEM_PROMPT,
-    build_user_prompt,
-    chat,
-    parse_llm_output,
+    request_forecast,
     web_search,
 )
 
@@ -37,7 +34,7 @@ class V1Agent2Basic(BaseAgent):
         research = web_search(ctx, BASIC_SEARCH, query, max_tokens=700)
 
         ctx.record_reasoning_step(
-            ReasoningStepType.EVIDENCE_GATHERING,
+            ReasoningStepType.GAP_QUERY,
             reasoning_text=(
                 "Ran one broad web search via the basic search model.\n"
                 f"Findings: {research[:600] if research else '(no results)'}"
@@ -46,26 +43,21 @@ class V1Agent2Basic(BaseAgent):
             inference_model_used=BASIC_SEARCH,
         )
 
-        # --- Phase 2: basic-LLM synthesis over the returned text ---
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(
-                ctx.event_title, ctx.event_description, context=research,
-            )},
-        ]
-        content = chat(ctx, BASIC_LLM, messages, max_tokens=1024, temperature=0.2)
-        if not content:
-            return AgentResult(prediction=0.5, confidence=0.0,
-                               reasoning="LLM unavailable; defaulting to 0.5.")
-
-        prediction, confidence, reasoning = parse_llm_output(content)
+        # --- Phase 2: basic-LLM synthesis (validated JSON contract) ---
+        try:
+            fc = request_forecast(
+                ctx, BASIC_LLM, ctx.event_title, ctx.event_description, context=research,
+            )
+        except ValueError as exc:
+            return AgentResult(prediction=0.5, confidence=None,
+                               reasoning=f"INVALID: {exc}")
 
         ctx.record_reasoning_step(
-            ReasoningStepType.FINAL_ASSIGNMENT,
-            reasoning_text=reasoning,
-            intermediate_probability=prediction,
+            ReasoningStepType.BELIEF_UPDATE,
+            reasoning_text=fc.reasoning,
+            intermediate_probability=fc.prediction,
             inference_model_used=BASIC_LLM,
         )
 
-        return AgentResult(prediction=prediction, confidence=confidence,
-                           reasoning=reasoning)
+        return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
+                           reasoning=fc.reasoning)

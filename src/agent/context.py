@@ -84,10 +84,8 @@ class ForecastingContext:
         provider_call_index: Optional[int] = None,
         provider_id: Optional[str] = None,
         input_evidence_refs: list[int] | None = None,
-        agent_interpretation: Optional[str] = None,
         intermediate_probability: Optional[float] = None,
         confidence_delta: Optional[float] = None,
-        conflict_signals: Optional[list[str]] = None,
         inference_model_used: Optional[str] = None,
     ) -> None:
         """Optionally record a structured reasoning step.
@@ -103,10 +101,8 @@ class ForecastingContext:
             provider_id=provider_id,
             input_evidence_refs=input_evidence_refs or [],
             reasoning_text=reasoning_text,
-            agent_interpretation=agent_interpretation,
             intermediate_probability=intermediate_probability,
             confidence_delta=confidence_delta,
-            conflict_signals=conflict_signals,
             inference_model_used=inference_model_used,
         )
         self._reasoning_chain.append(step)
