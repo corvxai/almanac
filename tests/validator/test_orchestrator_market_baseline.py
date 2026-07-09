@@ -101,10 +101,6 @@ def test_market_baseline_not_added_to_provider_calls() -> None:
     assert len(digest.provider_calls) == 1
     assert digest.provider_calls[0].call_type == "get_market"
 
-    md = digest.prediction_output.metadata
-    assert md is not None
-    baseline = md.get("market_baseline")
-    assert isinstance(baseline, dict)
-    assert baseline["source_id"] == "485257"
-    assert baseline["yes_price"] == 0.44
-    assert baseline["no_price"] == 0.56
+    # v1: the validator baseline YES price is written to the hash-sealed
+    # execution context, not to agent-writable prediction metadata.
+    assert digest.execution_context.market_price_at_prediction == 0.44

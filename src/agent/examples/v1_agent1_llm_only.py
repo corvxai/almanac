@@ -13,13 +13,7 @@ from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
 from src.core.schemas import AgentResult, ReasoningStepType
 
-from src.agent.examples._v1_common import (
-    BASIC_LLM,
-    SYSTEM_PROMPT,
-    build_user_prompt,
-    chat,
-    parse_llm_output,
-)
+from src.agent.examples._v1_common import BASIC_LLM, request_forecast
 
 
 class V1Agent1LLMOnly(BaseAgent):
@@ -27,29 +21,23 @@ class V1Agent1LLMOnly(BaseAgent):
     agent_version = "1.0.0"
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(
-                ctx.event_title, ctx.event_description, context=None,
-            )},
-        ]
-
-        content = chat(ctx, BASIC_LLM, messages, max_tokens=1024, temperature=0.2)
-        if not content:
-            return AgentResult(prediction=0.5, confidence=0.0,
-                               reasoning="LLM unavailable; defaulting to 0.5.")
-
-        prediction, confidence, reasoning = parse_llm_output(content)
+        try:
+            fc = request_forecast(
+                ctx, BASIC_LLM, ctx.event_title, ctx.event_description, context=None,
+            )
+        except ValueError as exc:
+            return AgentResult(prediction=0.5, confidence=None,
+                               reasoning=f"INVALID: {exc}")
 
         ctx.record_reasoning_step(
-            ReasoningStepType.FINAL_ASSIGNMENT,
+            ReasoningStepType.BELIEF_UPDATE,
             reasoning_text=(
                 "No external evidence gathered. Probability assigned purely "
-                f"from the model's parametric knowledge. {reasoning}"
+                f"from the model's parametric knowledge. {fc.reasoning}"
             ),
-            intermediate_probability=prediction,
+            intermediate_probability=fc.prediction,
             inference_model_used=BASIC_LLM,
         )
 
-        return AgentResult(prediction=prediction, confidence=confidence,
-                           reasoning=reasoning)
+        return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
+                           reasoning=fc.reasoning)

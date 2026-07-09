@@ -16,10 +16,7 @@ from src.core.schemas import AgentResult, ReasoningStepType
 from src.agent.examples._v1_common import (
     AMAZING_SEARCH,
     GOOD_LLM,
-    SYSTEM_PROMPT,
-    build_user_prompt,
-    chat,
-    parse_llm_output,
+    request_forecast,
     web_search,
 )
 from src.agent.examples.v1_agent3_greatsearch_basicllm import _subqueries
@@ -36,7 +33,7 @@ class V1Agent4GreatSearchGoodLLM(BaseAgent):
             answer = web_search(ctx, AMAZING_SEARCH, q, max_tokens=600)
             findings.append(f"[{label}]\n{answer}" if answer else f"[{label}]\n(no results)")
             ctx.record_reasoning_step(
-                ReasoningStepType.EVIDENCE_GATHERING,
+                ReasoningStepType.GAP_QUERY,
                 reasoning_text=(
                     f"Targeted search ({label}) via amazing search model.\n"
                     f"{answer[:500] if answer else '(no results)'}"
@@ -47,26 +44,22 @@ class V1Agent4GreatSearchGoodLLM(BaseAgent):
 
         research = "\n\n".join(findings)
 
-        # --- Phase 2: GOOD reasoning-model synthesis ---
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(
-                ctx.event_title, ctx.event_description, context=research,
-            )},
-        ]
-        content = chat(ctx, GOOD_LLM, messages, max_tokens=6000, temperature=0.2)
-        if not content:
-            return AgentResult(prediction=0.5, confidence=0.0,
-                               reasoning="Reasoning model unavailable; defaulting to 0.5.")
-
-        prediction, confidence, reasoning = parse_llm_output(content)
+        # --- Phase 2: GOOD reasoning-model synthesis (validated JSON contract) ---
+        try:
+            fc = request_forecast(
+                ctx, GOOD_LLM, ctx.event_title, ctx.event_description,
+                context=research, max_tokens=6000,
+            )
+        except ValueError as exc:
+            return AgentResult(prediction=0.5, confidence=None,
+                               reasoning=f"INVALID: {exc}")
 
         ctx.record_reasoning_step(
-            ReasoningStepType.FINAL_ASSIGNMENT,
-            reasoning_text=reasoning,
-            intermediate_probability=prediction,
+            ReasoningStepType.BELIEF_UPDATE,
+            reasoning_text=fc.reasoning,
+            intermediate_probability=fc.prediction,
             inference_model_used=GOOD_LLM,
         )
 
-        return AgentResult(prediction=prediction, confidence=confidence,
-                           reasoning=reasoning)
+        return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
+                           reasoning=fc.reasoning)

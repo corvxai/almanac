@@ -18,9 +18,7 @@ from src.core.schemas import AgentResult, ReasoningStepType
 from src.agent.examples._v1_common import (
     BASIC_LLM,
     BASIC_SEARCH,
-    SYSTEM_PROMPT,
-    chat,
-    parse_llm_output,
+    request_json,
     web_search,
 )
 
@@ -38,32 +36,39 @@ class V1Agent6MarketReader(BaseAgent):
         )
         market = web_search(ctx, BASIC_SEARCH, query, max_tokens=600)
         ctx.record_reasoning_step(
-            ReasoningStepType.EVIDENCE_GATHERING,
+            ReasoningStepType.GAP_QUERY,
             reasoning_text=f"Market-price search via the basic online model.\n{market[:500]}",
             provider_id="openrouter",
             inference_model_used=BASIC_SEARCH,
         )
 
-        # --- Extract the implied probability as a single number ---
-        user = (
-            "From the market data below, report the market-implied probability that the event "
-            "resolves YES. Convert any percentage to a 0.0-1.0 number. Do not add your own forecast.\n\n"
-            f"Event: {ctx.event_title}\n\nMarket data:\n{market}\n\n"
-            "Reply in exactly this format:\n"
-            "PREDICTION: <number 0.0-1.0, the market-implied probability>\n"
-            "CONVICTION: <number 0.0-1.0>\n"
-            "REASONING: <one sentence stating the market number and its source>"
-        )
-        text = chat(
-            ctx, BASIC_LLM,
-            [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
-            max_tokens=300, temperature=0.1,
-        )
-        prediction, confidence, reasoning = parse_llm_output(text)
+        # --- Extract the implied probability as the Forecast JSON contract ---
+        # Custom prompt: report the MARKET number, not an independent forecast.
+        messages = [
+            {"role": "system", "content": (
+                "You report prediction-market-implied probabilities as a strict JSON "
+                "object and NOTHING else. Keys, in order: \"reasoning\" (one sentence "
+                "stating the market number and its source), \"prediction\" (0.0-1.0 "
+                "decimal, the market-implied probability — convert any percentage), "
+                "\"confidence\" (0.0-1.0, how clearly the market data stated it). Do not "
+                "add your own forecast."
+            )},
+            {"role": "user", "content": (
+                f"Event: {ctx.event_title}\n\nMarket data:\n{market}\n\n"
+                "Return the JSON object now."
+            )},
+        ]
+        try:
+            fc = request_json(ctx, BASIC_LLM, messages, max_tokens=400)
+        except ValueError as exc:
+            return AgentResult(prediction=0.5, confidence=None,
+                               reasoning=f"INVALID: {exc}")
+
         ctx.record_reasoning_step(
-            ReasoningStepType.FINAL_ASSIGNMENT,
-            reasoning_text=reasoning,
-            intermediate_probability=prediction,
+            ReasoningStepType.BELIEF_UPDATE,
+            reasoning_text=fc.reasoning,
+            intermediate_probability=fc.prediction,
             inference_model_used=BASIC_LLM,
         )
-        return AgentResult(prediction=prediction, confidence=confidence, reasoning=reasoning)
+        return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
+                           reasoning=fc.reasoning)

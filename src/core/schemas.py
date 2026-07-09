@@ -67,12 +67,14 @@ class ExtractionMethod(str, Enum):
 
 
 class ReasoningStepType(str, Enum):
-    EVIDENCE_GATHERING = "evidence_gathering"
-    SYNTHESIS = "synthesis"
-    CONFLICT_RESOLUTION = "conflict_resolution"
-    PRIOR_UPDATE = "prior_update"
-    CALIBRATION_CHECK = "calibration_check"
-    FINAL_ASSIGNMENT = "final_assignment"
+    # v1.0.0 belief-path vocab (replaces the v0.1 six-value set).
+    PRIOR = "prior"                  # initial belief, no evidence yet
+    BELIEF_UPDATE = "belief_update"  # each later revision; the terminal step is the last one
+    GAP_QUERY = "gap_query"          # asks for a missing piece; sets no new belief
+
+
+# Single source of truth for the trace schema version (used by the assembler too).
+TRACE_SCHEMA_VERSION = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +121,27 @@ class ExtractedEvidence(BaseModel):
     content: str
     extraction_method: ExtractionMethod
     numeric_value: Optional[float] = None
+    # v1 additive fields: bind a claim to a witnessed web source so the fact-gate
+    # can check it. Null on non-web evidence such as an LLM self-report.
+    source_url: Optional[str] = None
+    source_title: Optional[str] = None
+    excerpt: Optional[str] = None
+    witness_call_index: Optional[int] = None
+    admissible: Optional[bool] = None
+    counts_toward_grounding: Optional[bool] = None
+
+
+class Source(BaseModel):
+    """A single web source a search call returned — the fact-gate substrate.
+
+    ``url`` is required; ``counts_toward_grounding`` is the gateway's verdict on
+    whether this source is admissible evidence for scoring's invalid-rate gate.
+    """
+
+    url: str
+    title: Optional[str] = None
+    excerpt: Optional[str] = None
+    counts_toward_grounding: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +158,8 @@ class ExecutionContext(BaseModel):
     timestamp_end: datetime
     execution_duration_ms: int
     sandbox_environment: SandboxEnvironment
+    # v1 phase-2 hook: validator-written market baseline at prediction time.
+    market_price_at_prediction: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class EventSnapshot(BaseModel):
@@ -159,6 +184,9 @@ class ProviderCall(BaseModel):
     usage_meta: Optional[UsageMeta] = None
     provider_usage_raw: Optional[dict[str, Any]] = None
     extracted_evidence: list[ExtractedEvidence]
+    # v1: every link the search returned (audit trail), distinct from the cited
+    # source_url on each evidence item. Typed Source (url required).
+    sources_accessed: list[Source] = Field(default_factory=list)
     raw_response_hash: str
     latency_ms: int = Field(ge=0)
     cost_units: float = Field(ge=0)
@@ -174,14 +202,14 @@ class ReasoningStep(BaseModel):
 
     step_index: int = Field(ge=0)
     step_type: ReasoningStepType
+    # Phase-2 hooks: kept nullable, no verification wired yet. The assembler emits
+    # [] for input_evidence_refs (not a positional fake) until the real join exists.
     provider_call_index: Optional[int] = Field(default=None, ge=0)
     provider_id: Optional[str] = None
     input_evidence_refs: list[int] = Field(default_factory=list)
     reasoning_text: str
-    agent_interpretation: Optional[str] = None
     intermediate_probability: Optional[float] = Field(default=None, ge=0, le=1)
     confidence_delta: Optional[float] = None
-    conflict_signals: Optional[list[str]] = None
     inference_model_used: Optional[str] = None
 
 
@@ -192,11 +220,9 @@ class PredictionOutput(BaseModel):
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
     confidence_interval: Optional[tuple[float, float]] = None
     reasoning_summary: str = ""
-    key_drivers: list[str] = Field(default_factory=list)
-    key_uncertainties: list[str] = Field(default_factory=list)
+    # Collected-not-scored (no live pillar reads these); kept nullable.
     contrarian_flag: bool = False
     ensemble_at_prediction: Optional[float] = Field(default=None, ge=0, le=1)
-    metadata: Optional[dict[str, Any]] = None
 
     @field_validator("confidence_interval")
     @classmethod
@@ -242,12 +268,8 @@ class TraceIntegrity(BaseModel):
     """Cryptographic integrity envelope — produced by the validator."""
 
     trace_hash: str
-    merkle_root: Optional[str] = None
-    anchor_tx: Optional[str] = None
-    anchor_timestamp: Optional[datetime] = None
-    trace_schema_version: str = "0.1.0"
+    trace_schema_version: str = TRACE_SCHEMA_VERSION
     total_provider_cost: float = Field(ge=0)
-    total_evidence_items: int = Field(ge=0)
     usage_totals: Optional[UsageTotals] = None
 
 
@@ -265,6 +287,9 @@ class EvidenceDigest(BaseModel):
     prediction_output: PredictionOutput
     resolution_record: ResolutionRecord = Field(default_factory=ResolutionRecord)
     trace_integrity: TraceIntegrity
+    # Disabled phase-2 seam: reserves space for the DAG / belief-path / ablation
+    # verification machinery so turning it on later is a reprocess, not a schema break.
+    future_graph: Optional[dict[str, Any]] = None
 
     def compute_trace_hash(self) -> str:
         """SHA-256 of the digest with trace_hash zeroed out to avoid circularity."""
