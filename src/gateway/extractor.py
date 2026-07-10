@@ -501,7 +501,60 @@ def _extract_openrouter(call_type: str, raw: dict[str, Any]) -> list[ExtractedEv
             extraction_method=ExtractionMethod.NLP_EXTRACTION,
         ))
 
+    # Web-grounded calls (:online suffix or a sonar model) return their cited
+    # sources as url_citation annotations on the chat message. The old code never
+    # read them, so every link was dropped. Capture them as grounded evidence.
+    for cite in _openrouter_url_citations(raw):
+        excerpt = cite.get("excerpt") or None
+        content = excerpt or (f"Web source cited: {cite['title']}" if cite.get("title") else f"Web source cited: {cite['url']}")
+        items.append(ExtractedEvidence(
+            evidence_type=EvidenceType.FACT,
+            content=content,
+            extraction_method=ExtractionMethod.NLP_EXTRACTION,
+            source_url=cite["url"],
+            source_title=cite.get("title") or None,
+            excerpt=excerpt,
+            counts_toward_grounding=True,
+        ))
+
     return items
+
+
+def _openrouter_url_citations(raw: dict[str, Any]) -> list[dict[str, str]]:
+    """Pull url_citation annotations from an OpenRouter chat-completion response.
+
+    :online and sonar models put cited sources at
+    choices[0].message.annotations[].url_citation.{url,title}.
+    """
+    out: list[dict[str, str]] = []
+    choices = raw.get("choices")
+    msg = choices[0].get("message", {}) if isinstance(choices, list) and choices else {}
+    for ann in (msg.get("annotations") or []):
+        if ann.get("type") == "url_citation":
+            uc = ann.get("url_citation", {}) or {}
+            url = uc.get("url", "")
+            if url:
+                out.append({"url": url, "title": uc.get("title", ""), "excerpt": uc.get("content", "") or ""})
+    # sonar may also surface a top-level search_results / citations list.
+    for sr in (raw.get("search_results") or []):
+        if sr.get("url"):
+            out.append({"url": sr["url"], "title": sr.get("title", "")})
+    for url in (raw.get("citations") or []):
+        if isinstance(url, str):
+            out.append({"url": url, "title": ""})
+    # de-dup by url, preserve order
+    seen=set(); deduped=[]
+    for c in out:
+        if c["url"] not in seen:
+            seen.add(c["url"]); deduped.append(c)
+    return deduped
+
+
+def extract_sources(provider_id: str, raw: dict[str, Any]) -> list[dict[str, str]]:
+    """Call-level sources_accessed: every link the search returned."""
+    if provider_id == "openrouter":
+        return _openrouter_url_citations(raw)
+    return []
 
 
 # ---------------------------------------------------------------------------
