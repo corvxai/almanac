@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sportstensor.com/schemas/trace/v1.0.0",
+  "title": "SN41 Reasoning-Trace Schema v1.0.0",
+  "description": "Validator-assembled reasoning trace for one agent run. Miner submits agent code; validator runs it in an isolated Docker sandbox behind a gateway, witnesses every provider call, and assembles this record. In v1 the trace is a DATA ASSET + a boolean well-formedness surface. The scorer (PR#15) is TRACE-BLIND: it reads a flat central DTO, never this body. The trace's only live influence on score is via the orchestrator-set boolean predictionIsInvalid, which the fact-gate computes from provider_calls[].sources_accessed[]. All verification machinery (declared-then-verified join, belief-path scoring, ablation, on-chain anchoring, trust tiers) is PHASE-2: reserved as nullable hooks here, built nowhere yet. See design/trace-schema.md and design/implementation-plan.md.",
+  "type": "object",
+  "$comment": "SETTLED: (1) No prompt injection; structured steps come from the agent's own Pydantic-validated output witnessed inside provider-call responses. (2) CoT captured-when-available into provider_calls[].reasoning_capture; stored/diagnostic, never scored. (3) A call's kind (search vs reasoning) is the model's gate tag in $defs.modelCatalog, not stored per call. (4) market_price_at_prediction is validator-written at run level; canonical copy held centrally in the DTO. TRIMMED vs the earlier draft: the declared-then-verified join fields (reasoningStep.provider_call_index, input_evidence_refs) are DEMOTED out of required to nullable phase-2 hooks because no verification exists in code and the assembler fills them positionally (input_evidence_refs[0]==provider_call_index) -- emit null/[] not the positional fake. raw_response_hash and market_price_at_prediction are nullable reserved slots. key_drivers/key_uncertainties/total_evidence_items/inference_model_used/metadata/merkle_root/anchor_* are DROPPED. A disabled future_graph seam parks the deferred DAG/belief/ablation/trust-tier work.",
+  "required": [
+    "execution_context",
+    "event_snapshot",
+    "provider_calls",
+    "reasoning_chain",
+    "prediction_output",
+    "trace_integrity"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "execution_context": {
+      "type": "object",
+      "description": "Run-level envelope: which agent, which event, when it ran, how long it took, and the validator-written market price it is scored against.",
+      "required": ["execution_id", "agent_id", "event_id", "timestamp_start", "timestamp_end", "execution_duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "execution_id": {"type": "string", "format": "uuid"},
+        "agent_id": {"type": "string", "format": "uuid"},
+        "event_id": {"type": "string", "format": "uuid"},
+        "timestamp_start": {"type": "string", "format": "date-time"},
+        "timestamp_end": {"type": "string", "format": "date-time"},
+        "execution_duration_ms": {"type": "integer", "minimum": 0},
+        "market_price_at_prediction": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "VALIDATOR-WRITTEN, PHASE-2 HOOK. The number the forecast is scored against; canonical copy lives centrally in the DTO (outcomePricesAtPrediction). Reserved in the hashed trace so the trace is self-contained for audit with no re-hash migration when the validator starts stamping it. Null until stamped -- null in every fresh trace today."
+        }
+      }
+    },
+    "event_snapshot": {
+      "type": "object",
+      "description": "The fixed target. Identical across every agent scored on the event.",
+      "required": ["event_title", "event_category", "resolution_criteria", "resolution_deadline"],
+      "additionalProperties": false,
+      "properties": {
+        "event_title": {"type": "string"},
+        "event_category": {"type": "string", "description": "e.g. geopolitical, sports, economic."},
+        "event_subcategory": {"type": ["string", "null"]},
+        "resolution_criteria": {"type": "string", "description": "The exact rule that settles the event, including the source market reference."},
+        "resolution_deadline": {"type": "string", "format": "date-time"}
+      }
+    },
+    "provider_calls": {
+      "type": "array",
+      "description": "List one: every model call the agent made, in run order, each witnessed at the gateway. A search call carries its returned links in sources_accessed; a reasoning call leaves it []. The call kind is the model's gate tag ($defs.modelCatalog), not a stored field.",
+      "items": {"$ref": "#/$defs/providerCall"}
+    },
+    "reasoning_chain": {
+      "type": "array",
+      "description": "List two: the agent's declared belief steps in run order. intermediate_probability read down the chain is the belief path (captured now, scored phase-2). Each step MAY point back at the provider call and sources it used, but those links are PHASE-2 (declared-then-verified join not yet built); emit null/[] rather than a positional guess.",
+      "items": {"$ref": "#/$defs/reasoningStep"}
+    },
+    "prediction_output": {
+      "type": "object",
+      "description": "The final number and its rationale. Only final_probability reaches the (central, trace-blind) scorer, via DTO.outcomeProbabilities. confidence and calibration fields are collected, not scored in v1.",
+      "required": ["final_probability", "reasoning_summary"],
+      "additionalProperties": false,
+      "properties": {
+        "final_probability": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "The forecast. Extracted ONCE at submit into DTO.outcomeProbabilities; scorer reads the DTO, not this trace."},
+        "reasoning_summary": {"type": "string", "description": "Plain-language explanation. Any probability mentioned here is the model's own read, not the validator market price."},
+        "confidence": {"type": ["number", "null"], "minimum": 0.0, "maximum": 1.0, "description": "Collected, not scored in v1. Declared-vs-realized calibration is a phase-2 training signal."},
+        "confidence_interval": {
+          "type": ["array", "null"],
+          "description": "Collected, not scored in v1. [low, high].",
+          "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "ensemble_at_prediction": {"type": ["number", "null"], "description": "PHASE-2 / collected-not-scored. Fed a pillar PR#15 removed; no live consumer."},
+        "contrarian_flag": {"type": ["boolean", "null"], "description": "PHASE-2 / collected-not-scored. Derivable from market_price_at_prediction; no live consumer."}
+      },
+      "$comment": "DROPPED from v1: key_drivers[], key_uncertainties[], metadata. key_drivers/key_uncertainties were auto-templated from the output rather than synthesized; reintroduce only when genuinely summarized from reasoning_chain."
+    },
+    "trace_integrity": {
+      "type": "object",
+      "description": "Locks the record and totals the run. Storage integrity, NOT consensus integrity -- the consensus-critical numbers live centrally in the DTO.",
+      "required": ["trace_schema_version", "trace_hash", "total_provider_cost", "usage_totals"],
+      "additionalProperties": false,
+      "properties": {
+        "trace_schema_version": {"const": "1.0.0", "description": "Bumped from 0.1.0. MUST be set in BOTH trace_assembler.py (hardcoded) and schemas.py (default) or the bump is a no-op. v1 is not backward-compatible with 0.1.0."},
+        "trace_hash": {"type": "string", "description": "Hash over the trace at post time. Bytes change once dropped fields are removed, so 0.1.0 hashes will not match v1 (clean break, acceptable)."},
+        "total_provider_cost": {"type": "number", "minimum": 0.0, "description": "Sum of provider_calls[].cost_units."},
+        "usage_totals": {
+          "type": "object",
+          "required": ["total_tokens"],
+          "additionalProperties": false,
+          "properties": {
+            "total_tokens": {"type": "integer", "minimum": 0},
+            "prompt_tokens": {"type": "integer", "minimum": 0},
+            "completion_tokens": {"type": "integer", "minimum": 0},
+            "reasoning_tokens": {"type": "integer", "minimum": 0, "description": "CoT tokens when captured. Diagnostic; not scored."}
+          }
+        }
+      },
+      "$comment": "DROPPED from v1: total_evidence_items (= len(sources_accessed), derivable, source of the 39-vs-30 double-recording nit), merkle_root, anchor_tx, anchor_timestamp (on-chain anchoring is unbuilt phase-2+, not in the v1 contract)."
+    },
+    "resolution_record": {
+      "type": ["object", "null"],
+      "description": "Validator-filled AFTER the event settles; null in a fresh trace. Scores (brier/pnl) are NOT invented here -- they are computed centrally over the DTO. Opaque by design.",
+      "additionalProperties": true
+    },
+    "future_graph": {
+      "type": ["object", "null"],
+      "description": "PHASE-2 SEAM, DISABLED. Reserved home for the deferred verification machinery: typed-node DAG (edges supports/refutes/derives/updates), scored belief_path (martingale_residual, updated_before_consensus, scored_correctness), ablation (loo), and per-source trust tiers (gateway_verified vs miner_declared). Building v0.3 is a reprocess of the existing flat arrays, NOT a schema break. Null / enabled:false in every v1 trace; the assembler does not populate it.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"const": false, "description": "Always false in v1. Flip only when the phase-2 verification code lands."}
+      }
+    }
+  },
+  "$defs": {
+    "providerCall": {
+      "type": "object",
+      "required": ["call_index", "provider_id", "call_type", "model", "sources_accessed", "cost_units"],
+      "additionalProperties": false,
+      "properties": {
+        "call_index": {"type": "integer", "minimum": 0, "description": "Position in the list."},
+        "provider_id": {"const": "openrouter", "description": "Constant in v1."},
+        "call_type": {"const": "chat_completion", "description": "Constant in v1. Search vs reasoning follows from the model's gate tag, not this field."},
+        "model": {
+          "$ref": "#/$defs/gatedModel",
+          "description": "The exact model behind the call. Its gate tag makes the call search or reasoning. NOTE: this enum is the FREEZE TARGET; do not enforce it in the extractor until the catalog is signed off (live agents run deepseek-r1 / claude-haiku-4-5 / gpt-4o-mini:online, all off-list). Emit the real model string; enforce the enum at the validator gate later."
+        },
+        "sources_accessed": {
+          "type": "array",
+          "description": "THE single home for web sources in the whole trace, and the ONLY substrate the fact-gate needs to set predictionIsInvalid. Populated on web_search-tagged calls; [] on inference-tagged calls. The extractor now routes OpenRouter citations/search results into this list (other providers still to cover).",
+          "items": {"$ref": "#/$defs/source"}
+        },
+        "raw_response_hash": {"type": ["string", "null"], "description": "PHASE-2 HOOK. Per-response anti-tamper anchor for a per-call challenge surface that is not built; trace_hash otherwise covers it. Null today."},
+        "latency_ms": {"type": ["integer", "null"], "minimum": 0},
+        "cost_units": {"type": "number", "minimum": 0.0, "description": "Dollar cost; feeds total_provider_cost."},
+        "reasoning_capture": {"$ref": "#/$defs/reasoningCapture"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "description": "One web page a search returned, mapped from OpenRouter's url_citation.",
+      "required": ["url", "counts_toward_grounding"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {"type": "string", "format": "uri", "description": "The real page the model cited, witnessed at the gateway."},
+        "title": {"type": ["string", "null"]},
+        "excerpt": {"type": ["string", "null"], "description": "Page snippet. Fills under the :online route; empty under sonar (url+title only). When present, what the gateway verifies against the reasoning prompt."},
+        "counts_toward_grounding": {
+          "type": "boolean",
+          "description": "The ONE grounding signal. TRUE = a URL from a witnessed search whose content appears in a witnessed reasoning prompt. Gateway-computed, NOT 'the agent said so'. This boolean (not a per-source trust tier) is the right amount of grounding for a boolean gate."
+        }
+      }
+    },
+    "reasoningStep": {
+      "type": "object",
+      "required": ["step_index", "step_type"],
+      "additionalProperties": false,
+      "properties": {
+        "step_index": {"type": "integer", "minimum": 0},
+        "step_type": {
+          "enum": ["prior", "belief_update", "gap_query"],
+          "description": "prior = initial belief, no evidence yet. belief_update = each later revision (terminal step is the last belief_update). gap_query = asks for a missing piece, sets no new belief. NOTE: schemas.py and the agent context are migrated to these three; make sure BOTH trace-producing code paths emit the new vocab.",
+          "$comment": "step_type stays REQUIRED (cheap, always known). provider_call_index and input_evidence_refs are DEMOTED to optional phase-2 hooks below."
+        },
+        "reasoning_text": {"type": ["string", "null"], "description": "The written reasoning at this step. Self-declared training narrative (not witnessed)."},
+        "intermediate_probability": {
+          "type": ["number", "null"],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Belief after this step; null on gap_query and pure-search steps. Read down the chain it is the belief path -- the most-prized signal. Captured now (un-backfillable), scored PHASE-2. Comes from the model's parseable PROB:/PREDICTION: token in the witnessed response."
+        },
+        "provider_call_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "PHASE-2 HOOK (declared-then-verified join). The provider_calls index that fed this step, to be VERIFIED against the witnessed join (correlation key first, byte-match on the response hash as fallback). No verification code exists yet and the assembler fills it positionally -- emit null rather than an unverified guess. Optional in v1; do not treat a value as trusted."
+        },
+        "input_evidence_refs": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0},
+          "description": "PHASE-2 HOOK. Indices into the linked call's sources_accessed this step used, to be declared-then-verified. TODAY the assembler sets this to [call_index] so input_evidence_refs[0]==provider_call_index by construction -- a fabricated evidence-link that poisons the corpus. Emit [] until the real join is built. Optional in v1."
+        }
+      }
+    },
+    "reasoningCapture": {
+      "type": ["object", "null"],
+      "description": "OPTIONAL, captured-when-available. The provider's raw CoT/reasoning tokens, present only for models exposing them (include_reasoning, e.g. deepseek-r1). STORED AND DIAGNOSTIC ONLY, never scored. Absent when the model returns no reasoning.",
+      "additionalProperties": false,
+      "properties": {
+        "available": {"type": "boolean"},
+        "source": {"const": "openrouter_reasoning"},
+        "text": {"type": ["string", "null"], "description": "Raw reasoning blob. Unstructured; not parsed into belief steps in v1."},
+        "reasoning_tokens": {"type": ["integer", "null"], "minimum": 0, "description": "Cost signal only."}
+      }
+    },
+    "gatedModel": {
+      "enum": ["perplexity/sonar-pro", "openai/gpt-4o-mini", "anthropic/claude-sonnet-4-6"],
+      "description": "FREEZE TARGET for v1, NOT yet enforced in the emit (needs sign-off). An uncatalogued model is rejected at the gate ONCE frozen. Each maps to a gate tag in modelCatalog."
+    },
+    "modelCatalog": {
+      "$comment": "Validator-side catalog, NOT stored per call. Defines whether each gated model is web_search or inference. For grounding-scored search v1 uses the :online route (per-source snippet so excerpt fills and grounding is verifiable).",
+      "type": "object",
+      "properties": {
+        "perplexity/sonar-pro": {"const": "web_search"},
+        "openai/gpt-4o-mini": {"const": "inference"},
+        "anthropic/claude-sonnet-4-6": {"const": "inference"}
+      }
+    }
+  }
+}
