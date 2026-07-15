@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://sportstensor.com/schemas/trace/v1.0.0",
-  "title": "SN41 Reasoning-Trace Schema v1.0.0",
+  "$id": "https://almnc.ai/schemas/trace/v1.1.0",
+  "title": "Almanac SN41 Reasoning-Trace Schema v1.1.0",
   "description": "Validator-assembled reasoning trace for one agent run. Miner submits agent code; validator runs it in an isolated Docker sandbox behind a gateway, witnesses every provider call, and assembles this record. In v1 the trace is a DATA ASSET + a boolean well-formedness surface. The scorer (PR#15) is TRACE-BLIND: it reads a flat central DTO, never this body. The trace's only live influence on score is via the orchestrator-set boolean predictionIsInvalid, which the fact-gate computes from provider_calls[].sources_accessed[]. All verification machinery (declared-then-verified join, belief-path scoring, ablation, on-chain anchoring, trust tiers) is PHASE-2: reserved as nullable hooks here, built nowhere yet. See design/trace-schema.md and design/implementation-plan.md.",
   "type": "object",
   "$comment": "SETTLED: (1) No prompt injection; structured steps come from the agent's own Pydantic-validated output witnessed inside provider-call responses. (2) CoT captured-when-available into provider_calls[].reasoning_capture; stored/diagnostic, never scored. (3) A call's kind (search vs reasoning) is the model's gate tag in $defs.modelCatalog, not stored per call. (4) market_price_at_prediction is validator-written at run level; canonical copy held centrally in the DTO. TRIMMED vs the earlier draft: the declared-then-verified join fields (reasoningStep.provider_call_index, input_evidence_refs) are DEMOTED out of required to nullable phase-2 hooks because no verification exists in code and the assembler fills them positionally (input_evidence_refs[0]==provider_call_index) -- emit null/[] not the positional fake. raw_response_hash and market_price_at_prediction are nullable reserved slots. key_drivers/key_uncertainties/total_evidence_items/inference_model_used/metadata/merkle_root/anchor_* are DROPPED. The future_graph seam parks the deferred DAG/ablation/trust-tier work with its graph-scoring pathway disabled; the assembler does populate future_graph.beliefPath now with the raw miner-declared belief path (stored, unscored) as the phase-2 grounding hook.",
@@ -85,7 +85,7 @@
       "required": ["trace_schema_version", "trace_hash", "total_provider_cost", "usage_totals"],
       "additionalProperties": false,
       "properties": {
-        "trace_schema_version": {"const": "1.0.0", "description": "Bumped from 0.1.0. MUST be set in BOTH trace_assembler.py (hardcoded) and schemas.py (default) or the bump is a no-op. v1 is not backward-compatible with 0.1.0."},
+        "trace_schema_version": {"const": "1.1.0", "description": "Bumped from 0.1.0. MUST be set in BOTH trace_assembler.py (hardcoded) and schemas.py (default) or the bump is a no-op. v1 is not backward-compatible with 0.1.0."},
         "trace_hash": {"type": "string", "description": "Hash over the trace at post time. Bytes change once dropped fields are removed, so 0.1.0 hashes will not match v1 (clean break, acceptable)."},
         "total_provider_cost": {"type": "number", "minimum": 0.0, "description": "Sum of provider_calls[].cost_units."},
         "usage_totals": {

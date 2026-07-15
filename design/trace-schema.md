@@ -17,7 +17,7 @@ The trace is a versioned JSON record, defined in `core/schemas.py`. The v1 shape
 
 ```json
 {
-  "trace_schema_version": "1.0.0",
+  "trace_schema_version": "1.1.0",
   "execution_context": {
     "run_id": "…",
     "market_price_at_prediction": 0.485

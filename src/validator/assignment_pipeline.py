@@ -8,7 +8,7 @@ import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from src.agent.base import BaseAgent
@@ -70,6 +70,35 @@ def _build_reasoning_steps(raw_reasoning_chain: list[dict[str, object]]) -> list
 
 def _build_provider_calls(raw_provider_calls: list[dict[str, object]]) -> list[dict[str, object]]:
     return [_camelize(call) for call in raw_provider_calls]
+
+
+_REASONING_SUMMARY_REF = (
+    "#/reasoningTrace/trace/evidenceDigest/predictionOutput/reasoningSummary"
+)
+
+
+def _compact_evidence_digest(
+    digest_dump: dict[str, object],
+    reasoning_summary: object,
+) -> dict[str, object]:
+    compact = {
+        key: value
+        for key, value in digest_dump.items()
+        if key not in {"provider_calls", "reasoning_chain"}
+    }
+    future_graph = compact.get("future_graph")
+    if isinstance(reasoning_summary, str) and isinstance(future_graph, dict):
+        belief_path = future_graph.get("beliefPath")
+        if isinstance(belief_path, list):
+            for belief_step in belief_path:
+                if (
+                    isinstance(belief_step, dict)
+                    and belief_step.get("type") == "final"
+                    and belief_step.get("text") == reasoning_summary
+                ):
+                    belief_step.pop("text")
+                    belief_step["text_ref"] = _REASONING_SUMMARY_REF
+    return cast(dict[str, object], _camelize(compact))
 
 
 class _InlineCodeSandboxAgent(BaseAgent):
@@ -252,7 +281,20 @@ def build_prediction_submit_payload(
     execution_context = digest_dump.get("execution_context", {})
     trace_integrity = digest_dump.get("trace_integrity", {})
     prediction_output = digest_dump.get("prediction_output", {})
-    evidence_digest = _camelize(digest_dump)
+    reasoning_summary = (
+        prediction_output.get("reasoning_summary")
+        if isinstance(prediction_output, dict)
+        else None
+    )
+    for step in reversed(steps):
+        if (
+            isinstance(reasoning_summary, str)
+            and step.get("reasoningText") == reasoning_summary
+        ):
+            step.pop("reasoningText")
+            step["reasoningTextRef"] = _REASONING_SUMMARY_REF
+            break
+    evidence_digest = _compact_evidence_digest(digest_dump, reasoning_summary)
 
     yes_id, no_id = resolve_binary_outcome_ids(assignment)
     (
@@ -313,7 +355,6 @@ def build_prediction_submit_payload(
                 "reasoningStepCount": len(steps),
                 "totalProviderCost": trace_integrity.get("total_provider_cost"),
                 "usageTotals": _camelize(trace_integrity.get("usage_totals")),
-                "reasoningSummary": prediction_output.get("reasoning_summary"),
                 "contrarianFlag": prediction_output.get("contrarian_flag"),
             },
             "modelMetadata": {

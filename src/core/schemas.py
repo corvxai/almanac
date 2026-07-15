@@ -67,14 +67,14 @@ class ExtractionMethod(str, Enum):
 
 
 class ReasoningStepType(str, Enum):
-    # v1.0.0 belief-path vocab (replaces the v0.1 six-value set).
+    # v1.1.0 belief-path vocab (replaces the v0.1 six-value set).
     PRIOR = "prior"                  # initial belief, no evidence yet
     BELIEF_UPDATE = "belief_update"  # each later revision; the terminal step is the last one
     GAP_QUERY = "gap_query"          # asks for a missing piece; sets no new belief
 
 
 # Single source of truth for the trace schema version (used by the assembler too).
-TRACE_SCHEMA_VERSION = "1.0.0"
+TRACE_SCHEMA_VERSION = "1.1.0"
 
 
 # ---------------------------------------------------------------------------

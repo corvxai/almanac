@@ -1,7 +1,7 @@
-"""v1 PR14 contract tests: the Forecast JSON output + the v1.0.0 trace shape.
+"""v1 PR14 contract tests: the Forecast JSON output + the v1.1.0 trace shape.
 
 Deterministic (no network): exercises the shared parser and the assembler so a
-good run yields a valid v1.0.0 digest and a bad model output is an in-band
+good run yields a valid v1.1.0 digest and a bad model output is an in-band
 invalid, not a silent 0.5.
 """
 
@@ -19,6 +19,7 @@ from src.core.schemas import (
     AgentResult,
     BeliefStep,
     EventCategory,
+    ExtractedEvidence,
     ExecutionContext,
     ProviderCall,
     ProviderTier,
@@ -69,7 +70,7 @@ def test_coerce_unit_percent_and_reject():
         _coerce_unit("not a number")
 
 
-# --- the v1.0.0 trace shape --------------------------------------------------
+# --- the v1.1.0 trace shape --------------------------------------------------
 
 def _event() -> Event:
     return Event(
@@ -111,7 +112,7 @@ def test_assemble_trace_is_valid_v1():
                                  beliefPath=belief_path_single_final(0.62, "because")),
     )
     # version bumped, sealed hash valid
-    assert digest.trace_integrity.trace_schema_version == TRACE_SCHEMA_VERSION == "1.0.0"
+    assert digest.trace_integrity.trace_schema_version == TRACE_SCHEMA_VERSION == "1.1.0"
     assert digest.verify_integrity()
     # confidence carried; step types are the new vocab; sources are typed with a url
     assert digest.prediction_output.confidence == 0.7
@@ -126,6 +127,40 @@ def test_assemble_trace_is_valid_v1():
     assert "metadata" not in dump["prediction_output"]
     for gone in ("merkle_root", "anchor_tx", "anchor_timestamp", "total_evidence_items"):
         assert gone not in dump["trace_integrity"]
+
+
+def test_gap_query_references_provider_call_without_copying_evidence():
+    evidence_body = "full provider response that must have one canonical home"
+    provider_call = _provider_call().model_copy(
+        update={
+            "extracted_evidence": [
+                ExtractedEvidence(
+                    evidence_type="quote_summary",
+                    content=evidence_body,
+                    extraction_method="nlp_extraction",
+                )
+            ]
+        }
+    )
+    digest = assemble_trace(
+        execution_context=_exec_ctx(),
+        event=_event(),
+        provider_calls=[provider_call],
+        agent_result=AgentResult(
+            prediction=0.62,
+            confidence=0.7,
+            reasoning="because",
+            beliefPath=belief_path_single_final(0.62, "because"),
+        ),
+    )
+
+    gap_step = digest.reasoning_chain[0]
+    assert gap_step.reasoning_text == (
+        "[openrouter] chat_completion; evidence in providerCalls[0]"
+    )
+    assert evidence_body == digest.provider_calls[0].extracted_evidence[0].content
+    assert evidence_body not in gap_step.reasoning_text
+    assert digest.reasoning_chain[-1].reasoning_text == "because"
 
 
 def test_missing_confidence_is_valid_neutral():
