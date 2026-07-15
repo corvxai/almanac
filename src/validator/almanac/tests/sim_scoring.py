@@ -1,8 +1,8 @@
 """
-Simulation script to test scoring.py with mock trading data.
+Simulation script to test scoring.py with trading history data.
 
 This script:
-1. Loads mock_trading_data.json
+1. Loads data/trading_history.json
 2. Extracts unique miner_ids and hotkeys
 3. Calls score_miners() to compute scores
 4. Prints results and diagnostics
@@ -19,20 +19,17 @@ import numpy as np
 from tabulate import tabulate
 import argparse
 
-# Add parent directory to path so we can import scoring
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add repo root so `src.validator.almanac.*` imports work when run as a script.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import bittensor as bt
 
-from ..scoring import score_miners, calculate_weights, print_pool_stats
-from ..constants import MINER_WEIGHT_PERCENTAGE, GENERAL_POOL_WEIGHT_PERCENTAGE, ROLLING_HISTORY_IN_DAYS, KAPPA_NEXT, TOTAL_MINER_ALPHA_PER_DAY, EXCESS_MINER_WEIGHT_UID, BURN_UID
+from src.validator.almanac.scoring import score_miners, calculate_weights, print_pool_stats, print_dust_gate_diagnostics, compute_joint_kappa_from_history
+from src.validator.almanac.constants import MINER_WEIGHT_PERCENTAGE, GENERAL_POOL_WEIGHT_PERCENTAGE, ROLLING_HISTORY_IN_DAYS, KAPPA_NEXT, TOTAL_MINER_ALPHA_PER_DAY, EXCESS_MINER_WEIGHT_UID, BURN_UID, DUST_GATE
 
-
-def load_mock_data(filepath="tests/mock_trading_data.json"):
-    """Load the mock trading data from JSON file."""
-    with open(filepath, 'r') as f:
-        data = json.load(f)
-    return data
+_TRADING_HISTORY_PATH = _REPO_ROOT / "data" / "trading_history.json"
 
 
 def extract_miner_info(trading_history):
@@ -344,8 +341,6 @@ def calculate_historical_kappa(miner_history, general_pool_history, epoch_idx, p
     Args:
         pool_type: "miner" or "general" to specify which pool's kappa to calculate
     """
-    from scoring import compute_joint_kappa_from_history
-    
     # Create a subset of the history up to and including the target epoch
     if pool_type == "miner":
         subset_history = {
@@ -414,6 +409,29 @@ def print_results(miner_history, general_pool_history, miners_scores, general_po
     if miners_scores['sol2']:
         print(f"Phase 2 Status:           {miners_scores['sol2']['status']}")
         print(f"Phase 2 Payout:           ${miners_scores['sol2']['payout']:,.2f}")
+
+    print("\n--- DUST GATE DIAGNOSTICS ---")
+    print(f"Dust gate constant: {DUST_GATE}")
+    print_dust_gate_diagnostics(
+        miners_scores.get('sol1'),
+        miners_scores.get('sol2'),
+        dust_gate=DUST_GATE,
+        verbose=True,
+    )
+    if miners_scores.get('sol1') and miners_scores.get('sol2') and miners_scores['sol1'].get('x_star') is not None and miners_scores['sol2'].get('x_star') is not None:
+        x1 = miners_scores['sol1']['x_star']
+        x2 = miners_scores['sol2']['x_star']
+        tokens = miners_scores['tokens']
+        entity_ids = miners_scores['entity_ids']
+        at_dust = x2 >= DUST_GATE - 1e-9
+        with_tokens = tokens >= 0.01
+        print(f"Miners at dust gate after Phase 2: {int(np.sum(at_dust))}")
+        print(f"Miners with tokens >= $0.01: {int(np.sum(with_tokens))}")
+        lost = (x1 >= DUST_GATE - 1e-9) & (x2 < DUST_GATE - 1e-9)
+        if np.any(lost):
+            print("Miners who lost dust gate in Phase 2:")
+            for idx in np.where(lost)[0]:
+                print(f"  PID {entity_ids[idx]}: x1={x1[idx]:.4f} -> x2={x2[idx]:.6f}")
     
     # Top miners
     if len(miners_scores['scores']) > 0:
@@ -501,15 +519,11 @@ def main():
     bt.logging(config=config, logging_dir=config.full_path)
     """
 
-    print("Loading mock trading data...")
-    
-    # Load the mock data
-    # If the trading_history.json file exists, load it from there
-    if os.path.exists('trading_history.json'):
-        with open('trading_history.json', 'r') as f:
-            trading_history = json.load(f)
-    else:
-        trading_history = load_mock_data('tests/advanced_mock_data.json')
+    print(f"Loading trading history from {_TRADING_HISTORY_PATH}...")
+    if not _TRADING_HISTORY_PATH.exists():
+        raise FileNotFoundError(f"Trading history not found: {_TRADING_HISTORY_PATH}")
+    with open(_TRADING_HISTORY_PATH, 'r') as f:
+        trading_history = json.load(f)
         
     print(f"Loaded {len(trading_history)} trades")
     
@@ -614,3 +628,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+    print("Simulation complete. Exiting...")
+    # os._exit bypasses normal shutdown (needed: bittensor leaves threads that
+    # would otherwise hang), but it also skips flushing stdout. When output is
+    # redirected to a file, the buffer is block-sized and the tail is lost.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

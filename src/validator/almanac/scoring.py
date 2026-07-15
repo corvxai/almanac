@@ -60,11 +60,23 @@ from .constants import (
   RHO_CAP,
   KAPPA_NEXT,
   KAPPA_SCALING_FACTOR,
+  DUST_GATE,
+  ENABLE_PROTOCOL_CONTRIBUTOR,
+  RHO_VOLUME_BASIS,
+  ENABLE_P2_CREDIBILITY_WEIGHT,
+  ENABLE_P2_CRED_ON_POSITIVE_DELTA_ONLY,
+  PHASE2_ACTIVE_GATE_RETENTION,
+  PHASE2_ACTIVE_GATE_MIN_X1,
+  PHASE1_BUDGET_VOLUME_ALPHA,
+  ENABLE_P1_ENTROPY_SMOOTHING,
+  SOFTNESS_TAU,
   ENABLE_STATIC_WEIGHTING,
   GENERAL_POOL_WEIGHT_PERCENTAGE,
   MINER_WEIGHT_PERCENTAGE,
   MIN_EPOCHS_FOR_ELIGIBILITY,
   MIN_PREDICTIONS_FOR_ELIGIBILITY,
+  ENABLE_MINER_INACTIVITY_GATE,
+  MINER_INACTIVITY_EPOCHS,
   BURN_UID,
   EXCESS_MINER_WEIGHT_UID,
   EXCESS_MINER_MIN_WEIGHT,
@@ -76,6 +88,8 @@ from .constants import (
   ESM_MIN_MULTIPLIER,
   ENABLE_ES_MINER_LOSS_COMPENSATION,
   ESM_LOSS_COMPENSATION_PERCENTAGE,
+  ENABLE_MINER_POSITIVE_SCORE_FEE_FLOOR,
+  MINER_POSITIVE_SCORE_FEE_FLOOR_MULTIPLIER,
   ENABLE_ES_GP_INCENTIVES,
   ESGP_MIN_MULTIPLIER,
   ENABLE_ES_GP_LOSS_COMPENSATION,
@@ -222,6 +236,14 @@ def score_miners(
     # Check all positive miner scores and apply early stage miner incentives
     if ENABLE_ES_MINER_INCENTIVES and len(miners_scores["scores"]) > 0:
         miners_scores = apply_early_stage_miner_incentives(miner_history, miners_scores, current_epoch_budget)
+
+    # Standalone positive-score fee-return floor for miner pool.
+    if ENABLE_MINER_POSITIVE_SCORE_FEE_FLOOR and len(miners_scores["scores"]) > 0:
+        miners_scores = apply_miner_positive_score_fee_floor(
+            miner_history=miner_history,
+            miners_scores=miners_scores,
+            miner_pool_epoch_budget=miner_pool_epoch_budget,
+        )
 
     # Calculate the general pool scores using epoch-based history
     general_pool_scores = score_with_epochs(
@@ -453,6 +475,54 @@ def check_build_up_eligibility(epoch_history: Dict[str, Any]) -> np.ndarray:
     
     return eligible
 
+def _constraint_dual_magnitude(constraint) -> float:
+    if hasattr(constraint, "dual_value") and constraint.dual_value is not None:
+        return float(np.max(np.abs(np.array(constraint.dual_value, dtype=float))))
+    return 0.0
+
+def _print_solver_dual_summary(phase_label: str, rows: list) -> None:
+    print(f"\n====================[ {phase_label} Dual Summary ]====================")
+    print(f"{'Constraint':35s} | {'Dual Magnitude':>15s}")
+    print("-" * 55)
+    for name, mag in rows:
+        marker = "⛔" if mag > 1e-6 else " "
+        print(f"{name:35s} | {mag:15.6f} {marker}")
+    print("=" * 55 + "\n")
+
+def _safe_spearman(a: np.ndarray, b: np.ndarray) -> float:
+    """Spearman correlation that never raises on short/degenerate inputs."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n = min(a.size, b.size)
+    if n < 2:
+        return float("nan")
+    try:
+        return float(spearmanr(a[:n], b[:n])[0])
+    except ValueError:
+        return float("nan")
+
+def print_dust_gate_diagnostics(sol1, sol2, dust_gate=DUST_GATE, verbose=False) -> None:
+    """Report how many eligible miners hold the dust gate through each phase."""
+    if not verbose or sol1 is None or sol1.get("x_star") is None:
+        return
+
+    x1 = sol1["x_star"]
+    num_eligible = int(sol1.get("num_eligible", 0))
+    phase1_at_dust = int(np.sum(x1 >= dust_gate - 1e-9))
+
+    if sol2 is not None and sol2.get("x_star") is not None:
+        x2 = sol2["x_star"]
+        phase2_at_dust = int(np.sum(x2 >= dust_gate - 1e-9))
+        lost_dust = int(np.sum((x1 >= dust_gate - 1e-9) & (x2 < dust_gate - 1e-9)))
+        print(
+            f"Dust gate ({dust_gate}): Phase1={phase1_at_dust}, "
+            f"Phase2={phase2_at_dust}, lost P1->P2={lost_dust} (eligible={num_eligible})"
+        )
+        if lost_dust > 0:
+            print(f"  WARNING: {lost_dust} eligible miners lost dust gate in Phase 2")
+    else:
+        print(f"Dust gate ({dust_gate}): Phase1={phase1_at_dust} (eligible={num_eligible})")
+
 def score_with_epochs(
     epoch_history: Dict[str, Any],
     budget: float,
@@ -591,7 +661,19 @@ def score_with_epochs(
         "kappa_bar": kappa_bar,                     # payout rate
         "ramp": RAMP,                               # allocation delta rate
         "rho_cap": RHO_CAP,                         # max allocation per miner
-        "require_epoch_preds": require_epoch_preds  # require current epoch predictions toggle
+        "dust_gate": DUST_GATE,                     # minimum gate for eligible traders
+        "require_epoch_preds": require_epoch_preds, # require current epoch predictions toggle
+        "protocol_contributor": ENABLE_PROTOCOL_CONTRIBUTOR,
+        "rho_volume_basis": RHO_VOLUME_BASIS,
+        "p2_credibility_weight": ENABLE_P2_CREDIBILITY_WEIGHT,
+        "p2_cred_on_positive_delta_only": ENABLE_P2_CRED_ON_POSITIVE_DELTA_ONLY,
+        "phase2_active_gate_retention": PHASE2_ACTIVE_GATE_RETENTION,
+        "phase2_active_gate_min_x1": PHASE2_ACTIVE_GATE_MIN_X1,
+        "phase1_budget_volume_alpha": PHASE1_BUDGET_VOLUME_ALPHA,
+        "enable_p1_entropy_smoothing": ENABLE_P1_ENTROPY_SMOOTHING,
+        "softness_tau": SOFTNESS_TAU,
+        "enable_miner_inactivity_gate": ENABLE_MINER_INACTIVITY_GATE,
+        "miner_inactivity_epochs": MINER_INACTIVITY_EPOCHS,
     }
     
     """
@@ -639,10 +721,17 @@ def score_with_epochs(
     The notion here is use the final optimization values to sum up the scores
     of those miners that actually added signal while scoring the 
     """
-    if sol2 is not None:
-        x_star = np.array(sol2.get("x_star", np.zeros_like(x_prev)))
-        c_star = np.array(sol2.get("c_star", np.zeros_like(x_prev)))
-    else:
+    # Prefer the Phase 2 allocation; fall back to Phase 1 gates if Phase 2 produced no
+    # solution (e.g. solver infeasibility), and only zero out as a last resort.
+    x_star = None
+    c_star = None
+    if sol2 is not None and sol2.get("x_star") is not None:
+        x_star = np.array(sol2["x_star"])
+        c_star = np.array(sol2["c_star"])
+    elif sol1 is not None and sol1.get("x_star") is not None:
+        x_star = np.clip(np.array(sol1["x_star"]), 0.0, 1.0)
+        c_star = p_dict["kappa_bar"] * p_dict["v_eff"]
+    if x_star is None or c_star is None:
         x_star = np.zeros_like(x_prev)
         c_star = np.zeros_like(x_prev)
 
@@ -689,6 +778,8 @@ def score_with_epochs(
     # Historical (all epochs so far)
     total_unqualified = np.sum(unqualified_prev_matrix)
     total_qualified = np.sum(qualified_prev_matrix)
+    phase1_corr = _safe_spearman(roi, sol1["x_star"])
+    phase2_corr = _safe_spearman(roi, sol2["x_star"]) if (sol2 and sol2.get("x_star") is not None) else float("nan")
     
     if verbose:
         print(
@@ -717,9 +808,10 @@ def score_with_epochs(
             f"###########################################\n"
             f"status      = {sol2['status'] if sol2 else 'n/a'},\n"
             f"Payout*     = {sol2['payout'] if sol2 else 0.0:.2f},\n"
-            f"Phase 1  ρ(ROI, x*) = {spearmanr(roi, sol1['x_star'])[0]},\n"
-            f"Phase 2  ρ(ROI, x**) = {spearmanr(roi, sol2['x_star'])[0] if sol2 else 'n/a'},\n"
+            f"Phase 1  ρ(ROI, x*) = {phase1_corr},\n"
+            f"Phase 2  ρ(ROI, x**) = {phase2_corr},\n"
         )
+        print_dust_gate_diagnostics(sol1, sol2, dust_gate=p_dict.get("dust_gate", DUST_GATE), verbose=True)
     
     return {
         "entity_ids": entity_ids,
@@ -733,6 +825,67 @@ def score_with_epochs(
         "kappa_bar": kappa_bar
     }
 
+def _use_protocol_contributor(p) -> bool:
+    return bool(p.get("protocol_contributor", ENABLE_PROTOCOL_CONTRIBUTOR))
+
+def _phase1_routing_signal(p, v_block, roi_block) -> np.ndarray:
+    """Phase 1 objective: legacy routes epoch volume; protocol contributor routes profitable epoch flow."""
+    if _use_protocol_contributor(p):
+        return v_block * np.maximum(roi_block, 0.0)
+    return v_block
+
+def _diversity_volume(p, v_block, v_eff) -> np.ndarray:
+    """Volume basis for per-miner diversity cap."""
+    if _use_protocol_contributor(p):
+        basis = p.get("rho_volume_basis", RHO_VOLUME_BASIS)
+        if basis == "block":
+            return v_block
+    return v_eff
+
+def _phase1_budget_volume(p, v_block, v_eff) -> np.ndarray:
+    """Volume basis for Phase 1 budget constraint."""
+    if _use_protocol_contributor(p):
+        alpha = p.get("phase1_budget_volume_alpha", PHASE1_BUDGET_VOLUME_ALPHA)
+        return alpha * v_block + (1.0 - alpha) * v_eff
+    return v_eff
+
+def _credibility_weight(v_memory: np.ndarray) -> np.ndarray:
+    """Scale Phase 2 ROI weights by log historical volume relative to the pool median."""
+    positive = v_memory[v_memory > 0]
+    median = float(np.median(positive)) if positive.size else 1.0
+    return np.log1p(v_memory / max(median, 1e-12))
+
+def _epoch_active(v_block_raw: np.ndarray, v_min: float) -> np.ndarray:
+    """True when the miner traded at least v_min qualified volume this epoch."""
+    return v_block_raw >= v_min
+
+def _recent_trade_eligibility(epoch_history: Dict[str, Any], lookback_epochs: int) -> np.ndarray:
+    """
+    True when an entity has at least one trade in the last `lookback_epochs`.
+
+    This is used to prevent miners from receiving long-tail dust allocations forever
+    after going inactive.
+    """
+    n_entities = epoch_history["n_entities"]
+    n_epochs = epoch_history["n_epochs"]
+    trade_counts = epoch_history["trade_counts"]
+
+    if n_entities == 0 or n_epochs == 0:
+        return np.zeros(n_entities, dtype=bool)
+
+    start_idx = max(0, n_epochs - max(1, int(lookback_epochs)))
+    recent_trades = trade_counts[start_idx:n_epochs, :]
+    return np.any(recent_trades > 0, axis=0)
+
+def _max_allocation_gate(p, v_block_raw: np.ndarray) -> np.ndarray:
+    """Per-miner gate ceiling; inactive epochs are dust-only under protocol contributor."""
+    n = v_block_raw.size
+    if _use_protocol_contributor(p):
+        dust_gate = p.get("dust_gate", DUST_GATE)
+        active = _epoch_active(v_block_raw, p["v_min"])
+        return np.where(active, 1.0, dust_gate)
+    return np.ones(n)
+
 def solve_phase1(p, verbose=False):
     """
     Phase 1: Maximize routed qualified volume given budget & payout constraints. 
@@ -740,8 +893,9 @@ def solve_phase1(p, verbose=False):
     #########################################
     ## Historical data and size
     #########################################
-    v_prev, v_eff ,v_block, roi_trailing, x_prev = p["v_prev"], p["v_eff"], p["v_block"], p["roi_trailing"], p["x_prev"]
-    n = v_block.size
+    v_prev, v_eff, v_block_raw, roi_trailing, x_prev = p["v_prev"], p["v_eff"], p["v_block"], p["roi_trailing"], p["x_prev"]
+    roi_block = p["roi_block"]
+    n = v_block_raw.size
     #########################################
     ## Numerical scaling
     ## First we have to make a scale so the 
@@ -750,13 +904,17 @@ def solve_phase1(p, verbose=False):
     #########################################
     B            = p["budget"]                   # budget size
     v_memory     = p.get("v_memory", v_prev)     # decaying volume
-    v_block      = np.maximum(v_block, 1e-12)    # block volume
+    v_block      = np.maximum(v_block_raw, 1e-12)    # block volume
     c            = v_eff*roi_trailing            # costs
     ## settings
     kappa        = p["kappa_bar"]                # dimensionless
     rho_cap      = p.get("rho_cap", RHO_CAP)     # diversity
     ramp         = p.get("ramp", RAMP)           # ramp
-   
+    dust_gate    = p.get("dust_gate", DUST_GATE) # minimum gate for eligible traders
+    max_gate     = _max_allocation_gate(p, v_block_raw)
+    routing      = _phase1_routing_signal(p, v_block, roi_block)
+    v_rho        = _diversity_volume(p, v_block, v_eff)
+    v_budget     = _phase1_budget_volume(p, v_block, v_eff)
     #########################################
     ## Eligibility Gates
     ## We then have to generate a cost per units
@@ -787,6 +945,11 @@ def solve_phase1(p, verbose=False):
             (v_memory >= p["v_min"]) &
             build_up_eligible
         ).astype(float)
+        # Miner-specific inactivity gate: no trades in the last N epochs => ineligible.
+        if p.get("enable_miner_inactivity_gate", ENABLE_MINER_INACTIVITY_GATE):
+            lookback_epochs = p.get("miner_inactivity_epochs", MINER_INACTIVITY_EPOCHS)
+            recent_trade_eligible = _recent_trade_eligibility(epoch_history, lookback_epochs)
+            eligible = eligible * recent_trade_eligible.astype(float)
 
     if verbose:
         print({"kappa": kappa})
@@ -799,62 +962,48 @@ def solve_phase1(p, verbose=False):
     eps = 1e-9
     cons = []
     cons += [x >= 0, x <= 1]                                         # gates
-    cons += [kappa * (v_eff @ x) <= B]                               # budget
+    cons += [kappa * (v_budget @ x) <= B]                            # budget
     cons += [x <= eligible]                                          # eligibility
-    cons += [kappa * v_eff[i] * x[i] <= rho_cap*B for i in range(n)] # diversity
+    cons += [x <= max_gate]                                          # inactive epochs: dust only (PC)
+    diversity_start = len(cons)
+    cons += [kappa * v_rho[i] * x[i] <= rho_cap*B for i in range(n)] # diversity
+    cons += [x >= dust_gate * eligible]                              # dust constraint
     
     #TODO: these might no longer be needed at all.
     #cons += [c @ x <= kappa * (v_eff @ x + eps)]            # payout/volume cap
     #cons += [x - x_prev <= ramp, x_prev - x <= ramp]        # ramp
-    #cons += [x >= 1e-2*eligible]                            # dust constraint
     #cons += [c[i] * x[i] <= rho_cap * B for i in range(n)]  # diversity cap    
    
     # 5) Objective
-    prob = cp.Problem(cp.Maximize(v_block@x), cons)
+    # Optional entropy smoothing (Proposal 2): softens the hard ROI cliff while keeping
+    # the same budget/diversity constraints. Disabled by default for no behavior change.
+    use_entropy = bool(p.get("enable_p1_entropy_smoothing", ENABLE_P1_ENTROPY_SMOOTHING))
+    tau = float(p.get("softness_tau", SOFTNESS_TAU))
+    obj_expr = routing @ x
+    if use_entropy and tau > 0:
+        obj_expr = obj_expr + tau * (v_budget @ cp.entr(x))
+    prob = cp.Problem(cp.Maximize(obj_expr), cons)
     prob.solve(solver=cp.ECOS, verbose=False)
 
     # 6) === Dual diagnostics table ===
     if prob.status in ("optimal", "optimal_inaccurate"):
         if verbose:
-            print("\n====================[ Phase 1 Dual Summary ]====================")
-
-            labels = [
-                ("x >= 0",            cons[0]),
-                ("x <= 1",            cons[1]),
-                ("budget cap",        cons[2]),
-                ("x <= eligible",     cons[3]),
+            rows = [
+                ("x >= 0", _constraint_dual_magnitude(cons[0])),
+                ("x <= 1", _constraint_dual_magnitude(cons[1])),
+                ("budget cap", _constraint_dual_magnitude(cons[2])),
+                ("x <= eligible", _constraint_dual_magnitude(cons[3])),
             ]
-
-            # Diversity group (vector of n)
-            diversity_cons = cons[4:]
-
-            rows = []
-            for name, cstr in labels:
-                if hasattr(cstr, "dual_value") and cstr.dual_value is not None:
-                    duals = np.array(cstr.dual_value, dtype=float)
-                    mag = np.max(np.abs(duals))
-                    rows.append((name, mag))
-                else:
-                    rows.append((name, 0.0))
-
-            # Handle diversity separately
-            mags = []
-            for c in diversity_cons:
-                if hasattr(c, "dual_value") and c.dual_value is not None:
-                    mags.append(np.max(np.abs(np.array(c.dual_value, dtype=float))))
-            rows.append(("diversity (all)", float(np.max(mags)) if mags else 0.0))
-
-            # Pretty print summary
-            print(f"{'Constraint':35s} | {'Dual Magnitude':>15s}")
-            print("-" * 55)
-            for name, mag in rows:
-                marker = "⛔" if mag > 1e-6 else " "
-                print(f"{name:35s} | {mag:15.6f} {marker}")
-            print("=" * 55 + "\n")
+            diversity_mags = [
+                _constraint_dual_magnitude(c) for c in cons[diversity_start:diversity_start + n]
+            ]
+            rows.append(("diversity (all)", float(np.max(diversity_mags)) if diversity_mags else 0.0))
+            rows.append(("dust gate", _constraint_dual_magnitude(cons[diversity_start + n])))
+            _print_solver_dual_summary("Phase 1", rows)
 
         # 6) Return
         x_star = None if x.value is None else x.value.copy()
-        T_star = float(v_block @ x_star) if x_star is not None else 0.0
+        T_star = float(routing @ x_star) if x_star is not None else 0.0
         
         payout = float(np.dot(v_block * np.maximum(roi_trailing, 0.0), x_star)) if x_star is not None else 0.0
         num_funded = int(np.sum((v_block * np.maximum(roi_trailing, 0.0) * x_star) > 0)) if x_star is not None else 0
@@ -874,15 +1023,19 @@ def solve_phase2(p, x1, T1, verbose=False):
     Phase 2: Redistribute fixed payout to favor higher ROI while staying
     close to x1 (Phase 1 gates).
     """
-    v            = p["v_block"]
-    n            = v.size
+    v_raw        = p["v_block"]
+    n            = v_raw.size
+    v            = np.maximum(v_raw, 1e-12)
     v_eff        = p["v_eff"]
+    v_memory     = p.get("v_memory", v_eff)
     roi          = p["roi_trailing"]
     B            = p["budget"]
     max_budget = p.get("max_budget_weighted", B) if p.get("max_budget_weighted") is not None else B # default max_budget to budget if not provided
     kappa        = p["kappa_bar"]
+    dust_gate    = p.get("dust_gate", DUST_GATE)
+    max_gate     = _max_allocation_gate(p, v_raw)
 
-    # Token cost per miner if fully opened
+    # Token cost per miner if fully opened.
     c = kappa * v_eff
 
     ##eligibility
@@ -910,6 +1063,11 @@ def solve_phase2(p, x1, T1, verbose=False):
             (v_eff >= p["v_min"]) &
             build_up_eligible
         ).astype(float)
+        # Miner-specific inactivity gate: no trades in the last N epochs => ineligible.
+        if p.get("enable_miner_inactivity_gate", ENABLE_MINER_INACTIVITY_GATE):
+            lookback_epochs = p.get("miner_inactivity_epochs", MINER_INACTIVITY_EPOCHS)
+            recent_trade_eligible = _recent_trade_eligibility(epoch_history, lookback_epochs)
+            eligible = eligible * recent_trade_eligible.astype(float)
 
     # Total payout from Phase 1 (fixed)
     P1 = float(np.dot(c, x1))
@@ -919,22 +1077,40 @@ def solve_phase2(p, x1, T1, verbose=False):
 
     # weight positive deltas (above kappa) more, negative ones less
     w = delta
+    if _use_protocol_contributor(p) and p.get("p2_credibility_weight", ENABLE_P2_CREDIBILITY_WEIGHT):
+        cred = _credibility_weight(v_memory)
+        if p.get("p2_cred_on_positive_delta_only", ENABLE_P2_CRED_ON_POSITIVE_DELTA_ONLY):
+            w = np.where(delta > 0, delta * cred, delta)
+        else:
+            w = w * cred
 
     # Decision variable
     x = cp.Variable(n)
 
-    # Constraints
-    cons = []
-    cons += [x >= 0, x <= 1]
-    cons += [x <= eligible]                 # eligibility
-    cons += [c @ x <= min(P1, B, max_budget)] # fixed total payout (ensured not greater than budget or max budget weighted)
+    budget_cap = min(P1, B, max_budget)
+
+    # Base constraints (always mutually feasible: dust floor sits under the budget cap)
+    base_cons = []
+    base_cons += [x >= 0, x <= 1]
+    base_cons += [x <= eligible]                 # eligibility
+    base_cons += [x <= max_gate]                   # inactive epochs: dust only (PC)
+    base_cons += [c @ x <= budget_cap]           # fixed total payout (not greater than budget)
+    base_cons += [x >= dust_gate * eligible]     # dust constraint (mirror Phase 1)
+
+    # Optional retention floor: keep active contributors near their Phase 1 gates. Added
+    # separately so it can be dropped if it ever makes Phase 2 infeasible.
+    retention_cons = []
+    if _use_protocol_contributor(p):
+        retention = p.get("phase2_active_gate_retention", PHASE2_ACTIVE_GATE_RETENTION)
+        min_x1 = p.get("phase2_active_gate_min_x1", PHASE2_ACTIVE_GATE_MIN_X1)
+        if retention > 0:
+            active = _epoch_active(v_raw, p["v_min"])
+            for i in range(n):
+                if active[i] and x1[i] > max(dust_gate, min_x1):
+                    retention_cons += [x[i] >= x1[i] * retention]
 
     # Objective: favor ROI while staying close to prior gates
-    # dynamic smoothness penalty λ
-    roi_spread = np.std(p["roi_trailing"])
-    vol_mean   = np.mean(p["v_eff"])
-
-    # dynamic smoothness penalty λ. higher value means more smoothness, less volatility.
+    # dynamic smoothness penalty λ. higher value = stay closer to Phase 1 gates.
     lam = 5
 
     if verbose:
@@ -942,23 +1118,43 @@ def solve_phase2(p, x1, T1, verbose=False):
 
     obj = cp.Maximize(w @ x -  lam * cp.sum_squares(x - x1))
 
+    cons = base_cons + retention_cons
     prob = cp.Problem(obj, cons)
     prob.solve(solver=cp.ECOS, verbose=False)
 
+    # Graceful degradation: if retention floors made the problem infeasible, re-solve on the
+    # base constraints rather than returning an empty (None) solution that would crash scoring.
+    if (prob.status not in ("optimal", "optimal_inaccurate") or x.value is None) and retention_cons:
+        if verbose:
+            print(f"Phase 2 infeasible with retention floors (status={prob.status}); retrying without them.")
+        cons = base_cons
+        prob = cp.Problem(obj, cons)
+        prob.solve(solver=cp.ECOS, verbose=False)
+
+    if prob.status in ("optimal", "optimal_inaccurate") and verbose:
+        rows = [
+            ("x >= 0", _constraint_dual_magnitude(cons[0])),
+            ("x <= 1", _constraint_dual_magnitude(cons[1])),
+            ("x <= eligible", _constraint_dual_magnitude(cons[2])),
+            ("budget cap", _constraint_dual_magnitude(cons[3])),
+            ("dust gate", _constraint_dual_magnitude(cons[4])),
+        ]
+        _print_solver_dual_summary("Phase 2", rows)
+
     if x.value is not None:
         dx = x.value - x1
-        s1 = spearmanr(roi, x1)[0]
-        s2 = spearmanr(roi, x.value)[0]
+        s1 = _safe_spearman(roi, x1)
+        s2 = _safe_spearman(roi, x.value)
         if verbose:
             print("Δx mean:", float(np.mean(np.abs(dx))))
-            print("Spearman Δ:", float(s2 - s1))
+            print("Spearman Δ:", float(s2 - s1) if np.isfinite(s1) and np.isfinite(s2) else float("nan"))
             print("ρ(ROI, x**):", float(s2))
 
     return {
         "status": prob.status,
         "x_star": None if x.value is None else x.value.copy(),
         "c_star": c,
-        "payout": min(P1, B, max_budget), # ensure payout is not greater than budget or max budget weighted
+        "payout": budget_cap, # total distributed (not greater than budget or max budget weighted)
     }
 
 """
@@ -1012,6 +1208,7 @@ def print_pool_stats(miner_history, general_pool_history, include_current_epoch=
 
     headers = ["Rank", "PID", "# Epochs", "Preds", "Total Vol", "Qual Vol", "PNL", "ROI"]
     if include_current_epoch:
+        headers.append("Ep. 7d Wins")
         headers.append("Ep. Preds")
         headers.append("Ep. Vol")
         headers.append("Ep. Qual Vol")
@@ -1101,6 +1298,11 @@ def create_pool_stats_table(epoch_history, pool_type, include_current_epoch=Fals
             epoch_roi = epoch_pnl / epoch_qualified_volume
         else:
             epoch_roi = 0.0
+
+        # Epoch wins in the last 7 epochs (strictly positive epoch PnL), displayed as X/7.
+        start_7d = max(0, n_epochs - 7)
+        epoch_pnl_window_7 = profit_matrix[start_7d:n_epochs, entity_idx]
+        ep_ws7 = int(np.sum(epoch_pnl_window_7 > 0))
         
         # Get earnings (tokens) for this entity if scores are provided
         earnings = 0
@@ -1148,6 +1350,7 @@ def create_pool_stats_table(epoch_history, pool_type, include_current_epoch=Fals
         # Add current epoch columns if requested
         if include_current_epoch:
             row_data.extend([
+                f"{ep_ws7}/7",
                 epoch_trades,
                 f"${epoch_volume:,.0f}",
                 f"${epoch_qualified_volume:,.0f}",
@@ -1295,6 +1498,72 @@ def apply_early_stage_gp_incentives(general_pool_history: Dict[str, Any], genera
         general_pool_scores["tokens"] = general_pool_scores["tokens"] * scale_factor
 
     return general_pool_scores
+
+def apply_miner_positive_score_fee_floor(
+    miner_history: Dict[str, Any],
+    miners_scores: Dict[str, Any],
+    miner_pool_epoch_budget: float
+) -> Dict[str, Any]:
+    """
+    Ensure eligible current-epoch losers with positive history receive a fee-return floor.
+
+    This applies only when all of the following are true:
+    - Miner has negative current-epoch profit (lost this epoch)
+    - Miner has positive historical PnL before this epoch
+    - Miner has positive historical ROI before this epoch
+    It is independent of early-stage incentives. Tokens are adjusted in-place; if the floor
+    pushes total miner tokens above miner pool budget, tokens are proportionally scaled to
+    remain budget-safe.
+    """
+    n_epochs = miner_history["n_epochs"]
+    n_entities = miner_history["n_entities"]
+
+    if n_entities == 0 or n_epochs == 0:
+        return miners_scores
+
+    fees_prev_matrix = miner_history["fees_prev"]
+    volume_prev_matrix = miner_history["volume_prev"]
+    profit_prev_matrix = miner_history["profit_prev"]
+    current_epoch_idx = n_epochs - 1
+    current_epoch_fees = fees_prev_matrix[current_epoch_idx]
+    current_epoch_profit = profit_prev_matrix[current_epoch_idx]
+    if current_epoch_idx <= 0:
+        return miners_scores
+
+    for entity_idx in range(n_entities):
+        # Floor only for miners who lost this epoch.
+        if current_epoch_profit[entity_idx] >= 0:
+            continue
+
+        history_profit = float(np.sum(profit_prev_matrix[:current_epoch_idx, entity_idx]))
+        history_volume = float(np.sum(volume_prev_matrix[:current_epoch_idx, entity_idx]))
+        history_roi = history_profit / history_volume if history_volume > 0 else 0.0
+
+        # Require positive pre-epoch history PnL and ROI.
+        if history_profit <= 0 or history_roi <= 0:
+            continue
+
+        original_tokens = miners_scores["tokens"][entity_idx]
+        floor_tokens = current_epoch_fees[entity_idx] * MINER_POSITIVE_SCORE_FEE_FLOOR_MULTIPLIER
+        miners_scores["tokens"][entity_idx] = max(original_tokens, floor_tokens)
+        new_tokens = miners_scores["tokens"][entity_idx]
+
+        if new_tokens > original_tokens:
+            print(
+                f"Applying miner history-loss floor {entity_idx}: "
+                f"from {original_tokens:,.2f} -> {new_tokens:,.2f}"
+            )
+
+    total_tokens = np.sum(miners_scores["tokens"])
+    if total_tokens > miner_pool_epoch_budget:
+        print(
+            f"History-loss fee floor: total miner tokens {total_tokens:,.2f} exceeds "
+            f"miner pool budget {miner_pool_epoch_budget:,.2f}. Scaling down proportionally."
+        )
+        scale_factor = miner_pool_epoch_budget / total_tokens
+        miners_scores["tokens"] = miners_scores["tokens"] * scale_factor
+
+    return miners_scores
 
 def calculate_weights(
         miners_scores: Dict[str, Any], 

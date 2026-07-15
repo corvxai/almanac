@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import secrets
 import time
 from datetime import datetime
@@ -20,6 +21,8 @@ PREDICTION_ENDPOINT = "/v1/validators/prediction"
 SCORED_PREDICTIONS_ENDPOINT = "/v1/validators/scored-predictions"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 AUTH_DOMAIN = "sub41-gateway-v1"
+
+logger = logging.getLogger("arcratio.validator")
 
 
 class AssignmentMiner(BaseModel):
@@ -203,9 +206,17 @@ def fetch_agent_event_assignment(
     if not isinstance(payload, dict):
         raise RuntimeError("orchestrator assignment response must be a JSON object")
     try:
-        return AgentAndEventResponse.model_validate(payload)
+        response = AgentAndEventResponse.model_validate(payload)
     except ValidationError as exc:
         raise RuntimeError(f"invalid orchestrator assignment payload: {exc}") from exc
+
+    if response.assignment is None:
+        logger.info(
+            "No agent-and-event assignments available to predict on (reason=%s).",
+            response.reason or "none_available",
+        )
+
+    return response
 
 
 def submit_validator_prediction(
