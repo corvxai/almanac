@@ -300,6 +300,8 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert isinstance(trace["providerCalls"], list)
     assert isinstance(trace["steps"], list)
     assert isinstance(trace["evidenceDigest"], dict)
+    assert "providerCalls" not in trace["evidenceDigest"]
+    assert "reasoningChain" not in trace["evidenceDigest"]
 
     steps = trace["steps"]
     assert all(step["origin"] == "reasoningChain" for step in steps)
@@ -320,6 +322,7 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert trace_summary["providerCallCount"] == len(trace["providerCalls"])
     assert trace_summary["reasoningStepCount"] == len(trace["steps"])
     assert trace_summary["usageTotals"]["totalTokens"] == 769
+    assert "reasoningSummary" not in trace_summary
 
     _assert_no_snake_case_keys(payload["reasoningTrace"])
 
@@ -452,7 +455,7 @@ def _real_digest_with_belief_path(prediction: float, confidence: float | None):
     return assemble_trace(
         execution_context=exec_ctx, event=event, provider_calls=[provider_call],
         agent_result=AgentResult(prediction=prediction, confidence=confidence,
-                                 reasoning="r", beliefPath=belief_path),
+                                 reasoning="final", beliefPath=belief_path),
     )
 
 
@@ -492,9 +495,20 @@ def test_submit_payload_unchanged_and_multipoint_with_belief_path() -> None:
     assert len(probs) >= 3
     assert len({round(p, 6) for p in probs}) > 1
 
-    # the raw beliefPath also rides down inside the evidenceDigest.futureGraph seam
+    # The belief path stays in futureGraph, with its duplicate final text replaced
+    # by a reference to the canonical predictionOutput reasoning summary.
     future_graph = payload["reasoningTrace"]["trace"]["evidenceDigest"]["futureGraph"]
     assert [s["type"] for s in future_graph["beliefPath"]] == ["prior", "update", "final"]
+    final_belief = future_graph["beliefPath"][-1]
+    assert "text" not in final_belief
+    assert final_belief["textRef"].endswith("/predictionOutput/reasoningSummary")
+
+    final_step = [
+        step for step in steps
+        if step["intermediateProbability"] == pytest.approx(0.62)
+    ][-1]
+    assert "reasoningText" not in final_step
+    assert final_step["reasoningTextRef"] == final_belief["textRef"]
 
 
 def test_build_prediction_submit_payload_missing_confidence_stays_valid() -> None:

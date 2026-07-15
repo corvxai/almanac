@@ -130,22 +130,23 @@ def _build_prediction_output(
 def _provider_gap_query_steps(provider_calls: list[ProviderCall]) -> list[ReasoningStep]:
     """One gap_query step per provider call (from the gateway log).
 
+    Provider evidence stays canonical on ProviderCall.extracted_evidence; the
+    step links to that call rather than copying the complete response body.
     ``input_evidence_refs`` is emitted as [] — NOT a positional fake. The real
     declared-then-verified evidence→step join is a phase-2 hook (see schema).
     """
     steps: list[ReasoningStep] = []
     for idx, pc in enumerate(provider_calls):
-        evidence_summary = "; ".join(
-            e.content for e in pc.extracted_evidence
-        ) or f"{pc.provider_id}.{pc.call_type} returned {pc.response_meta.response_size_bytes}B"
-
         steps.append(ReasoningStep(
             step_index=idx,
             step_type=ReasoningStepType.GAP_QUERY,
             provider_call_index=pc.call_index,
             provider_id=pc.provider_id,
             input_evidence_refs=[],
-            reasoning_text=f"[{pc.provider_id}] {evidence_summary}",
+            reasoning_text=(
+                f"[{pc.provider_id}] {pc.call_type}; "
+                f"evidence in providerCalls[{pc.call_index}]"
+            ),
             inference_model_used=pc.model,
         ))
     return steps
