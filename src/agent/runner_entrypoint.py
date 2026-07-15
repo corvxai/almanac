@@ -42,6 +42,7 @@ from typing import Any
 
 import httpx
 
+from src.core import constants
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
 from src.agent.sandbox_gateway import SandboxGateway
@@ -55,7 +56,11 @@ from src.gateway.client import RemoteProvider
 _BASE_URL = "http://proxy.local"
 
 
-def _make_uds_client(socket_path: str, run_id: str, timeout: float = 120.0) -> httpx.Client:
+def _make_uds_client(
+    socket_path: str,
+    run_id: str,
+    timeout: float = float(constants.GATEWAY.call_timeout_seconds),
+) -> httpx.Client:
     transport = httpx.HTTPTransport(uds=socket_path)
     return httpx.Client(
         base_url=_BASE_URL,

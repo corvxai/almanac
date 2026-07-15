@@ -39,6 +39,24 @@ Key principles:
 - Avoid extremes unless evidence is overwhelming"""
 
 
+def _market_context_from_event(ctx: ForecastingContext) -> str:
+    """Format the assignment's market snapshot as a prompt anchor.
+
+    Returns "" when the event carries no market data (non-market events, or
+    validators running an older orchestrator that predates the snapshot).
+    """
+    prices = getattr(ctx.event, "current_outcome_prices", None) or {}
+    if not prices:
+        return ""
+    outcomes = getattr(ctx.event, "outcomes", None) or []
+    name_by_id = {o.get("outcomeId"): o.get("name") for o in outcomes if isinstance(o, dict)}
+    parts = [
+        f"{name_by_id.get(outcome_id) or outcome_id}: {price:.3f}"
+        for outcome_id, price in prices.items()
+    ]
+    return "Current market-implied probabilities — " + ", ".join(parts)
+
+
 def _build_user_prompt(title: str, description: str, market_context: str) -> str:
     return f"""\
 **Event to Forecast:**
@@ -123,9 +141,10 @@ class ClaudeAgent(BaseAgent):
     agent_version = "0.1.0"
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
-        market_context = None
+        # --- Phase 1: market snapshot from the assignment as a prior anchor ---
+        market_context = _market_context_from_event(ctx)
 
-        # --- Phase 1: Call Claude with web search tool ---
+        # --- Phase 2: Call Claude with web search tool ---
         messages = [
             {"role": "user", "content": _build_user_prompt(
                 ctx.event_title, ctx.event_description, market_context,

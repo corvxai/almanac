@@ -17,12 +17,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.run_validator import (
+    _rewrite_loopback_url_for_container,
+    _running_in_container,
+)
 from src.core.config import AppConfig
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
@@ -48,6 +54,10 @@ def _code_preview(code: str, *, preview_chars: int = 50) -> str:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Fetch one validator agent/event assignment.")
     parser.add_argument(
         "--base-url",
@@ -124,10 +134,24 @@ def main() -> int:
     if args.unsafe_no_signing:
         cfg.bittensor.signing_required = False
 
+    # Same container rewrites as scripts/run_validator.py: the proxy UDS must
+    # live in the compose-mounted run dir, and host-loopback URLs must go via
+    # the Docker host gateway.
+    if _running_in_container():
+        mounted_run_dir = Path("/var/run/arcratio")
+        if mounted_run_dir.is_dir() and cfg.validator.sandbox_socket_dir != mounted_run_dir:
+            print(f"Container runtime detected; sandbox socket dir -> {mounted_run_dir}")
+            cfg.validator.sandbox_socket_dir = mounted_run_dir
+
     base_url = (args.base_url or cfg.validator.orchestrator_api_url).strip()
     if not base_url:
         print("missing orchestrator API URL in validator config")
         return 2
+    if _running_in_container():
+        rewritten = _rewrite_loopback_url_for_container(base_url)
+        if rewritten != base_url:
+            print(f"Container runtime detected; orchestrator URL {base_url} -> {rewritten}")
+            base_url = rewritten
     cfg.validator.orchestrator_api_url = base_url
 
     loaded_hotkey = load_hotkey(cfg.bittensor)
@@ -146,7 +170,6 @@ def main() -> int:
         return 1
 
     if response.assignment is None:
-        print(f"No assignment: {response.reason or 'none_available'}")
         return 0
 
     print(f"Got assignment: {response.assignment.agentPredictionId}")
@@ -163,6 +186,15 @@ def main() -> int:
         return 0
 
     gateway_url = args.gateway_url or gateway_service_url()
+    if _running_in_container():
+        gateway_rewritten = _rewrite_loopback_url_for_container(gateway_url)
+        if gateway_rewritten != gateway_url:
+            print(f"Container runtime detected; gateway URL {gateway_url} -> {gateway_rewritten}")
+            gateway_url = gateway_rewritten
+            # The local proxy resolves its upstream via gateway_service_url()
+            # at request time — propagate the rewrite the same way
+            # scripts/run_validator.py does.
+            os.environ["GATEWAY_SERVICE_URL"] = gateway_rewritten
     store = JsonTraceStore(data_dir=cfg.storage.data_dir)
     try:
         providers = build_remote_providers(gateway_url)

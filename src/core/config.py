@@ -69,8 +69,7 @@ class StorageConfig(BaseModel):
 
 
 class GatewayConfig(BaseModel):
-    default_timeout_ms: int = constants.GATEWAY.default_timeout_ms
-    max_retries: int = constants.GATEWAY.max_retries
+    call_timeout_seconds: int = constants.GATEWAY.call_timeout_seconds
     debug_log_raw_response: bool = constants.GATEWAY.debug_log_raw_response
     debug_raw_response_max_chars: int = constants.GATEWAY.debug_raw_response_max_chars
 

@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from src.core import constants
 from src.core.schemas import ProviderTier
 from src.gateway.constants import gateway_service_url
 from src.gateway.providers.base import BaseProvider
@@ -60,7 +61,7 @@ class RemoteProvider(BaseProvider):
         provider_id: str,
         gateway_url: str | None = None,
         provider_tier: ProviderTier | None = None,
-        timeout: float = 120.0,
+        timeout: float = float(constants.GATEWAY.call_timeout_seconds),
         default_call_type: str | None = None,
         supports_completions: bool = True,
         *,
