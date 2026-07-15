@@ -61,67 +61,73 @@ The trace is a versioned JSON record, defined in `core/schemas.py`. The v1 shape
 What moved relative to the old v0.1 trace:
 
 - **Sources have one home.** Each provider call carries a typed `sources_accessed[]`, each source with url, title, excerpt, and a computed `counts_toward_grounding` flag. The parallel evidence array that recorded the same URLs a second time is gone.
-- **Reasoning steps are typed and carry a probability.** Three step types (`prior`, `belief_update`, `gap_query`) replace the old sprawling set, and every step carries an `intermediate_probability`, so the belief path is first-class rather than buried.
+- **Reasoning steps are typed and carry a probability.** Three step types (`prior`, `belief_update`, `gap_query`) replace the old sprawling set, and every step carries an `intermediate_probability`. Those step probabilities and texts are sourced from the miner-authored `beliefPath` on `AgentResult` (mapped by the assembler), so the belief path is first-class rather than buried.
 - **Provider calls carry what the join needs.** A `correlation_id`, the `request_text` bytes, and the `raw_response_hash`. The request bytes do double duty: they are the byte-match fallback when a correlation id is missing, and they are what grounding checks against (did a source's content actually appear in a later prompt). Provider and call type are pinned to constants, and the model is checked against the catalog. There is also an optional `reasoning_capture` slot to hold chain-of-thought when a model exposes it, kept for diagnostics and never scored, since verbalized reasoning is not reliably faithful to what the model actually did.
 - **The scored price sits inside the trace.** `market_price_at_prediction` is stamped into `execution_context`, so the baseline a miner is graded against is inside the hashed record rather than read from a side channel.
 - **Dead and duplicated fields are dropped**, and the version is bumped so an emitted trace actually claims v1.
 
 ## Miner side: what the agent returns
 
-The agent contract stays small. Subclass the base agent, implement `predict`, and return a structured, validated result. The only new obligation is that each reasoning step declares where it came from:
+The agent contract stays small. Subclass the base agent, implement `predict`, and return a structured, Pydantic-validated `AgentResult`. The result carries a `beliefPath` — an ordered list of `BeliefStep`s, each declaring the belief at that point and, optionally, which evidence moved it:
 
 ```python
-class ReasoningStep(BaseModel):
-    step_type: Literal["prior", "belief_update", "gap_query"]
-    reasoning_text: str
-    intermediate_probability: float     # the step's PROB, its belief at this point
-    used_call: str | None               # correlation id of the call that fed it
-    used_sources: list[int]             # which sources from that call it used
+class BeliefStep(BaseModel):
+    step: int                           # ordinal position in the path
+    type: Literal["prior", "update", "final"]
+    probability: float                  # belief at this step, in [0,1]
+    text: str                           # one line: why it is here / why it moved
+    usedCall: str | None = None         # declared: which provider call fed it (phase-2 grounding hook)
+    usedSources: list[int] | None = None  # declared: which source indices it used (phase-2 grounding hook)
 
 class AgentResult(BaseModel):
-    probability: float
-    reasoning_summary: str
-    steps: list[ReasoningStep]
+    prediction: float                   # the forecast (this is scored)
+    reasoning: str                      # overall why (stored, unscored)
+    confidence: float | None = None     # optional, stored, unscored
+    beliefPath: list[BeliefStep]        # required, min_length=1; last step = the final belief
 ```
 
-Two small things make the declared half verifiable:
+Pydantic is the gate. `beliefPath` is required (`min_length=1`); it must end in exactly one `final` step whose probability equals `prediction` (4dp). A single-`final` path is valid, so the simplest agent stays a couple of lines; a `prior → update → final` sequence with `usedCall`/`usedSources` is the rich, evidence-linked path.
 
-- The agent tags each provider call it makes with a correlation id (passed through the call context), so the validator can match a declared step to the specific call it witnessed.
-- Each step states its probability, so the belief path (for example `0.50 → 0.19 → 0.10 → 0.12`) is explicit rather than something we have to infer.
+Two things make the belief path explicit:
 
-Declaring the links and probabilities is what unlocks the belief-path and evidence scoring. A miner that returns only a prediction still runs; its declared links just come back blank in the trace.
+- Each step states its probability, so the belief path (for example `0.50 → 0.19 → 0.10 → 0.12`) rides on the returned object rather than being inferred.
+- Each step may declare `usedCall`/`usedSources`. In MVP these are **stored, not verified** — the declared→witnessed join (below) is phase-2. A miner that returns only a single-`final` step still runs; its declared links just come back empty.
+
+The whole `beliefPath` is validated and stored, not scored, in MVP. It survives the sandbox boundary because it rides on the returned `AgentResult`.
 
 ## Validator side: how the assembler builds the trace
 
-The assembly lives in `validator/trace_assembler.py`, fed by the gateway's witness layer. Four steps:
+The assembly lives in `validator/trace_assembler.py`, fed by the gateway's witness layer. The MVP does two of these steps (Witness, Seal); the declared→witnessed join (Verify, Ground) is the phase-2 target described below.
 
-1. **Witness.** As the agent runs in the sandbox, the gateway proxy witnesses every provider call: it assigns the next call index, hashes the raw response, stamps the correlation id the agent sent, and stores the request bytes. This is the ground truth everything else is checked against.
+1. **Witness (built).** As the agent runs in the sandbox, the gateway proxy witnesses every provider call: it assigns the next call index, hashes the raw response, stamps the correlation id the agent sent, and stores the request bytes. This is the ground truth everything else is checked against. The witnessed calls land in `provider_calls[]` (and as `gap_query` steps in the chain).
 
-2. **Verify.** For each declared step, the assembler finds the witnessed call whose correlation id matches the one the agent declared. If the id is missing, it falls back to matching on the response hash. On a match it writes the verified `provider_call_index` and translates the step's source references into indices in that call's `sources_accessed[]`. On no match it writes `null`, an honest blank rather than a fabricated link.
+2. **Assemble the belief path (built).** The miner-authored `beliefPath` is mapped into `reasoning_chain` (`probability → intermediate_probability`, `text → reasoning_text`, `type → step_type`), and the raw declared path — with its `type` labels and `usedCall`/`usedSources` links — is preserved in `future_graph["beliefPath"]`. The path is validated and stored, **not** scored, and its evidence links are declared, **not** yet verified: `provider_call_index` is `null` and `input_evidence_refs` is `[]` in MVP, an honest blank rather than a positional fake.
 
-3. **Ground.** For each source, set `counts_toward_grounding` to true only when the source's content actually appears in a later reasoning call's request text. Where a provider returns a title but no snippet, fall back to a weaker match or leave it false, rather than claiming grounding we cannot show.
+3. **Verify (phase-2).** For each declared step, the assembler will find the witnessed call whose correlation id matches the one the agent declared, falling back to the response hash. On a match it writes the verified `provider_call_index` and translates the step's source references into indices in that call's `sources_accessed[]`; on no match it writes `null`.
 
-4. **Seal.** Hash the whole record into `trace_hash`.
+4. **Ground (phase-2).** For each source, set `counts_toward_grounding` to true only when the source's content actually appears in a later reasoning call's request text. Where a provider returns a title but no snippet, fall back to a weaker match or leave it false, rather than claiming grounding we cannot show.
 
-This is the step that turns the trace from a self-report into an audit. The belief path becomes witnessed because the step probability is parsed from the model's own output, and every evidence link is either verified against a witnessed call or left honestly blank.
+5. **Seal (built).** Hash the whole record into `trace_hash`.
 
-## The join, in one place
+Witness + Seal are what the MVP ships: the provider calls are witnessed and the record is sealed, while the belief path rides through as a validated, stored self-report. Verify + Ground are what turn the declared links into an audit — they are the phase-2 target, not yet built.
 
-The old assembler filled the evidence link positionally, writing call indices into the evidence slot, so the link was true by construction and proved nothing. v1 replaces that with declare-then-verify:
+## The join, in one place (phase-2 target)
+
+The old assembler filled the evidence link positionally, writing call indices into the evidence slot, so the link was true by construction and proved nothing. v1 removes that fake (emitting `null`/`[]` today) and reserves a declare-then-verify join for phase-2:
 
 - **Primary:** match the correlation id the agent stamped on its call to the id the validator recorded when it witnessed that call.
 - **Fallback:** if the id is missing, match on the response hash the validator already keeps.
 - **Result:** a verified `provider_call_index`, or `null` when nothing matches. And `input_evidence_refs` points into the linked call's `sources_accessed[]`, not at call indices, so the reference actually names sources.
 
-## Worked example: one step, verified
+## Worked example: one step, and what verifying it will look like (phase-2)
 
-Take the Hormuz run. The agent runs a `sonar` search as its second provider call, tags that call with correlation id `c2`, reads the results, and moves its belief to 0.19. In its structured output the `belief_update` step declares `used_call: "c2"`, `used_sources: [0, 3]`, and `intermediate_probability: 0.19`.
+Take the Hormuz run. The agent runs a `sonar` search as its second provider call, reads the results, and moves its belief to 0.19. In its returned `beliefPath` the `update` step declares `usedCall: "c2"`, `usedSources: [0, 3]`, and `probability: 0.19`. Today the MVP stores that step and its declared links verbatim (in `reasoning_chain` and raw in `future_graph["beliefPath"]`), validated but not verified.
 
-On the validator side, that same call was witnessed as `call_index: 2`, carrying `correlation_id: "c2"`, and its response was hashed. The assembler matches `c2`, so it writes `provider_call_index: 2` on the step and rewrites the source references as indices into call 2's `sources_accessed[]`. The step is now backed by a call the validator actually saw, not by the agent's word.
+Phase-2 turns the declared link into an audit. That same call was witnessed as `call_index: 2` and its response was hashed. The join will match `c2`, write `provider_call_index: 2` on the step, and rewrite the source references as indices into call 2's `sources_accessed[]`, so the step is backed by a call the validator actually saw, not by the agent's word.
 
 Grounding runs on top of the same witnessed data. Source 0 on call 2 has an excerpt. If that excerpt text shows up in the request bytes of the next reasoning call (call 3, where the model reasons over the search results), the assembler sets `counts_toward_grounding: true`. If the agent cited a source it never actually fed into a prompt, the excerpt will not appear downstream and the flag stays false, so a decorative citation earns no grounding.
 
-The failure case is just as important. If the step had declared `used_call: "c9"` for a call that was never witnessed, the match fails and the step's `provider_call_index` is written as `null`. The trace keeps the agent's claim but marks it unverified, rather than inventing a link to make the reasoning look grounded.
+The failure case is just as important. If the step had declared `usedCall: "c9"` for a call that was never witnessed, the match fails and the step's `provider_call_index` is written as `null`. The trace keeps the agent's claim but marks it unverified, rather than inventing a link to make the reasoning look grounded.
 
 ## What still depends on others
 

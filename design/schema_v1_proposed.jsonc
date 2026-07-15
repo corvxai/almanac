@@ -4,7 +4,7 @@
   "title": "SN41 Reasoning-Trace Schema v1.0.0",
   "description": "Validator-assembled reasoning trace for one agent run. Miner submits agent code; validator runs it in an isolated Docker sandbox behind a gateway, witnesses every provider call, and assembles this record. In v1 the trace is a DATA ASSET + a boolean well-formedness surface. The scorer (PR#15) is TRACE-BLIND: it reads a flat central DTO, never this body. The trace's only live influence on score is via the orchestrator-set boolean predictionIsInvalid, which the fact-gate computes from provider_calls[].sources_accessed[]. All verification machinery (declared-then-verified join, belief-path scoring, ablation, on-chain anchoring, trust tiers) is PHASE-2: reserved as nullable hooks here, built nowhere yet. See design/trace-schema.md and design/implementation-plan.md.",
   "type": "object",
-  "$comment": "SETTLED: (1) No prompt injection; structured steps come from the agent's own Pydantic-validated output witnessed inside provider-call responses. (2) CoT captured-when-available into provider_calls[].reasoning_capture; stored/diagnostic, never scored. (3) A call's kind (search vs reasoning) is the model's gate tag in $defs.modelCatalog, not stored per call. (4) market_price_at_prediction is validator-written at run level; canonical copy held centrally in the DTO. TRIMMED vs the earlier draft: the declared-then-verified join fields (reasoningStep.provider_call_index, input_evidence_refs) are DEMOTED out of required to nullable phase-2 hooks because no verification exists in code and the assembler fills them positionally (input_evidence_refs[0]==provider_call_index) -- emit null/[] not the positional fake. raw_response_hash and market_price_at_prediction are nullable reserved slots. key_drivers/key_uncertainties/total_evidence_items/inference_model_used/metadata/merkle_root/anchor_* are DROPPED. A disabled future_graph seam parks the deferred DAG/belief/ablation/trust-tier work.",
+  "$comment": "SETTLED: (1) No prompt injection; structured steps come from the agent's own Pydantic-validated output witnessed inside provider-call responses. (2) CoT captured-when-available into provider_calls[].reasoning_capture; stored/diagnostic, never scored. (3) A call's kind (search vs reasoning) is the model's gate tag in $defs.modelCatalog, not stored per call. (4) market_price_at_prediction is validator-written at run level; canonical copy held centrally in the DTO. TRIMMED vs the earlier draft: the declared-then-verified join fields (reasoningStep.provider_call_index, input_evidence_refs) are DEMOTED out of required to nullable phase-2 hooks because no verification exists in code and the assembler fills them positionally (input_evidence_refs[0]==provider_call_index) -- emit null/[] not the positional fake. raw_response_hash and market_price_at_prediction are nullable reserved slots. key_drivers/key_uncertainties/total_evidence_items/inference_model_used/metadata/merkle_root/anchor_* are DROPPED. The future_graph seam parks the deferred DAG/ablation/trust-tier work with its graph-scoring pathway disabled; the assembler does populate future_graph.beliefPath now with the raw miner-declared belief path (stored, unscored) as the phase-2 grounding hook.",
   "required": [
     "execution_context",
     "event_snapshot",
@@ -109,10 +109,27 @@
     },
     "future_graph": {
       "type": ["object", "null"],
-      "description": "PHASE-2 SEAM, DISABLED. Reserved home for the deferred verification machinery: typed-node DAG (edges supports/refutes/derives/updates), scored belief_path (martingale_residual, updated_before_consensus, scored_correctness), ablation (loo), and per-source trust tiers (gateway_verified vs miner_declared). Building v0.3 is a reprocess of the existing flat arrays, NOT a schema break. Null / enabled:false in every v1 trace; the assembler does not populate it.",
+      "description": "PHASE-2 SEAM. Reserved home for the deferred graph-scoring machinery: typed-node DAG (edges supports/refutes/derives/updates), scored belief_path (martingale_residual, updated_before_consensus, scored_correctness), ablation (loo), and per-source trust tiers (gateway_verified vs miner_declared). Building v0.3 is a reprocess of the existing flat arrays, NOT a schema break. The graph-scoring pathway stays DISABLED (enabled:false) in every v1 trace. The one part the assembler DOES populate now is beliefPath: the raw, miner-declared belief path preserved intact (the reasoning_chain vocab cannot carry the type labels or usedCall/usedSources links), stored UNSCORED as the phase-2 grounding hook.",
       "additionalProperties": false,
       "properties": {
-        "enabled": {"const": false, "description": "Always false in v1. Flip only when the phase-2 verification code lands."}
+        "enabled": {"const": false, "description": "The graph-scoring pathway. Always false in v1. Flip only when the phase-2 verification code lands."},
+        "beliefPath": {
+          "type": ["array", "null"],
+          "description": "PHASE-2 GROUNDING HOOK, stored not scored. The raw belief path exactly as the agent declared it on AgentResult, carrying the fields the flat reasoning_chain drops: the step `type` label (prior/update/final) and the declared usedCall/usedSources evidence links. Preserved here so the declared->witnessed grounding join can be built later without re-running the agent. Self-declared; NOT verified in v1.",
+          "items": {
+            "type": "object",
+            "required": ["step", "type", "probability", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "step": {"type": "integer", "minimum": 0},
+              "type": {"enum": ["prior", "update", "final"]},
+              "probability": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+              "text": {"type": "string", "minLength": 1},
+              "usedCall": {"type": ["string", "null"], "description": "Declared provider-call id this step used. Phase-2 grounding hook; not verified."},
+              "usedSources": {"type": ["array", "null"], "items": {"type": "integer", "minimum": 0}, "description": "Declared source indices this step used. Phase-2 grounding hook; not verified."}
+            }
+          }
+        }
       }
     }
   },
@@ -166,12 +183,12 @@
           "description": "prior = initial belief, no evidence yet. belief_update = each later revision (terminal step is the last belief_update). gap_query = asks for a missing piece, sets no new belief. NOTE: schemas.py and the agent context are migrated to these three; make sure BOTH trace-producing code paths emit the new vocab.",
           "$comment": "step_type stays REQUIRED (cheap, always known). provider_call_index and input_evidence_refs are DEMOTED to optional phase-2 hooks below."
         },
-        "reasoning_text": {"type": ["string", "null"], "description": "The written reasoning at this step. Self-declared training narrative (not witnessed)."},
+        "reasoning_text": {"type": ["string", "null"], "description": "The written reasoning at this step. Sourced from the miner-authored beliefPath (BeliefStep.text) on AgentResult, mapped by the assembler. Self-declared training narrative (not witnessed)."},
         "intermediate_probability": {
           "type": ["number", "null"],
           "minimum": 0.0,
           "maximum": 1.0,
-          "description": "Belief after this step; null on gap_query and pure-search steps. Read down the chain it is the belief path -- the most-prized signal. Captured now (un-backfillable), scored PHASE-2. Comes from the model's parseable PROB:/PREDICTION: token in the witnessed response."
+          "description": "Belief after this step; null on gap_query and pure-search steps. Read down the chain it is the belief path -- the most-prized signal. Captured now (un-backfillable), scored PHASE-2. Sourced from the miner-authored beliefPath (BeliefStep.probability) on AgentResult, mapped by the assembler -- not a parsed PROB:/PREDICTION: token."
         },
         "provider_call_index": {
           "type": ["integer", "null"],
