@@ -8,6 +8,7 @@ from uuid import uuid4
 from src.core.events import Event
 from src.core.schemas import (
     AgentResult,
+    BeliefStep,
     EventCategory,
     ExecutionContext,
     ProviderCall,
@@ -17,6 +18,8 @@ from src.core.schemas import (
     UsageMeta,
 )
 from src.validator.trace_assembler import assemble_trace
+
+_FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="test")]
 
 
 def _event() -> Event:
@@ -108,7 +111,7 @@ def test_assemble_trace_aggregates_usage_totals_across_provider_calls() -> None:
         execution_context=_execution_context(),
         event=_event(),
         provider_calls=calls,
-        agent_result=AgentResult(prediction=0.5, reasoning="test"),
+        agent_result=AgentResult(prediction=0.5, reasoning="test", beliefPath=_FINAL_BP),
     )
 
     assert digest.trace_integrity.total_provider_cost == 0.0012
@@ -135,7 +138,7 @@ def test_assemble_trace_omits_usage_totals_when_no_provider_usage() -> None:
         execution_context=_execution_context(),
         event=_event(),
         provider_calls=calls,
-        agent_result=AgentResult(prediction=0.5, reasoning="test"),
+        agent_result=AgentResult(prediction=0.5, reasoning="test", beliefPath=_FINAL_BP),
     )
 
     assert digest.trace_integrity.usage_totals is None
@@ -151,7 +154,7 @@ def test_assemble_trace_carries_market_price_at_prediction() -> None:
         execution_context=ec,
         event=_event(),
         provider_calls=[],
-        agent_result=AgentResult(prediction=0.5, reasoning="test"),
+        agent_result=AgentResult(prediction=0.5, reasoning="test", beliefPath=_FINAL_BP),
     )
 
     assert digest.execution_context.market_price_at_prediction == 0.42

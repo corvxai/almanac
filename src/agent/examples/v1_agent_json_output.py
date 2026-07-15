@@ -11,11 +11,12 @@ for a single JSON object ``{reasoning, prediction, confidence}`` (reasoning firs
 so the model reasons before committing the number) and validates it with pydantic.
 
 Contract alignment (verified against base + validator):
-* ``confidence`` is REQUIRED on success (the validator marks a None confidence
-  invalid via ``normalize_prediction_values``), so the success path always sets it.
-* Fail closed IN-BAND: on unrecoverable model output, return a structurally-valid
-  ``AgentResult`` with ``confidence=None`` (→ predictionIsInvalid) rather than
-  ``raise`` (a sandbox crash path) or a silent 0.5.
+* ``confidence`` is optional (stored, unscored); the success path sets it from the
+  forecast, and a missing value never invalidates the prediction.
+* Fail closed IN-BAND: on unrecoverable model output, return a valid neutral
+  forecast — a structurally-valid ``AgentResult`` with ``prediction=0.5`` and a
+  single-``final`` belief path — rather than ``raise`` (a sandbox crash path) or a
+  silent, unvalidated 0.5. It is scored normally.
 * No ``record_reasoning_step``: the Docker sandbox discards agent-recorded steps
   (``orchestrator``: agent_steps=None); the reasoning_chain is validator-assembled.
 """
@@ -27,7 +28,13 @@ from uuid import UUID
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
 from src.core.schemas import AgentResult
-from src.agent.examples._v1_common import BASIC_LLM, parse_forecast, request_forecast
+from src.agent.examples._v1_common import (
+    BASIC_LLM,
+    belief_path_from_forecast,
+    belief_path_single_final,
+    parse_forecast,
+    request_forecast,
+)
 
 
 class V1AgentJsonOutput(BaseAgent):
@@ -40,10 +47,11 @@ class V1AgentJsonOutput(BaseAgent):
                 ctx, BASIC_LLM, ctx.event_title, ctx.event_description, context=None,
             )
         except ValueError as exc:
-            return AgentResult(prediction=0.5, confidence=None,
-                               reasoning=f"INVALID: {exc}")
+            reason = f"fail-closed neutral forecast (no valid model output): {exc}"
+            return AgentResult(prediction=0.5, confidence=None, reasoning=reason,
+                               beliefPath=belief_path_single_final(0.5, reason))
         return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
-                           reasoning=fc.reasoning)
+                           reasoning=fc.reasoning, beliefPath=belief_path_from_forecast(fc))
 
 
 if __name__ == "__main__":

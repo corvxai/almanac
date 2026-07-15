@@ -9,7 +9,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class NetworkSocketAttack(BaseAgent):
@@ -21,4 +21,6 @@ class NetworkSocketAttack(BaseAgent):
         s.settimeout(2.0)
         s.connect(("1.1.1.1", 443))
         s.close()
-        return AgentResult(prediction=0.5, reasoning="connected to 1.1.1.1:443")
+        reason = "connected to 1.1.1.1:443"
+        belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+        return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)

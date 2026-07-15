@@ -16,9 +16,11 @@ from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
 from src.core.config import AppConfig
 from src.core.events import Event
-from src.core.schemas import AgentResult, EventCategory, ResolutionRecord
+from src.core.schemas import AgentResult, BeliefStep, EventCategory, ResolutionRecord
 from src.storage.store import TraceStore
 from src.validator.orchestrator import Orchestrator
+
+_FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="test")]
 
 
 class _InMemoryStore(TraceStore):
@@ -62,7 +64,7 @@ class _NoopAgent(BaseAgent):
     agent_version = "0.1.0"
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
-        return AgentResult(prediction=0.5, reasoning="test")
+        return AgentResult(prediction=0.5, reasoning="test", beliefPath=_FINAL_BP)
 
 
 def _event() -> Event:
@@ -89,7 +91,7 @@ def test_run_agent_registers_with_miner_hotkey() -> None:
     orch = _docker_orchestrator(proxy)
     with patch(
         "src.validator.orchestrator.execute_agent",
-        return_value=AgentResult(prediction=0.5, reasoning="ok"),
+        return_value=AgentResult(prediction=0.5, reasoning="ok", beliefPath=_FINAL_BP),
     ), patch(
         "src.validator.orchestrator.fetch_polymarket_baseline", return_value=None
     ):
@@ -106,7 +108,7 @@ def test_run_all_agents_forwards_miner_hotkey() -> None:
     agents = [_NoopAgent(), _NoopAgent()]
     with patch(
         "src.validator.orchestrator.execute_agent",
-        return_value=AgentResult(prediction=0.5, reasoning="ok"),
+        return_value=AgentResult(prediction=0.5, reasoning="ok", beliefPath=_FINAL_BP),
     ), patch(
         "src.validator.orchestrator.fetch_polymarket_baseline", return_value=None
     ):

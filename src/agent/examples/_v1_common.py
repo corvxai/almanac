@@ -18,9 +18,16 @@ Output contract (replaces the old NL ``PREDICTION/CONVICTION/REASONING`` templat
   REJECTED, never defaulted.
 * ``request_forecast`` retries once (Instructor-style, appends the validation
   error) and raises ``ValueError`` if it still can't get a valid object. Agents
-  catch that and fail closed IN-BAND (return ``AgentResult`` with
-  ``confidence=None`` → the validator marks it invalid) rather than crashing or
-  emitting a silent 0.5.
+  catch that and fail closed IN-BAND by returning a **valid neutral forecast**
+  (``prediction=0.5`` with a single-``final`` belief path) rather than crashing or
+  emitting a silent, unvalidated 0.5. Confidence is optional; a fail-closed return
+  leaves it unset (``None``), which is stored but does not invalidate the
+  prediction. Genuinely malformed objects are still rejected by the Pydantic gate.
+* ``beliefPath`` is now REQUIRED on ``AgentResult`` (validated, not scored in MVP).
+  A success return builds it from the forecast: ``belief_path_from_forecast(fc)``.
+  A fail-closed return has no ``Forecast``, so it carries a minimal single-``final``
+  path: ``belief_path_single_final(0.5, <reason>)`` — a valid neutral forecast that
+  is scored normally.
 
 All external calls go through ``ctx.call_provider("openrouter", "chat_completion",
 ...)``. A "web search call" is a model id with the ``:online`` suffix or a
@@ -33,6 +40,8 @@ from __future__ import annotations
 import re
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+from src.core.schemas import BeliefStep
 
 # Model ladder (use exactly these — chosen for the POC) -----------------------
 BASIC_LLM = "openai/gpt-4o-mini"
@@ -206,6 +215,49 @@ def request_forecast(
         {"role": "user", "content": build_json_prompt(title, description, context)},
     ]
     return request_json(ctx, model, messages, max_retries=max_retries, max_tokens=max_tokens)
+
+
+# --- belief-path builders ----------------------------------------------------
+# beliefPath is required on AgentResult. These keep it one line for agents.
+
+def belief_path_from_forecast(fc: Forecast) -> list[BeliefStep]:
+    """Trivial single-``final`` belief path from a validated ``Forecast``.
+
+    A ladder agent that produces one final number exposes it as a single
+    ``final`` step carrying the forecast's probability and reasoning.
+    """
+    return [BeliefStep(step=0, type="final", probability=fc.prediction, text=fc.reasoning)]
+
+
+def belief_path_single_final(prediction: float, text: str) -> list[BeliefStep]:
+    """Single-``final`` belief path from a bare probability + reason string.
+
+    For fail-closed returns (a valid neutral forecast) and the sandbox
+    ``_attacks`` probes that have no ``Forecast`` object. ``text`` is required
+    non-empty by ``BeliefStep``, so an empty reason falls back to ``"n/a"``.
+    """
+    return [BeliefStep(step=0, type="final", probability=prediction, text=text or "n/a")]
+
+
+def belief_path_steps(pairs: list[tuple[float, str]]) -> list[BeliefStep]:
+    """Multi-step belief path from ordered ``(probability, text)`` pairs.
+
+    The first step is ``prior``, the last is ``final``, everything between is an
+    ``update``. Used by the orchestrated agent to expose its real trajectory.
+    """
+    if not pairs:
+        raise ValueError("belief_path_steps needs at least one (probability, text) pair")
+    last = len(pairs) - 1
+    steps: list[BeliefStep] = []
+    for i, (prob, text) in enumerate(pairs):
+        if i == last:
+            step_type = "final"
+        elif i == 0:
+            step_type = "prior"
+        else:
+            step_type = "update"
+        steps.append(BeliefStep(step=i, type=step_type, probability=prob, text=text or "n/a"))
+    return steps
 
 
 # --- provider plumbing (unchanged) -------------------------------------------

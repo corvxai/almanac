@@ -7,7 +7,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class NetworkUrllibAttack(BaseAgent):
@@ -17,7 +17,6 @@ class NetworkUrllibAttack(BaseAgent):
     def predict(self, ctx: ForecastingContext) -> AgentResult:
         with urllib.request.urlopen("https://example.com", timeout=2.0) as resp:
             body = resp.read(64)
-        return AgentResult(
-            prediction=0.5,
-            reasoning=f"reached example.com, got {len(body)} bytes",
-        )
+        reason = f"reached example.com, got {len(body)} bytes"
+        belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+        return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)

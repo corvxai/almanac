@@ -8,7 +8,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class MemoryHogAttack(BaseAgent):
@@ -20,4 +20,6 @@ class MemoryHogAttack(BaseAgent):
         for _ in range(2048):
             chunks.append(b"x" * (1024 * 1024))  # 1 MiB
         total = sum(len(c) for c in chunks)
-        return AgentResult(prediction=0.5, reasoning=f"allocated {total} bytes")
+        reason = f"allocated {total} bytes"
+        belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+        return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)

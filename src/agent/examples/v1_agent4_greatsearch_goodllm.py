@@ -16,6 +16,8 @@ from src.core.schemas import AgentResult, ReasoningStepType
 from src.agent.examples._v1_common import (
     AMAZING_SEARCH,
     GOOD_LLM,
+    belief_path_from_forecast,
+    belief_path_single_final,
     request_forecast,
     web_search,
 )
@@ -51,8 +53,9 @@ class V1Agent4GreatSearchGoodLLM(BaseAgent):
                 context=research, max_tokens=6000,
             )
         except ValueError as exc:
-            return AgentResult(prediction=0.5, confidence=None,
-                               reasoning=f"INVALID: {exc}")
+            reason = f"fail-closed neutral forecast (no valid model output): {exc}"
+            return AgentResult(prediction=0.5, confidence=None, reasoning=reason,
+                               beliefPath=belief_path_single_final(0.5, reason))
 
         ctx.record_reasoning_step(
             ReasoningStepType.BELIEF_UPDATE,
@@ -62,4 +65,4 @@ class V1Agent4GreatSearchGoodLLM(BaseAgent):
         )
 
         return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
-                           reasoning=fc.reasoning)
+                           reasoning=fc.reasoning, beliefPath=belief_path_from_forecast(fc))

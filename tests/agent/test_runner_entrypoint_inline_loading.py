@@ -6,12 +6,14 @@ from types import SimpleNamespace
 
 from src.agent import runner_entrypoint
 from src.agent.base import BaseAgent
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
+
+_FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="ok")]
 
 
 class _FakeAgent(BaseAgent):
     def predict(self, ctx):  # noqa: ANN001
-        return AgentResult(prediction=0.5, reasoning="ok")
+        return AgentResult(prediction=0.5, reasoning="ok", beliefPath=_FINAL_BP)
 
 
 class _DummyClient:

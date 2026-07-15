@@ -10,10 +10,18 @@ from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
 from src.core.config import AppConfig
 from src.core.events import Event
-from src.core.schemas import AgentResult, EventCategory, ProviderTier, ResolutionRecord
+from src.core.schemas import (
+    AgentResult,
+    BeliefStep,
+    EventCategory,
+    ProviderTier,
+    ResolutionRecord,
+)
 from src.gateway.providers.base import BaseProvider
 from src.storage.store import TraceStore
 from src.validator.orchestrator import Orchestrator
+
+_FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="test")]
 
 
 class _InMemoryStore(TraceStore):
@@ -59,7 +67,7 @@ class _SingleMarketAgent(BaseAgent):
 
     def predict(self, ctx: ForecastingContext) -> AgentResult:
         ctx.call_provider("polymarket", "get_market", {"market_slug": "test-market"})
-        return AgentResult(prediction=0.5, reasoning="test")
+        return AgentResult(prediction=0.5, reasoning="test", beliefPath=_FINAL_BP)
 
 
 def test_market_baseline_not_added_to_provider_calls() -> None:

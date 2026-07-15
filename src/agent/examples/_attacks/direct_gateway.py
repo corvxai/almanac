@@ -12,7 +12,7 @@ import httpx
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class DirectGatewayAttack(BaseAgent):
@@ -25,4 +25,6 @@ class DirectGatewayAttack(BaseAgent):
                 "https://gateway.arcratio.ai/v1/call",
                 json={"provider_id": "polymarket", "call_type": "get_market", "params": {}},
             )
-        return AgentResult(prediction=0.5, reasoning=f"gateway returned {resp.status_code}")
+        reason = f"gateway returned {resp.status_code}"
+        belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+        return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)
