@@ -24,6 +24,7 @@ from src.agent.examples._v1_common import (
     BASIC_LLM,
     GOOD_LLM,
     JSON_SYSTEM_PROMPT,
+    belief_path_steps,
     chat,
     request_forecast,
     request_json,
@@ -149,6 +150,9 @@ class V1Agent5Orchestrated(BaseAgent):
                 prediction=belief2, confidence=0.4,
                 reasoning=("Final reasoning model unparseable; returning the "
                            f"last updated belief {belief2:.2f}."),
+                beliefPath=belief_path_steps([
+                    (prior, prior_why), (belief, why1), (belief2, why2),
+                ]),
             )
 
         ctx.record_reasoning_step(
@@ -159,5 +163,10 @@ class V1Agent5Orchestrated(BaseAgent):
             inference_model_used=GOOD_LLM,
         )
 
-        return AgentResult(prediction=fc.prediction, confidence=fc.confidence,
-                           reasoning=fc.reasoning)
+        return AgentResult(
+            prediction=fc.prediction, confidence=fc.confidence, reasoning=fc.reasoning,
+            beliefPath=belief_path_steps([
+                (prior, prior_why), (belief, why1), (belief2, why2),
+                (fc.prediction, fc.reasoning),
+            ]),
+        )

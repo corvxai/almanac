@@ -19,7 +19,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 logger = logging.getLogger(__name__)
 
@@ -147,16 +147,13 @@ class ClaudeAgent(BaseAgent):
             })
         except Exception as exc:
             logger.warning("Claude messages failed (%s): %s", MODEL, exc)
-            return AgentResult(
-                prediction=0.5,
-                reasoning="Claude API unavailable. Returning neutral prediction.",
-            )
+            reason = "Claude API unavailable. Returning neutral prediction."
+            belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+            return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)
 
         text = _extract_text_from_claude_response(llm_response)
         prediction, confidence, reasoning = _parse_llm_output(text)
 
-        return AgentResult(
-            prediction=prediction,
-            confidence=confidence,
-            reasoning=reasoning,
-        )
+        belief = [BeliefStep(step=0, type="final", probability=prediction, text=reasoning)]
+        return AgentResult(prediction=prediction, confidence=confidence,
+                           reasoning=reasoning, beliefPath=belief)

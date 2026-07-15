@@ -10,10 +10,10 @@ import hashlib
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +234,26 @@ class PredictionOutput(BaseModel):
         return v
 
 
+class BeliefStep(BaseModel):
+    """One step in the agent's belief path — the miner-written probability trajectory.
+
+    ``beliefPath`` is a first-class, miner-authored sequence of the agent's
+    probability as it reasons (prior -> updates -> final). camelCase field names
+    (``usedCall``/``usedSources``) are verbatim so miner JSON validates directly
+    through ``AgentResult.model_validate_json`` at the docker boundary. Validated
+    but NOT scored in MVP; stored (raw) for the phase-2 grounding signal.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    step: int = Field(ge=0)
+    type: Literal["prior", "update", "final"]
+    probability: float = Field(ge=0.0, le=1.0)
+    text: str = Field(min_length=1)
+    usedCall: Optional[str] = None
+    usedSources: Optional[list[int]] = None
+
+
 # ---------------------------------------------------------------------------
 # Agent return type — the minimal contract agents must satisfy
 # ---------------------------------------------------------------------------
@@ -241,16 +261,30 @@ class PredictionOutput(BaseModel):
 class AgentResult(BaseModel):
     """What an agent returns. This is the entire agent-side contract.
 
-    Agents return a probability and a free-text reasoning string.
-    Everything else is optional. The validator/trace assembler is
-    responsible for building the structured EvidenceDigest from this
+    Agents return a probability, a free-text reasoning string, and the belief
+    path (prior -> updates -> final; a single ``final`` step is the trivial valid
+    path). ``beliefPath`` is required and validated but NOT scored in MVP; it is
+    stored for the phase-2 signal. ``confidence`` stays optional and unscored.
+    The validator/trace assembler builds the structured EvidenceDigest from this
     plus the gateway call logs.
     """
 
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
     prediction: float = Field(ge=0, le=1)
-    reasoning: str
+    reasoning: str = Field(min_length=1)
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    beliefPath: list[BeliefStep] = Field(min_length=1)
     metadata: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _check_belief_path(self) -> "AgentResult":
+        finals = [s for s in self.beliefPath if s.type == "final"]
+        if len(finals) != 1 or self.beliefPath[-1].type != "final":
+            raise ValueError("beliefPath must end with exactly one 'final' step")
+        if round(self.beliefPath[-1].probability, 4) != round(self.prediction, 4):
+            raise ValueError("final belief-path probability must equal prediction")
+        return self
 
 
 class ResolutionRecord(BaseModel):
@@ -287,8 +321,12 @@ class EvidenceDigest(BaseModel):
     prediction_output: PredictionOutput
     resolution_record: ResolutionRecord = Field(default_factory=ResolutionRecord)
     trace_integrity: TraceIntegrity
-    # Disabled phase-2 seam: reserves space for the DAG / belief-path / ablation
-    # verification machinery so turning it on later is a reprocess, not a schema break.
+    # Phase-2 seam. The graph-scoring / ablation verification machinery stays
+    # DISABLED (turning it on later is a reprocess of the flat arrays, not a schema
+    # break). The one part populated now is future_graph["beliefPath"]: the raw
+    # miner-declared belief path preserved intact (the type labels and
+    # usedCall/usedSources links the reasoning_chain vocab drops), stored UNSCORED
+    # as the phase-2 grounding hook.
     future_graph: Optional[dict[str, Any]] = None
 
     def compute_trace_hash(self) -> str:

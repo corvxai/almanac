@@ -11,7 +11,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class SimpleAgent(BaseAgent):
@@ -60,7 +60,6 @@ class SimpleAgent(BaseAgent):
             f"Blended 80/20 market+sentiment → {final_prob:.3f}."
         )
 
-        return AgentResult(
-            prediction=round(final_prob, 4),
-            reasoning=reasoning,
-        )
+        prob = round(final_prob, 4)
+        belief = [BeliefStep(step=0, type="final", probability=prob, text=reasoning)]
+        return AgentResult(prediction=prob, reasoning=reasoning, beliefPath=belief)

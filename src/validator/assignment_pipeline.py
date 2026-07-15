@@ -187,7 +187,9 @@ def normalize_prediction_values(
 
     confidence_raw = digest.prediction_output.confidence
     if confidence_raw is None:
-        reasons.append("confidence_missing")
+        # Confidence is optional (stored, unscored). A missing value must never
+        # invalidate a well-formed prediction or count toward the invalid gate, so
+        # do not append an invalid reason here; only fill the numeric slot.
         confidence = INVALID_CONFIDENCE_SENTINEL
     else:
         confidence = _coerce_unit_interval(

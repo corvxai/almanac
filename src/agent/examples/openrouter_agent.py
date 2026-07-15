@@ -14,7 +14,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 MODELS = [
     #"google/gemini-2.5-flash",
@@ -167,16 +167,13 @@ class OpenRouterAgent(BaseAgent):
                 continue
 
         if llm_response is None:
-            return AgentResult(
-                prediction=price,
-                reasoning=f"LLM unavailable. Falling back to market price: {price:.4f}",
-            )
+            reason = f"LLM unavailable. Falling back to market price: {price:.4f}"
+            belief = [BeliefStep(step=0, type="final", probability=price, text=reason)]
+            return AgentResult(prediction=price, reasoning=reason, beliefPath=belief)
 
         content = _extract_text_from_openrouter_response(llm_response)
         prediction, confidence, reasoning = _parse_llm_output(content)
 
-        return AgentResult(
-            prediction=prediction,
-            confidence=confidence,
-            reasoning=reasoning,
-        )
+        belief = [BeliefStep(step=0, type="final", probability=prediction, text=reasoning)]
+        return AgentResult(prediction=prediction, confidence=confidence,
+                           reasoning=reasoning, beliefPath=belief)

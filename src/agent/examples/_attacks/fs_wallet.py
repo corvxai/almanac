@@ -13,7 +13,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class FsWalletAttack(BaseAgent):
@@ -31,7 +31,6 @@ class FsWalletAttack(BaseAgent):
                     )
                 except OSError:
                     pass
-        return AgentResult(
-            prediction=0.5,
-            reasoning="found: " + ",".join(found) if found else "wallet not visible",
-        )
+        reason = "found: " + ",".join(found) if found else "wallet not visible"
+        belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+        return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)
