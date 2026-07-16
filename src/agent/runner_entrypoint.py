@@ -48,6 +48,10 @@ from src.agent.context import ForecastingContext
 from src.agent.sandbox_gateway import SandboxGateway
 from src.core.events import Event
 from src.gateway.client import RemoteProvider
+from src.gateway.provider_capabilities import (
+    provider_default_call_type,
+    provider_supports_completions,
+)
 
 
 # httpx URL the RemoteProvider's preconfigured client points at. The host is
@@ -181,10 +185,16 @@ def main(argv: list[str] | None = None) -> int:
     client = _make_uds_client(socket_path, run_id)
 
     def _provider_factory(provider_id: str) -> RemoteProvider:
+        # Pass the provider's real capabilities so typed data-provider calls
+        # (polymarket.get_market, web_search.search) forward their `params`
+        # instead of being coerced to an empty completions payload — otherwise
+        # market_slug/query never leave the sandbox (agent can't pick a market).
         return RemoteProvider(
             provider_id=provider_id,
             client=client,
             headers={"X-Run-Id": run_id},
+            default_call_type=provider_default_call_type(provider_id),
+            supports_completions=provider_supports_completions(provider_id),
         )
 
     gateway = SandboxGateway(provider_factory=_provider_factory)

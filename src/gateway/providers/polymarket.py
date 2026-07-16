@@ -36,14 +36,18 @@ class PolymarketProvider(BaseProvider):
     # -- mock handlers --------------------------------------------------------
 
     def _mock_get_market(self, params: dict[str, Any]) -> dict[str, Any]:
-        base_price = random.uniform(0.15, 0.85)
+        slug = params.get("market_slug", "mock-market")
+        # Deterministic per slug so every agent evaluating the SAME event sees
+        # the SAME price (local test double; keeps multi-miner scoring legible).
+        rng = random.Random(slug)
+        base_price = rng.uniform(0.15, 0.85)
         return {
-            "market_slug": params.get("market_slug", "mock-market"),
+            "market_slug": slug,
             "price": round(base_price, 4),
             "probability": round(base_price, 4),
-            "volume_24h": round(random.uniform(50_000, 2_000_000), 2),
-            "total_volume": round(random.uniform(5_000_000, 50_000_000), 2),
-            "liquidity": round(random.uniform(100_000, 5_000_000), 2),
+            "volume_24h": round(rng.uniform(50_000, 2_000_000), 2),
+            "total_volume": round(rng.uniform(5_000_000, 50_000_000), 2),
+            "liquidity": round(rng.uniform(100_000, 5_000_000), 2),
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 

@@ -34,12 +34,14 @@ from src.core.schemas import ProviderCall, ProviderTier
 from src.gateway.client import _DEFAULT_TIERS, optional_completions_fields
 from src.gateway.constants import gateway_service_url
 from src.gateway.gateway import build_provider_call_record, default_summarise_params
+from src.gateway.provider_capabilities import DATA_PROVIDERS, provider_default_call_type
 from src.gateway.signing import LoadedKeypair, load_hotkey
 from src.gateway.track_config import is_provider_allowed
 from src.gateway.validator_protocol import canonical_json, sign_validator_completions_request
 
 logger = logging.getLogger("arcratio.local_proxy")
-_NON_COMPLETIONS_PROVIDERS = {"polymarket", "web_search"}
+# Data providers whose typed `params` must be forwarded (single source of truth).
+_NON_COMPLETIONS_PROVIDERS = DATA_PROVIDERS
 
 
 # ---------------------------------------------------------------------------
@@ -412,17 +414,7 @@ def _forward_and_record(
 
 
 def _default_call_type(provider_id: str) -> str:
-    defaults = {
-        "anthropic": "messages",
-        "openrouter": "chat_completion",
-        "openai": "chat_completion",
-        "grok": "chat_completion",
-        "gemini": "generate_content",
-        "perplexity": "chat_completion",
-        "polymarket": "get_market",
-        "web_search": "search",
-    }
-    return defaults.get(provider_id, "chat_completion")
+    return provider_default_call_type(provider_id)
 
 
 def _params_from_completions_payload(payload: dict[str, Any]) -> dict[str, Any]:
