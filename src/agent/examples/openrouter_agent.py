@@ -70,25 +70,25 @@ def _parse_llm_output(text: str) -> tuple[float, float | None, str]:
         cleaned = line.strip().strip("*`_ ").strip()
         if cleaned.startswith("PREDICTION:"):
             try:
-                prediction = max(0.0, min(1.0, float(cleaned.replace("PREDICTION:", "").strip())))
+                prediction = max(0.0, min(1.0, float(cleaned.replace("PREDICTION:", "").strip().strip("*`_ "))))
             except ValueError:
                 pass
         elif cleaned.startswith("CONVICTION:"):
             try:
-                confidence = max(0.0, min(1.0, float(cleaned.replace("CONVICTION:", "").strip())))
+                confidence = max(0.0, min(1.0, float(cleaned.replace("CONVICTION:", "").strip().strip("*`_ "))))
             except ValueError:
                 pass
         elif cleaned.startswith("REASONING:"):
             reasoning = cleaned.replace("REASONING:", "").strip()
     if prediction == 0.5:
-        match = re.search(r"(?im)\bPREDICTION\b\s*:\s*([0-9]*\.?[0-9]+)", text)
+        match = re.search(r"(?im)\bPREDICTION\b\s*:\s*[*`_\s]*([0-9]*\.?[0-9]+)", text)
         if match:
             try:
                 prediction = max(0.0, min(1.0, float(match.group(1))))
             except ValueError:
                 pass
     if confidence is None:
-        match = re.search(r"(?im)\b(?:CONVICTION|CONFIDENCE)\b\s*:\s*([0-9]*\.?[0-9]+)", text)
+        match = re.search(r"(?im)\b(?:CONVICTION|CONFIDENCE)\b\s*:\s*[*`_\s]*([0-9]*\.?[0-9]+)", text)
         if match:
             try:
                 confidence = max(0.0, min(1.0, float(match.group(1))))
@@ -173,6 +173,7 @@ class OpenRouterAgent(BaseAgent):
 
         content = _extract_text_from_openrouter_response(llm_response)
         prediction, confidence, reasoning = _parse_llm_output(content)
+        reasoning = (reasoning or "").strip() or f"Model returned no reasoning; using parsed probability {prediction:.4f}."
 
         belief = [BeliefStep(step=0, type="final", probability=prediction, text=reasoning)]
         return AgentResult(prediction=prediction, confidence=confidence,
