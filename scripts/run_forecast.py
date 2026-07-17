@@ -255,13 +255,11 @@ def main() -> None:
                 f"(source={event.source or 'n/a'}, source_id={event.source_id or 'n/a'}) ..."
             )
             digest = orchestrator.run_agent(event, agent, miner_hotkey=miner_hotkey)
-            baseline = None
-            if digest.prediction_output.metadata:
-                baseline = digest.prediction_output.metadata.get("market_baseline")
+            baseline = digest.execution_context.market_price_at_prediction
             if baseline is None:
                 print("  Baseline: unavailable for this run.")
             else:
-                print("  Baseline: attached to trace metadata.")
+                print(f"  Baseline: market YES price {baseline:.4f} (sealed in trace execution_context).")
             print_summary(digest, trace_idx)
             trace_idx += 1
 

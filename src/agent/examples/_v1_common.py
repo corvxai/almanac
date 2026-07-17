@@ -226,7 +226,7 @@ def belief_path_from_forecast(fc: Forecast) -> list[BeliefStep]:
     A ladder agent that produces one final number exposes it as a single
     ``final`` step carrying the forecast's probability and reasoning.
     """
-    return [BeliefStep(step=0, type="final", probability=fc.prediction, text=fc.reasoning)]
+    return [BeliefStep(step=0, type="final", probability=fc.prediction, text=fc.reasoning or "n/a")]
 
 
 def belief_path_single_final(prediction: float, text: str) -> list[BeliefStep]:
