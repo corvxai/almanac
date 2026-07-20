@@ -57,7 +57,7 @@ def test_score_agent_predictions_basic() -> None:
     # UID 2 has consistently stronger probability on the resolved side than UID 1.
     assert out[0] == 0.0
     assert 0.0 < out[1] < out[2]
-    assert out[1] == pytest.approx(scoring.PARETO_MU)
+    assert out[2] == pytest.approx(scoring.PARETO_MU + scoring.PARETO_BOOST)
 
 
 def test_score_agent_predictions_filters_invalid_rows() -> None:
