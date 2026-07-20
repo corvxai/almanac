@@ -8,7 +8,7 @@ import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from src.agent.base import BaseAgent
@@ -53,10 +53,8 @@ def _reasoning_step_payload(raw_step: dict[str, object]) -> dict[str, object]:
         "providerId": raw_step.get("provider_id"),
         "inputEvidenceRefs": raw_step.get("input_evidence_refs") or [],
         "reasoningText": raw_step.get("reasoning_text"),
-        "agentInterpretation": raw_step.get("agent_interpretation"),
         "intermediateProbability": raw_step.get("intermediate_probability"),
         "confidenceDelta": raw_step.get("confidence_delta"),
-        "conflictSignals": raw_step.get("conflict_signals"),
         "inferenceModelUsed": raw_step.get("inference_model_used"),
         "stage": None,
         "origin": "reasoningChain",
@@ -72,6 +70,35 @@ def _build_reasoning_steps(raw_reasoning_chain: list[dict[str, object]]) -> list
 
 def _build_provider_calls(raw_provider_calls: list[dict[str, object]]) -> list[dict[str, object]]:
     return [_camelize(call) for call in raw_provider_calls]
+
+
+_REASONING_SUMMARY_REF = (
+    "#/reasoningTrace/trace/evidenceDigest/predictionOutput/reasoningSummary"
+)
+
+
+def _compact_evidence_digest(
+    digest_dump: dict[str, object],
+    reasoning_summary: object,
+) -> dict[str, object]:
+    compact = {
+        key: value
+        for key, value in digest_dump.items()
+        if key not in {"provider_calls", "reasoning_chain"}
+    }
+    future_graph = compact.get("future_graph")
+    if isinstance(reasoning_summary, str) and isinstance(future_graph, dict):
+        belief_path = future_graph.get("beliefPath")
+        if isinstance(belief_path, list):
+            for belief_step in belief_path:
+                if (
+                    isinstance(belief_step, dict)
+                    and belief_step.get("type") == "final"
+                    and belief_step.get("text") == reasoning_summary
+                ):
+                    belief_step.pop("text")
+                    belief_step["text_ref"] = _REASONING_SUMMARY_REF
+    return cast(dict[str, object], _camelize(compact))
 
 
 class _InlineCodeSandboxAgent(BaseAgent):
@@ -189,7 +216,9 @@ def normalize_prediction_values(
 
     confidence_raw = digest.prediction_output.confidence
     if confidence_raw is None:
-        reasons.append("confidence_missing")
+        # Confidence is optional (stored, unscored). A missing value must never
+        # invalidate a well-formed prediction or count toward the invalid gate, so
+        # do not append an invalid reason here; only fill the numeric slot.
         confidence = INVALID_CONFIDENCE_SENTINEL
     else:
         confidence = _coerce_unit_interval(
@@ -252,7 +281,20 @@ def build_prediction_submit_payload(
     execution_context = digest_dump.get("execution_context", {})
     trace_integrity = digest_dump.get("trace_integrity", {})
     prediction_output = digest_dump.get("prediction_output", {})
-    evidence_digest = _camelize(digest_dump)
+    reasoning_summary = (
+        prediction_output.get("reasoning_summary")
+        if isinstance(prediction_output, dict)
+        else None
+    )
+    for step in reversed(steps):
+        if (
+            isinstance(reasoning_summary, str)
+            and step.get("reasoningText") == reasoning_summary
+        ):
+            step.pop("reasoningText")
+            step["reasoningTextRef"] = _REASONING_SUMMARY_REF
+            break
+    evidence_digest = _compact_evidence_digest(digest_dump, reasoning_summary)
 
     yes_id, no_id = resolve_binary_outcome_ids(assignment)
     (
@@ -291,6 +333,12 @@ def build_prediction_submit_payload(
                 "latencyMs": digest.execution_context.execution_duration_ms,
                 "predictionIsInvalid": not is_valid_prediction,
                 "predictionInvalidReason": invalid_reason,
+                # F8: confidence stays optional (kept for training, not required). We
+                # still send confidence:0.0 (the Sub41 DTO needs a number), so carry an
+                # explicit flag letting consumers exclude omitters from confidence
+                # stats. rawObserved.confidence already carries the 'None' repr; this is
+                # the machine-readable version.
+                "confidenceOmitted": digest.prediction_output.confidence is None,
                 "predictionValidation": {
                     "isValid": is_valid_prediction,
                     "reasons": invalid_reasons,
@@ -308,15 +356,16 @@ def build_prediction_submit_payload(
             "traceSummary": {
                 "strategy": "validator-assignment-pipeline",
                 "executionId": execution_context.get("execution_id"),
+                # F6 / TODO(phase-2): this traceHash was sealed over the PRE-COMPACTION
+                # snake_case digest (see EvidenceDigest.seal). It cannot be recomputed
+                # from this compacted camelCase payload and nothing in apps/api verifies
+                # it today — it is a local-store integrity marker only. Phase-2: add a
+                # second hash over the exact wire payload and verify server-side.
                 "traceHash": trace_integrity.get("trace_hash"),
                 "providerCallCount": len(provider_calls),
                 "reasoningStepCount": len(steps),
-                "totalEvidenceItems": trace_integrity.get("total_evidence_items"),
                 "totalProviderCost": trace_integrity.get("total_provider_cost"),
                 "usageTotals": _camelize(trace_integrity.get("usage_totals")),
-                "reasoningSummary": prediction_output.get("reasoning_summary"),
-                "keyDrivers": prediction_output.get("key_drivers") or [],
-                "keyUncertainties": prediction_output.get("key_uncertainties") or [],
                 "contrarianFlag": prediction_output.get("contrarian_flag"),
             },
             "modelMetadata": {

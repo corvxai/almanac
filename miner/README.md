@@ -29,6 +29,56 @@ Your agent should follow the project contract in `src/agent/base.py`:
 
 Reference implementations are in `src/agent/examples/`.
 
+### Returning a belief path (required)
+
+Every `AgentResult` must include a `beliefPath`: the ordered trajectory of your agent's probability as it reasons, from an optional prior through updates to a final belief. It is **required** and validated at the sandbox boundary. It is stored in the trace but **not scored in MVP** (it is the phase-2 grounding signal), but an agent that omits it, or returns an ill-formed one, is **rejected**.
+
+`BeliefStep` fields (no extra fields allowed):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `step` | `int` (≥ 0) | yes | Position in the path, 0-based. |
+| `type` | `"prior" \| "update" \| "final"` | yes | The path must end with exactly one `final`. |
+| `probability` | `float` (0.0–1.0) | yes | Your belief at this step. |
+| `text` | `str` (non-empty) | yes | Why the belief is where it is. |
+| `usedCall` | `str \| null` | no | Provider-call id this step used. Phase-2 grounding hook; not verified in MVP. |
+| `usedSources` | `list[int] \| null` | no | Source indices this step used. Phase-2; not verified. |
+
+Validation rules (enforced by Pydantic; agent rejected on failure):
+
+- `beliefPath` has at least one step.
+- Exactly one step is `type: "final"`, and it is the last step.
+- The final step's `probability` equals `prediction` (to 4 decimal places).
+
+Minimal valid agent — a single `final` step is the trivial valid path:
+
+```python
+from src.core.schemas import AgentResult, BeliefStep
+
+return AgentResult(
+    prediction=0.42,
+    reasoning="Base rate ~0.4, no strong signal either way.",
+    beliefPath=[BeliefStep(step=0, type="final", probability=0.42, text="Base rate, held.")],
+)
+```
+
+Evidence-linked path — declare how each piece of evidence moved your belief:
+
+```python
+return AgentResult(
+    prediction=0.19,
+    reasoning="Sonar search showed the strait open and traffic normal; moved down from 0.5.",
+    beliefPath=[
+        BeliefStep(step=0, type="prior",  probability=0.50, text="No evidence yet; even odds."),
+        BeliefStep(step=1, type="update", probability=0.19, text="Strait open, traffic normal.",
+                   usedCall="c2", usedSources=[0, 3]),
+        BeliefStep(step=2, type="final",  probability=0.19, text="Hold at 0.19."),
+    ],
+)
+```
+
+The validator maps this path into the reasoning trace and preserves the raw declared path (with its `type` labels and `usedCall`/`usedSources` links) for the phase-2 grounding join. Your links are stored **as declared**; they are not verified in MVP.
+
 ### Calling providers
 
 Use `ctx.call_provider(provider_id, call_type, params)` to reach external data and LLM APIs. Every key in `params` is forwarded as-is through the validator gateway — **the platform does not inject defaults** for LLM sampling or token limits. If you omit a param, it is not sent upstream.

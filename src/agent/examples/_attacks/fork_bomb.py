@@ -10,7 +10,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class ForkBombAttack(BaseAgent):
@@ -29,4 +29,6 @@ class ForkBombAttack(BaseAgent):
                 raise RuntimeError("fork blocked by pids_limit (good)")
             except OSError as exc:
                 raise RuntimeError(f"fork failed: {exc}") from exc
-        return AgentResult(prediction=0.5, reasoning="forked successfully")
+        reason = "forked successfully"
+        belief = [BeliefStep(step=0, type="final", probability=0.5, text=reason)]
+        return AgentResult(prediction=0.5, reasoning=reason, beliefPath=belief)

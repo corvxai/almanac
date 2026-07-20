@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -67,12 +68,14 @@ class ExtractionMethod(str, Enum):
 
 
 class ReasoningStepType(str, Enum):
-    EVIDENCE_GATHERING = "evidence_gathering"
-    SYNTHESIS = "synthesis"
-    CONFLICT_RESOLUTION = "conflict_resolution"
-    PRIOR_UPDATE = "prior_update"
-    CALIBRATION_CHECK = "calibration_check"
-    FINAL_ASSIGNMENT = "final_assignment"
+    # v1.1.0 belief-path vocab (replaces the v0.1 six-value set).
+    PRIOR = "prior"                  # initial belief, no evidence yet
+    BELIEF_UPDATE = "belief_update"  # each later revision; the terminal step is the last one
+    GAP_QUERY = "gap_query"          # asks for a missing piece; sets no new belief
+
+
+# Single source of truth for the trace schema version (used by the assembler too).
+TRACE_SCHEMA_VERSION = "1.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +122,27 @@ class ExtractedEvidence(BaseModel):
     content: str
     extraction_method: ExtractionMethod
     numeric_value: Optional[float] = None
+    # v1 additive fields: bind a claim to a witnessed web source so the fact-gate
+    # can check it. Null on non-web evidence such as an LLM self-report.
+    source_url: Optional[str] = None
+    source_title: Optional[str] = None
+    excerpt: Optional[str] = None
+    witness_call_index: Optional[int] = None
+    admissible: Optional[bool] = None
+    counts_toward_grounding: Optional[bool] = None
+
+
+class Source(BaseModel):
+    """A single web source a search call returned — the fact-gate substrate.
+
+    ``url`` is required; ``counts_toward_grounding`` is the gateway's verdict on
+    whether this source is admissible evidence for scoring's invalid-rate gate.
+    """
+
+    url: str
+    title: Optional[str] = None
+    excerpt: Optional[str] = None
+    counts_toward_grounding: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +159,8 @@ class ExecutionContext(BaseModel):
     timestamp_end: datetime
     execution_duration_ms: int
     sandbox_environment: SandboxEnvironment
+    # v1 phase-2 hook: validator-written market baseline at prediction time.
+    market_price_at_prediction: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class EventSnapshot(BaseModel):
@@ -159,6 +185,9 @@ class ProviderCall(BaseModel):
     usage_meta: Optional[UsageMeta] = None
     provider_usage_raw: Optional[dict[str, Any]] = None
     extracted_evidence: list[ExtractedEvidence]
+    # v1: every link the search returned (audit trail), distinct from the cited
+    # source_url on each evidence item. Typed Source (url required).
+    sources_accessed: list[Source] = Field(default_factory=list)
     raw_response_hash: str
     latency_ms: int = Field(ge=0)
     cost_units: float = Field(ge=0)
@@ -174,14 +203,14 @@ class ReasoningStep(BaseModel):
 
     step_index: int = Field(ge=0)
     step_type: ReasoningStepType
+    # Phase-2 hooks: kept nullable, no verification wired yet. The assembler emits
+    # [] for input_evidence_refs (not a positional fake) until the real join exists.
     provider_call_index: Optional[int] = Field(default=None, ge=0)
     provider_id: Optional[str] = None
     input_evidence_refs: list[int] = Field(default_factory=list)
     reasoning_text: str
-    agent_interpretation: Optional[str] = None
     intermediate_probability: Optional[float] = Field(default=None, ge=0, le=1)
     confidence_delta: Optional[float] = None
-    conflict_signals: Optional[list[str]] = None
     inference_model_used: Optional[str] = None
 
 
@@ -192,11 +221,9 @@ class PredictionOutput(BaseModel):
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
     confidence_interval: Optional[tuple[float, float]] = None
     reasoning_summary: str = ""
-    key_drivers: list[str] = Field(default_factory=list)
-    key_uncertainties: list[str] = Field(default_factory=list)
+    # Collected-not-scored (no live pillar reads these); kept nullable.
     contrarian_flag: bool = False
     ensemble_at_prediction: Optional[float] = Field(default=None, ge=0, le=1)
-    metadata: Optional[dict[str, Any]] = None
 
     @field_validator("confidence_interval")
     @classmethod
@@ -208,6 +235,30 @@ class PredictionOutput(BaseModel):
         return v
 
 
+class BeliefStep(BaseModel):
+    """One step in the agent's belief path — the miner-written probability trajectory.
+
+    ``beliefPath`` is a first-class, miner-authored sequence of the agent's
+    probability as it reasons (prior -> updates -> final). camelCase field names
+    (``usedCall``/``usedSources``) are verbatim so miner JSON validates directly
+    through ``AgentResult.model_validate_json`` at the docker boundary. Validated
+    but NOT scored in MVP; stored (raw) for the phase-2 grounding signal.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    step: int = Field(ge=0)
+    type: Literal["prior", "update", "final"]
+    probability: float = Field(ge=0.0, le=1.0)
+    # F4: cap belief text. It is TRIPLICATED downstream (future_graph.beliefPath[].text,
+    # steps[].reasoningText, and reasoning_summary) and compaction strips only ONE copy,
+    # so an uncapped step can blow the gateway 1MB submit ceiling. See the aggregate
+    # byte-budget guard in tests/agent/test_v1_json_contract.py.
+    text: str = Field(min_length=1, max_length=4000)
+    usedCall: Optional[str] = None
+    usedSources: Optional[list[int]] = None
+
+
 # ---------------------------------------------------------------------------
 # Agent return type — the minimal contract agents must satisfy
 # ---------------------------------------------------------------------------
@@ -215,16 +266,38 @@ class PredictionOutput(BaseModel):
 class AgentResult(BaseModel):
     """What an agent returns. This is the entire agent-side contract.
 
-    Agents return a probability and a free-text reasoning string.
-    Everything else is optional. The validator/trace assembler is
-    responsible for building the structured EvidenceDigest from this
+    Agents return a probability, a free-text reasoning string, and the belief
+    path (prior -> updates -> final; a single ``final`` step is the trivial valid
+    path). ``beliefPath`` is required and validated but NOT scored in MVP; it is
+    stored for the phase-2 signal. ``confidence`` stays optional and unscored.
+    The validator/trace assembler builds the structured EvidenceDigest from this
     plus the gateway call logs.
     """
 
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
     prediction: float = Field(ge=0, le=1)
-    reasoning: str
+    # F4: cap the free-text reasoning; it also lands in reasoning_summary and (via the
+    # terminal belief step) is triplicated, so the aggregate submit payload must stay
+    # under the gateway 1MB ceiling. Enforced at this docker boundary so an oversize
+    # agent fails locally before any submit.
+    reasoning: str = Field(min_length=1, max_length=8000)
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    beliefPath: list[BeliefStep] = Field(min_length=1, max_length=32)
     metadata: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _check_belief_path(self) -> "AgentResult":
+        finals = [s for s in self.beliefPath if s.type == "final"]
+        if len(finals) != 1 or self.beliefPath[-1].type != "final":
+            raise ValueError("beliefPath must end with exactly one 'final' step")
+        # F11: tolerance compare, not round(_,4) equality. Every uploaded agent
+        # validates through here, so a hard 4dp equality rejects honest agents at
+        # .xxxx5 rounding boundaries. 5e-5 is tighter than the 6dp submit rounding,
+        # so no real disagreement leaks through.
+        if not math.isclose(self.beliefPath[-1].probability, self.prediction, abs_tol=5e-5):
+            raise ValueError("final belief-path probability must equal prediction")
+        return self
 
 
 class ResolutionRecord(BaseModel):
@@ -242,12 +315,8 @@ class TraceIntegrity(BaseModel):
     """Cryptographic integrity envelope — produced by the validator."""
 
     trace_hash: str
-    merkle_root: Optional[str] = None
-    anchor_tx: Optional[str] = None
-    anchor_timestamp: Optional[datetime] = None
-    trace_schema_version: str = "0.1.0"
+    trace_schema_version: str = TRACE_SCHEMA_VERSION
     total_provider_cost: float = Field(ge=0)
-    total_evidence_items: int = Field(ge=0)
     usage_totals: Optional[UsageTotals] = None
 
 
@@ -265,6 +334,13 @@ class EvidenceDigest(BaseModel):
     prediction_output: PredictionOutput
     resolution_record: ResolutionRecord = Field(default_factory=ResolutionRecord)
     trace_integrity: TraceIntegrity
+    # Phase-2 seam. The graph-scoring / ablation verification machinery stays
+    # DISABLED (turning it on later is a reprocess of the flat arrays, not a schema
+    # break). The one part populated now is future_graph["beliefPath"]: the raw
+    # miner-declared belief path preserved intact (the type labels and
+    # usedCall/usedSources links the reasoning_chain vocab drops), stored UNSCORED
+    # as the phase-2 grounding hook.
+    future_graph: Optional[dict[str, Any]] = None
 
     def compute_trace_hash(self) -> str:
         """SHA-256 of the digest with trace_hash zeroed out to avoid circularity."""
@@ -279,7 +355,16 @@ class EvidenceDigest(BaseModel):
         return hashlib.sha256(payload).hexdigest()
 
     def seal(self) -> "EvidenceDigest":
-        """Return a copy with trace_hash computed and set."""
+        """Return a copy with trace_hash computed and set.
+
+        F6 / TODO(phase-2): this hash is sealed over the PRE-COMPACTION snake_case
+        digest. The traceHash transmitted in the submit payload therefore covers a
+        digest the server never receives (the wire payload is compacted + camelCased),
+        so it is NOT recomputable / verifiable server-side today. It remains valid as a
+        LOCAL-store integrity marker (json_store.get_trace.verify_integrity over the
+        intact on-disk snapshot). Phase-2: add a second hash over the exact compacted
+        camelCase payload and verify it in apps/api when scoring consumes traces.
+        """
         h = self.compute_trace_hash()
         return self.model_copy(
             update={

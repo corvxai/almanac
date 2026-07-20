@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from src.core.config import AppConfig
+from src.core.events import Event
+from src.core.schemas import (
+    AgentResult,
+    BeliefStep,
+    EventCategory,
+    ExecutionContext,
+    ProviderCall,
+    ProviderTier,
+    ResponseMeta,
+    SandboxEnvironment,
+)
 from src.validator.assignment_pipeline import (
     build_prediction_submit_payload,
     build_sandbox_assignment_agent,
@@ -14,6 +27,7 @@ from src.validator.assignment_pipeline import (
     resolve_binary_outcome_ids,
 )
 from src.validator.orchestrator_api import OrchestratorAssignment
+from src.validator.trace_assembler import assemble_trace
 
 
 def _assignment(outcomes: list[dict]) -> OrchestratorAssignment:
@@ -287,6 +301,8 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert isinstance(trace["providerCalls"], list)
     assert isinstance(trace["steps"], list)
     assert isinstance(trace["evidenceDigest"], dict)
+    assert "providerCalls" not in trace["evidenceDigest"]
+    assert "reasoningChain" not in trace["evidenceDigest"]
 
     steps = trace["steps"]
     assert all(step["origin"] == "reasoningChain" for step in steps)
@@ -307,6 +323,7 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
     assert trace_summary["providerCallCount"] == len(trace["providerCalls"])
     assert trace_summary["reasoningStepCount"] == len(trace["steps"])
     assert trace_summary["usageTotals"]["totalTokens"] == 769
+    assert "reasoningSummary" not in trace_summary
 
     _assert_no_snake_case_keys(payload["reasoningTrace"])
 
@@ -409,7 +426,96 @@ def test_build_prediction_submit_payload_marks_invalid_confidence_out_of_range()
     )
 
 
-def test_build_prediction_submit_payload_marks_invalid_when_confidence_missing() -> None:
+def _real_digest_with_belief_path(prediction: float, confidence: float | None):
+    """A REAL sealed digest (built via the assembler) carrying a multi-step
+    beliefPath, so the submit path is exercised end to end rather than against a
+    hand-faked SimpleNamespace digest.
+    """
+    now = datetime(2026, 4, 24, tzinfo=timezone.utc)
+    event = Event(
+        event_id=uuid4(), title="Will X happen?", description="Binary event.",
+        category=EventCategory.OTHER, resolution_criteria="YES iff X occurs.",
+        resolution_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc), created_at=now,
+    )
+    exec_ctx = ExecutionContext(
+        execution_id=uuid4(), agent_id=uuid4(), agent_version="1.0.0", event_id=uuid4(),
+        validator_id=uuid4(), timestamp_start=now, timestamp_end=now,
+        execution_duration_ms=1, sandbox_environment=SandboxEnvironment.DOCKER_RUNC,
+    )
+    provider_call = ProviderCall(
+        call_index=0, provider_id="openrouter", model="m:online",
+        provider_tier=ProviderTier.SEARCH, call_type="chat_completion", query_params_summary="q",
+        response_meta=ResponseMeta(response_size_bytes=100, data_freshness=now),
+        extracted_evidence=[], raw_response_hash="h", latency_ms=10, cost_units=0.0,
+    )
+    belief_path = [
+        BeliefStep(step=0, type="prior", probability=0.5, text="prior"),
+        BeliefStep(step=1, type="update", probability=0.4, text="searched", usedCall="c1"),
+        BeliefStep(step=2, type="final", probability=prediction, text="final"),
+    ]
+    return assemble_trace(
+        execution_context=exec_ctx, event=event, provider_calls=[provider_call],
+        agent_result=AgentResult(prediction=prediction, confidence=confidence,
+                                 reasoning="final", beliefPath=belief_path),
+    )
+
+
+def test_submit_payload_unchanged_and_multipoint_with_belief_path() -> None:
+    # Regression guard for the belief-path change. It must NOT perturb the 4 submit
+    # fields arcratio produces, and reasoningTrace.steps must now carry a MULTI-POINT
+    # intermediateProbability. The other 5 scorer fields (resolvedOutcomeId,
+    # resolutionStatus, scoredAt, minerUid, marketId) are server-attached off-repo,
+    # so this proves only the arcratio HALF of the scorer contract.
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(
+        assignment, _real_digest_with_belief_path(0.62, confidence=0.7)
+    )
+    prediction = payload["prediction"]
+
+    # (1-2) outcome probabilities + predicted outcome id
+    assert prediction["predictedOutcomeId"] == "oid_yes"
+    assert prediction["outcomeProbabilities"]["oid_yes"] == pytest.approx(0.62)
+    assert prediction["outcomeProbabilities"]["oid_no"] == pytest.approx(0.38)
+    # (3) market price at prediction (passed straight from the assignment event)
+    assert prediction["outcomePricesAtPrediction"] == assignment.event.currentOutcomePrices
+    # (4) validity flag (a well-formed beliefPath + set confidence is valid)
+    assert prediction["executionMetadata"]["predictionIsInvalid"] is False
+
+    # reasoningTrace.steps now carry a MULTI-POINT intermediateProbability (>1 distinct),
+    # not a single terminal point — this is the NEW guarantee reaching Mongo.
+    steps = payload["reasoningTrace"]["trace"]["steps"]
+    probs = [
+        s["intermediateProbability"] for s in steps
+        if s["intermediateProbability"] is not None
+    ]
+    assert len(probs) >= 3
+    assert len({round(p, 6) for p in probs}) > 1
+
+    # The belief path stays in futureGraph, with its duplicate final text replaced
+    # by a reference to the canonical predictionOutput reasoning summary.
+    future_graph = payload["reasoningTrace"]["trace"]["evidenceDigest"]["futureGraph"]
+    assert [s["type"] for s in future_graph["beliefPath"]] == ["prior", "update", "final"]
+    final_belief = future_graph["beliefPath"][-1]
+    assert "text" not in final_belief
+    assert final_belief["textRef"].endswith("/predictionOutput/reasoningSummary")
+
+    final_step = [
+        step for step in steps
+        if step["intermediateProbability"] == pytest.approx(0.62)
+    ][-1]
+    assert "reasoningText" not in final_step
+    assert final_step["reasoningTextRef"] == final_belief["textRef"]
+
+
+def test_build_prediction_submit_payload_missing_confidence_stays_valid() -> None:
+    # Confidence is optional (stored, unscored). A missing value must NOT invalidate
+    # a well-formed prediction: the confidence slot is filled with the sentinel but
+    # no invalid reason is raised and predictionIsInvalid stays False.
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
@@ -419,7 +525,89 @@ def test_build_prediction_submit_payload_marks_invalid_when_confidence_missing()
     payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None))
     prediction = payload["prediction"]
     assert prediction["confidence"] == pytest.approx(0.0)
-    assert prediction["executionMetadata"]["predictionIsInvalid"] is True
-    assert "confidence_missing" in (
+    assert prediction["executionMetadata"]["predictionIsInvalid"] is False
+    assert "confidence_missing" not in (
         prediction["executionMetadata"]["predictionInvalidReason"] or ""
     )
+
+
+def test_confidence_omitted_flag_true_when_confidence_missing() -> None:
+    # F8: confidenceOmitted lets consumers exclude omitters from confidence stats,
+    # while confidence still serializes as the numeric sentinel the Sub41 DTO needs.
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None))
+    prediction = payload["prediction"]
+    assert prediction["executionMetadata"]["confidenceOmitted"] is True
+    assert prediction["confidence"] == pytest.approx(0.0)  # still a number
+
+
+def test_confidence_omitted_flag_false_when_confidence_present() -> None:
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9))
+    prediction = payload["prediction"]
+    assert prediction["executionMetadata"]["confidenceOmitted"] is False
+    assert prediction["confidence"] == pytest.approx(0.9)
+
+
+def _worst_case_max_size_agent_result() -> AgentResult:
+    """The largest AgentResult the schema caps allow: 32 belief steps each at the
+    4000-char text cap, plus the 8000-char reasoning cap. F4's authoritative guard
+    is that the serialized submit payload for THIS stays under the gateway ceiling,
+    since belief text is triplicated (future_graph + steps.reasoningText + summary).
+    """
+    steps = [BeliefStep(step=0, type="prior", probability=0.5, text=f"{0:04d}" + "x" * 3996)]
+    steps += [
+        BeliefStep(step=i, type="update", probability=0.5, text=f"{i:04d}" + "x" * 3996)
+        for i in range(1, 31)
+    ]
+    steps.append(BeliefStep(step=31, type="final", probability=0.5, text=f"{31:04d}" + "x" * 3996))
+    assert len(steps) == 32
+    return AgentResult(
+        prediction=0.5, confidence=0.7, reasoning="r" * 8000, beliefPath=steps
+    )
+
+
+def test_max_size_submit_payload_stays_under_gateway_ceiling() -> None:
+    # F4 AUTHORITATIVE: worst-case max-size AgentResult -> serialized payload < 900KB
+    # (margin under the gateway 1MB limit). Per-field caps alone are not sufficient
+    # given the triplication; this asserts the aggregate byte budget.
+    now = datetime(2026, 4, 24, tzinfo=timezone.utc)
+    event = Event(
+        event_id=uuid4(), title="Will X happen?", description="Binary event.",
+        category=EventCategory.OTHER, resolution_criteria="YES iff X occurs.",
+        resolution_deadline=datetime(2027, 1, 1, tzinfo=timezone.utc), created_at=now,
+    )
+    exec_ctx = ExecutionContext(
+        execution_id=uuid4(), agent_id=uuid4(), agent_version="1.0.0", event_id=uuid4(),
+        validator_id=uuid4(), timestamp_start=now, timestamp_end=now,
+        execution_duration_ms=1, sandbox_environment=SandboxEnvironment.DOCKER_RUNC,
+    )
+    provider_call = ProviderCall(
+        call_index=0, provider_id="openrouter", model="m:online",
+        provider_tier=ProviderTier.SEARCH, call_type="chat_completion", query_params_summary="q",
+        response_meta=ResponseMeta(response_size_bytes=100, data_freshness=now),
+        extracted_evidence=[], raw_response_hash="h", latency_ms=10, cost_units=0.0,
+    )
+    digest = assemble_trace(
+        execution_context=exec_ctx, event=event, provider_calls=[provider_call],
+        agent_result=_worst_case_max_size_agent_result(),
+    )
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(assignment, digest)
+    serialized = json.dumps(payload)
+    assert len(serialized.encode("utf-8")) < 900_000

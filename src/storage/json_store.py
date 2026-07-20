@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from src.core.config import StorageConfig
 from src.core.schemas import EvidenceDigest, ResolutionRecord
 from src.storage.store import TraceStore
@@ -95,7 +97,19 @@ class JsonTraceStore(TraceStore):
         path = self._trace_path(execution_id)
         if not path.exists():
             return None
-        digest = EvidenceDigest.model_validate_json(path.read_text())
+        try:
+            digest = EvidenceDigest.model_validate_json(path.read_text())
+        except ValidationError as exc:
+            # F3: a file that fails to parse must not raise into the caller. Log and
+            # return None (same not-found contract) so one corrupt trace never breaks
+            # a scoring sweep. Integrity-mismatch is handled below (parses, warns).
+            logger.warning(
+                "Trace %s failed to parse on read (path=%s): %s",
+                execution_id,
+                path,
+                exc,
+            )
+            return None
         if not digest.verify_integrity():
             # The file parsed but its sealed hash does not match its contents —
             # i.e. it was mutated after sealing or corrupted on disk. Surface it
@@ -135,6 +149,12 @@ class JsonTraceStore(TraceStore):
         for path in self._traces_dir.glob("*.json"):
             try:
                 traces.append(EvidenceDigest.model_validate_json(path.read_text()))
-            except Exception:
+            except Exception as exc:
+                # F3: surface parse failures instead of silently swallowing them, so a
+                # corrupt/legacy-shape trace file is visible in logs. Still skip it and
+                # keep returning the parseable traces.
+                logger.warning(
+                    "Skipping unparseable trace file %s: %s", path, exc
+                )
                 continue
         return traces

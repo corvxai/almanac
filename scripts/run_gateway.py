@@ -30,8 +30,6 @@ import uvicorn
 
 from src.gateway.server import app, register_provider
 
-from src.gateway.providers.polymarket import PolymarketProvider
-from src.gateway.providers.web_search import WebSearchProvider
 from src.gateway.providers.claude import ClaudeProvider
 from src.gateway.providers.openrouter import OpenRouterProvider
 
@@ -138,13 +136,6 @@ def main() -> None:
         log.info("OpenRouter provider: %s", openrouter.mode.upper())
     except Exception as exc:
         log.warning("OpenRouter provider failed to init: %s", exc)
-
-    # Polymarket / Web Search are always mock in this simulator.
-    register_provider(PolymarketProvider())
-    log.info("Polymarket provider: MOCK")
-
-    register_provider(WebSearchProvider())
-    log.info("Web Search provider: MOCK")
 
     print()
     print("=" * 60)

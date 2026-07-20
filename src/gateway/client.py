@@ -62,8 +62,6 @@ class RemoteProvider(BaseProvider):
         gateway_url: str | None = None,
         provider_tier: ProviderTier | None = None,
         timeout: float = float(constants.GATEWAY.call_timeout_seconds),
-        default_call_type: str | None = None,
-        supports_completions: bool = True,
         *,
         client: httpx.Client | None = None,
         headers: dict[str, str] | None = None,
@@ -72,8 +70,6 @@ class RemoteProvider(BaseProvider):
         self._gateway_url = (gateway_url or gateway_service_url()).rstrip("/")
         self._tier = provider_tier or _DEFAULT_TIERS.get(provider_id, ProviderTier.INFERENCE)
         self._timeout = timeout
-        self._default_call_type = default_call_type or "chat_completion"
-        self._supports_completions = supports_completions
         self._client = client
         self._headers = dict(headers) if headers else {}
 
@@ -86,13 +82,7 @@ class RemoteProvider(BaseProvider):
         return self._tier
 
     def call(self, call_type: str, params: dict[str, Any]) -> dict[str, Any]:
-        body = _build_completions_payload(
-            self._provider_id,
-            call_type,
-            params,
-            default_call_type=self._default_call_type,
-            supports_completions=self._supports_completions,
-        )
+        body = _build_completions_payload(self._provider_id, params)
 
         if self._client is not None:
             # Pre-configured client (e.g. UDS transport in the sandbox).
@@ -157,17 +147,15 @@ def optional_completions_fields(params: dict[str, Any]) -> dict[str, Any]:
 
 def _build_completions_payload(
     provider_id: str,
-    call_type: str,
     params: dict[str, Any],
-    *,
-    default_call_type: str,
-    supports_completions: bool,
 ) -> dict[str, Any]:
+    """Build a plain LLM completions payload (provider/model/messages/...).
+
+    Every provider speaks completions; callType/params typed calls no longer
+    exist, so the payload never carries them.
+    """
     payload: dict[str, Any] = {"provider": provider_id}
     payload.update(optional_completions_fields(params))
-    if not supports_completions:
-        payload["callType"] = call_type or default_call_type
-        payload["params"] = params
     return payload
 
 
@@ -224,12 +212,4 @@ def build_remote_providers(
     """Discover providers from the gateway and return RemoteProvider instances."""
     base = gateway_url or gateway_service_url()
     providers = discover_provider_descriptors(base)
-    return [
-        RemoteProvider(
-            p.provider_id,
-            base,
-            default_call_type=p.default_call_type,
-            supports_completions=p.supports_completions,
-        )
-        for p in providers
-    ]
+    return [RemoteProvider(p.provider_id, base) for p in providers]

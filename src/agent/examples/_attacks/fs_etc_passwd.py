@@ -12,7 +12,7 @@ from uuid import UUID
 
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
-from src.core.schemas import AgentResult
+from src.core.schemas import AgentResult, BeliefStep
 
 
 class FsEtcPasswdAttack(BaseAgent):
@@ -22,4 +22,6 @@ class FsEtcPasswdAttack(BaseAgent):
     def predict(self, ctx: ForecastingContext) -> AgentResult:
         with open("/etc/passwd", "r", encoding="utf-8") as fh:
             content = fh.read()
-        return AgentResult(prediction=0.5, reasoning=content)
+        belief = [BeliefStep(step=0, type="final", probability=0.5,
+                             text=content or "read /etc/passwd")]
+        return AgentResult(prediction=0.5, reasoning=content, beliefPath=belief)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from src.core.events import Event
 from src.core.schemas import (
+    TRACE_SCHEMA_VERSION,
     AgentResult,
     EvidenceDigest,
     EventSnapshot,
@@ -50,24 +51,35 @@ def assemble_trace(
         event_created_at=event.created_at,
     )
 
-    prediction_output = _build_prediction_output(agent_result, provider_calls)
+    prediction_output = _build_prediction_output(agent_result, execution_context)
 
-    if agent_reasoning_steps:
+    # beliefPath is the one canonical source that survives the docker sandbox
+    # boundary (orchestrator drops ctx.reasoning_chain there), so it drives the
+    # chain for both the docker and in-process paths. The agent_reasoning_steps
+    # and synth branches are legacy fallbacks for beliefPath-absent traces only.
+    if agent_result.beliefPath:
+        reasoning_chain = _belief_path_to_reasoning_chain(agent_result, provider_calls)
+    elif agent_reasoning_steps:
         reasoning_chain = agent_reasoning_steps
     else:
-        reasoning_chain = _synthesise_reasoning_chain(
-            agent_result, provider_calls,
-        )
+        reasoning_chain = _synthesise_reasoning_chain(agent_result, provider_calls)
+
+    # Stash the raw beliefPath (labels + usedCall/usedSources, which the
+    # reasoning_chain vocab cannot carry) into the reserved phase-2 seam so it
+    # reaches Mongo intact via save_trace. Part of the sealed digest.
+    future_graph = (
+        {"beliefPath": [bs.model_dump() for bs in agent_result.beliefPath]}
+        if agent_result.beliefPath
+        else None
+    )
 
     total_cost = sum(pc.cost_units for pc in provider_calls)
-    total_evidence = sum(len(pc.extracted_evidence) for pc in provider_calls)
     usage_totals = _aggregate_usage(provider_calls)
 
     integrity = TraceIntegrity(
         trace_hash="",
-        trace_schema_version="0.1.0",
+        trace_schema_version=TRACE_SCHEMA_VERSION,
         total_provider_cost=total_cost,
-        total_evidence_items=total_evidence,
         usage_totals=usage_totals,
     )
 
@@ -78,6 +90,7 @@ def assemble_trace(
         reasoning_chain=reasoning_chain,
         prediction_output=prediction_output,
         trace_integrity=integrity,
+        future_graph=future_graph,
     )
 
     return digest.seal()
@@ -85,21 +98,20 @@ def assemble_trace(
 
 def _build_prediction_output(
     result: AgentResult,
-    provider_calls: list[ProviderCall],
+    execution_context: ExecutionContext,
 ) -> PredictionOutput:
     """Construct the structured PredictionOutput from the agent's simple result.
 
-    The agent provides the probability and reasoning text. The assembler
-    enriches it with key drivers extracted from the gateway evidence.
+    The agent provides the probability, confidence and reasoning text; the
+    assembler derives the confidence interval and the contrarian flag.
+
+    F7: the contrarian flag is computed from the VALIDATOR-sealed market baseline
+    (``execution_context.market_price_at_prediction``), never from agent-supplied
+    evidence. It is directional disagreement — the agent and the market land on
+    opposite sides of 0.5. When no baseline was sealed (non-Polymarket event or a
+    fetch failure) the flag is False. contrarianFlag is submitted but not scored
+    in-repo; this is a data-quality fix.
     """
-    key_drivers = _extract_key_drivers(provider_calls)
-    key_uncertainties = ["Agent-reported reasoning only — no structured decomposition"]
-
-    if result.metadata and "key_drivers" in result.metadata:
-        key_drivers = result.metadata["key_drivers"]
-    if result.metadata and "key_uncertainties" in result.metadata:
-        key_uncertainties = result.metadata["key_uncertainties"]
-
     ci = None
     if result.confidence is not None:
         half_width = (1.0 - result.confidence) / 2
@@ -108,98 +120,103 @@ def _build_prediction_output(
             min(1.0, result.prediction + half_width),
         )
 
-    market_price = _find_market_price(provider_calls)
-    contrarian = False
-    if market_price is not None:
-        contrarian = abs(result.prediction - market_price) > 0.10
-
-    metadata = dict(result.metadata) if result.metadata else None
+    market_price = execution_context.market_price_at_prediction
+    contrarian = (
+        market_price is not None
+        and (result.prediction - 0.5) * (market_price - 0.5) < 0
+    )
 
     return PredictionOutput(
         final_probability=result.prediction,
         confidence=result.confidence,
         confidence_interval=ci,
         reasoning_summary=result.reasoning,
-        key_drivers=key_drivers,
-        key_uncertainties=key_uncertainties,
         contrarian_flag=contrarian,
-        metadata=metadata,
     )
+
+
+def _provider_gap_query_steps(provider_calls: list[ProviderCall]) -> list[ReasoningStep]:
+    """One gap_query step per provider call (from the gateway log).
+
+    Provider evidence stays canonical on ProviderCall.extracted_evidence; the
+    step links to that call rather than copying the complete response body.
+    ``input_evidence_refs`` is emitted as [] — NOT a positional fake. The real
+    declared-then-verified evidence→step join is a phase-2 hook (see schema).
+    """
+    steps: list[ReasoningStep] = []
+    for idx, pc in enumerate(provider_calls):
+        steps.append(ReasoningStep(
+            step_index=idx,
+            step_type=ReasoningStepType.GAP_QUERY,
+            provider_call_index=pc.call_index,
+            provider_id=pc.provider_id,
+            input_evidence_refs=[],
+            reasoning_text=(
+                f"[{pc.provider_id}] {pc.call_type}; "
+                f"evidence in providerCalls[{pc.call_index}]"
+            ),
+            inference_model_used=pc.model,
+        ))
+    return steps
+
+
+def _belief_path_to_reasoning_chain(
+    result: AgentResult,
+    provider_calls: list[ProviderCall],
+) -> list[ReasoningStep]:
+    """Map the agent's miner-written beliefPath into the validator reasoning chain.
+
+    Emits the per-provider-call gap_query steps first (provider linkage preserved),
+    then one belief step per BeliefStep carrying its ``intermediate_probability`` — so
+    the chain holds the full multi-point trajectory, not a single endpoint. The two
+    vocabularies differ (BeliefStep.type is prior/update/final; ReasoningStepType is
+    prior/belief_update/gap_query), so 'update' and 'final' both map to BELIEF_UPDATE,
+    with the terminal step last. usedCall/usedSources stay agent-declared (kept raw in
+    future_graph), never lifted into the verified provider_call_index —
+    ``input_evidence_refs`` is [] (no declared→verified join yet).
+    """
+    steps = _provider_gap_query_steps(provider_calls)
+    idx = len(steps)
+    for bs in result.beliefPath:
+        step_type = (
+            ReasoningStepType.PRIOR
+            if bs.type == "prior"
+            else ReasoningStepType.BELIEF_UPDATE
+        )
+        steps.append(ReasoningStep(
+            step_index=idx,
+            step_type=step_type,
+            provider_call_index=None,
+            input_evidence_refs=[],
+            reasoning_text=bs.text,
+            intermediate_probability=bs.probability,
+        ))
+        idx += 1
+    return steps
 
 
 def _synthesise_reasoning_chain(
     result: AgentResult,
     provider_calls: list[ProviderCall],
 ) -> list[ReasoningStep]:
-    """Build a reasoning chain from gateway logs + agent's free-text reasoning.
-
-    Produces one evidence_gathering step per provider call (from the gateway
-    log), then a final synthesis step containing the agent's reasoning.
+    """Legacy fallback for beliefPath-absent traces: build a chain from gateway
+    logs + the agent's free-text reasoning. One gap_query step per provider call,
+    then a terminal belief_update step with the agent's reasoning and probability.
+    Unreachable for any valid (required-beliefPath) AgentResult.
     """
-    steps: list[ReasoningStep] = []
-    step_idx = 0
+    steps = _provider_gap_query_steps(provider_calls)
     inference_call = _find_inference_call(provider_calls)
-
-    for pc in provider_calls:
-        evidence_summary = "; ".join(
-            e.content for e in pc.extracted_evidence
-        ) or f"{pc.provider_id}.{pc.call_type} returned {pc.response_meta.response_size_bytes}B"
-
-        steps.append(ReasoningStep(
-            step_index=step_idx,
-            step_type=ReasoningStepType.EVIDENCE_GATHERING,
-            provider_call_index=pc.call_index,
-            provider_id=pc.provider_id,
-            input_evidence_refs=[pc.call_index],
-            reasoning_text=f"[{pc.provider_id}] {evidence_summary}",
-            inference_model_used=pc.model,
-        ))
-        step_idx += 1
-
     steps.append(ReasoningStep(
-        step_index=step_idx,
-        step_type=ReasoningStepType.SYNTHESIS,
+        step_index=len(steps),
+        step_type=ReasoningStepType.BELIEF_UPDATE,
         provider_call_index=inference_call.call_index if inference_call else None,
         provider_id=inference_call.provider_id if inference_call else None,
-        input_evidence_refs=[pc.call_index for pc in provider_calls],
+        input_evidence_refs=[],
         reasoning_text=result.reasoning,
         intermediate_probability=result.prediction,
         inference_model_used=inference_call.model if inference_call else None,
     ))
-    step_idx += 1
-
-    steps.append(ReasoningStep(
-        step_index=step_idx,
-        step_type=ReasoningStepType.FINAL_ASSIGNMENT,
-        provider_call_index=inference_call.call_index if inference_call else None,
-        provider_id=inference_call.provider_id if inference_call else None,
-        reasoning_text=f"Final probability: {result.prediction:.4f}",
-        intermediate_probability=result.prediction,
-        inference_model_used=inference_call.model if inference_call else None,
-    ))
-
     return steps
-
-
-def _extract_key_drivers(provider_calls: list[ProviderCall]) -> list[str]:
-    """Pull the most salient evidence items from provider calls as key drivers."""
-    drivers: list[str] = []
-    for pc in provider_calls:
-        for ev in pc.extracted_evidence:
-            if ev.numeric_value is not None:
-                drivers.append(ev.content)
-            if len(drivers) >= 5:
-                return drivers
-    return drivers or ["No structured evidence extracted"]
-
-
-def _find_market_price(provider_calls: list[ProviderCall]) -> float | None:
-    """Look for a market price in the provider evidence for contrarian detection."""
-    for pc in provider_calls:
-        for ev in pc.extracted_evidence:
-            if ev.evidence_type.value == "price" and ev.numeric_value is not None:
-                return ev.numeric_value
-    return None
 
 
 def _find_inference_call(provider_calls: list[ProviderCall]) -> ProviderCall | None:

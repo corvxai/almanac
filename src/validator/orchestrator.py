@@ -159,6 +159,12 @@ class Orchestrator:
 
         sandbox_env = SandboxEnvironment(sandbox_type)
 
+        # v1: the validator-fetched market baseline lives in the (hash-sealed)
+        # execution context as a single YES price, not in agent-writable metadata.
+        market_price = (
+            market_baseline.get("yes_price") if isinstance(market_baseline, dict) else None
+        )
+
         exec_ctx = ExecutionContext(
             execution_id=execution_id,
             agent_id=agent.agent_id,
@@ -169,6 +175,7 @@ class Orchestrator:
             timestamp_end=ts_end,
             execution_duration_ms=duration_ms,
             sandbox_environment=sandbox_env,
+            market_price_at_prediction=market_price,
         )
 
         if is_docker:
@@ -179,11 +186,6 @@ class Orchestrator:
         else:
             provider_calls = self._gateway.call_log
             agent_steps = ctx.reasoning_chain or None
-
-        if market_baseline is not None:
-            metadata = dict(agent_result.metadata or {})
-            metadata["market_baseline"] = market_baseline
-            agent_result = agent_result.model_copy(update={"metadata": metadata})
 
         digest = assemble_trace(
             execution_context=exec_ctx,

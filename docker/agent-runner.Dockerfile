@@ -37,6 +37,7 @@ COPY src/core                        /opt/runner/src/core
 COPY src/gateway/__init__.py         /opt/runner/src/gateway/__init__.py
 COPY src/gateway/client.py           /opt/runner/src/gateway/client.py
 COPY src/gateway/constants.py        /opt/runner/src/gateway/constants.py
+COPY src/gateway/provider_capabilities.py /opt/runner/src/gateway/provider_capabilities.py
 COPY src/gateway/providers/__init__.py /opt/runner/src/gateway/providers/__init__.py
 COPY src/gateway/providers/base.py   /opt/runner/src/gateway/providers/base.py
 COPY src/__init__.py                 /opt/runner/src/__init__.py

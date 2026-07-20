@@ -22,7 +22,7 @@ from typing import Any
 from src.core import constants
 from src.core.schemas import ProviderCall, ProviderTier, ResponseMeta, UsageMeta
 from src.gateway.cost_estimator import estimate_cost_usd
-from src.gateway.extractor import extract_evidence
+from src.gateway.extractor import extract_evidence, extract_sources
 from src.gateway.providers.base import BaseProvider
 
 logger = logging.getLogger("arcratio.gateway")
@@ -62,6 +62,7 @@ def build_provider_call_record(
     raw_hash = hashlib.sha256(raw_json.encode()).hexdigest()
 
     evidence = extract_evidence(provider_id, call_type, raw_response)
+    sources_accessed = extract_sources(provider_id, raw_response)
 
     response_bytes = len(raw_json.encode())
     record_count = None
@@ -95,6 +96,7 @@ def build_provider_call_record(
         usage_meta=usage_meta,
         provider_usage_raw=provider_usage_raw,
         extracted_evidence=evidence,
+        sources_accessed=sources_accessed,
         raw_response_hash=raw_hash,
         latency_ms=latency_ms,
         cost_units=cost_units,

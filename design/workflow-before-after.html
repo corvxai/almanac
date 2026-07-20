@@ -1,0 +1,258 @@
+<!doctype html><meta charset=utf-8><title>Almanac workflows - before / after</title><style>
+body{max-width:1150px;margin:40px auto;padding:0 24px;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#1f2328}
+h1{border-bottom:2px solid #d0d7de;padding-bottom:.3em;line-height:1.25}
+p{margin:.6em 0}
+.tabs{display:flex;gap:8px;margin:1.4em 0 0}
+.tabs button{font:600 15px/1 inherit;padding:11px 18px;border:1px solid #d0d7de;border-bottom:none;border-radius:8px 8px 0 0;background:#f6f8fa;color:#57606a;cursor:pointer}
+.tabs button.active{background:#fff;color:#0a3069;box-shadow:inset 0 -3px 0 #1c6fd8}
+.panel{border:1px solid #d0d7de;border-radius:0 8px 8px 8px;padding:14px 20px 20px}
+.key{font-size:14px;color:#3d444d;background:#f6f8fa;border-radius:8px;padding:10px 14px;margin:.2em 0 1em}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin:0 4px 0 10px;border:1px solid rgba(0,0,0,.25)}
+details.wf{border:1px solid #d8dee4;border-radius:8px;margin:.8em 0;background:#fff}
+details.wf>summary{cursor:pointer;font:600 17px/1.3 inherit;color:#0a3069;padding:12px 14px;list-style:none}
+details.wf>summary::-webkit-details-marker{display:none}
+details.wf>summary::before{content:"\25B8";color:#57606a;margin-right:8px}
+details.wf[open]>summary::before{content:"\25BE"}
+.mermaid{background:#f6f8fa;border-radius:8px;padding:14px;margin:0 12px 12px;text-align:center;overflow:auto}
+</style>
+<h1>Almanac IM2 - Miner &amp; Validator Workflows</h1>
+<p><em>Traced from the miner, validator, and gateway code, verified against the Hormuz agent-5 case study (belief path 0.50 to 0.19 to 0.10 to 0.12). Switch tabs to compare the current system with the state after the v1 build. Sections are collapsible; the miner flow is collapsed by default.</em></p>
+
+<div class="tabs">
+  <button data-tab="before" class="active">Before - trace v0.1.0 (today)</button>
+  <button data-tab="after">After - v1 build</button>
+</div>
+
+<section id="before" class="panel">
+  <div class="key"><strong>Colour key</strong>
+    <span class="sw" style="background:#edf0f5"></span>miner / validator side
+    <span class="sw" style="background:#f3eafc"></span>gateway service
+    <span class="sw" style="background:#cdefd6"></span>miner
+    <span class="sw" style="background:#cfe0fb"></span>validator
+    <span class="sw" style="background:#ffe4bf"></span>scoring
+    <span class="sw" style="background:#e6d3f7"></span>gateway-hub
+    <span class="sw" style="background:#dde1e6"></span>chain
+    <span class="sw" style="background:#f8d7da"></span>known gaps
+    </div>
+  <details class="wf miner" open><summary>Miner workflow</summary>
+  <div class="mermaid">flowchart TD
+  subgraph ARC["Miner side"]
+    A1["Author agent.py<br/>subclass BaseAgent<br/>agent_id + agent_version + predict(ctx)"]
+    A2["Agent 5: V1Agent5Orchestrated<br/>orchestrated belief loop<br/>agent_id a0000005"]
+    A3["Step 0 prior<br/>gpt-4o-mini, no evidence<br/>belief ~0.50"]
+    A4["Step 1 search current state<br/>ctx.call_provider openrouter sonar-pro<br/>~15 links"]
+    A5["Step 2 update<br/>gpt-4o-mini over search1<br/>belief 0.19"]
+    A6["Step 3 gap query<br/>gpt-4o-mini<br/>belief 0.19 carried"]
+    A7["Step 3b search gap<br/>ctx.call_provider sonar-pro<br/>~15 links"]
+    A8["Step 3c update<br/>gpt-4o-mini over search1+2<br/>belief 0.10"]
+    A9["Step 4 final synthesis<br/>claude-sonnet-4-6<br/>final 0.12, conviction 0.65"]
+    A10["Return AgentResult<br/>prediction 0.12 + reasoning<br/>7 provider calls (2 search, 5 reason)"]
+    A11["record_reasoning_step per hop<br/>stamps intermediate_probability<br/>path 0.50 to 0.19 to 0.10 to 0.12<br/>NOTE: kept only in_process; dropped in docker"]
+    C1["miner/cli.py submit-agent<br/>read .py bytes, size <= 2MB<br/>sign hotkey over sha256(body)"]
+    C2["POST /v1/agents/submit-agent<br/>octet-stream body<br/>Bearer API key + x-miner-signature"]
+  end
+  subgraph GW["Gateway service (central hub)"]
+    G1["MinerAuthGuard + ApiKeyAuthGuard<br/>verify sr25519 sig + api key<br/>domain sub41-agent-v1"]
+    G2["claimApiKeyLinkage<br/>bind API key to OrgMiner<br/>insert MinerAgentUpload row"]
+    G3["R2 put agent .py<br/>ContentType text/x-python<br/>Metadata.sha256"]
+    G4["SubmitAgentResponse (201)<br/>id, minerHotkey, minerUid<br/>sha256, byteSize"]
+  end
+  A1 --> A2 --> A3
+  A3 -->|"belief ~0.50"| A4 --> A5
+  A5 -->|"belief 0.19"| A6 --> A7 --> A8
+  A8 -->|"belief 0.10"| A9
+  A9 -->|"final 0.12"| A10
+  A3 -.-> A11
+  A9 -.-> A11
+  A10 --> C1 --> C2
+  C2 -->|"raw bytes"| G1 --> G2 --> G3 --> G4
+  G4 -.->|"ack id + sha256"| C1
+  classDef miner fill:#cdefd6,stroke:#2e9c4a,color:#000;
+  classDef gw fill:#e6d3f7,stroke:#7a3cc0,color:#000;
+  class A1,A2,A3,A4,A5,A6,A7,A8,A9,A10,A11,C1,C2 miner;
+  class G1,G2,G3,G4 gw;
+  style ARC fill:#edf0f5,stroke:#aeb9cc;
+  style GW fill:#f3eafc,stroke:#c9a9ea;</div>
+</details>
+  <details class="wf vali" open><summary>Validator workflow</summary>
+  <div class="mermaid">flowchart TD
+  subgraph VAL["Validator side"]
+    V0["Validator.run loop<br/>wake every 60s<br/>poll assignment every tick, score at random minute (hourly)"]
+    V1["poll assignment<br/>fetch_agent_event_assignment<br/>signed x-validator headers"]
+    V2["verify agent code in payload<br/>decode agent.code, <= 2MB<br/>sha256 must match else raise"]
+    V3["register run 7717a6ec + track MAIN<br/>validator-owned Polymarket baseline<br/>(trace metadata only; null in this run)"]
+    V4["Docker sandbox network=none<br/>read_only, cap_drop ALL, uid 10001<br/>only egress = UDS to LocalProxy"]
+    V5["agent 5 runs<br/>7 call_provider calls<br/>path 0.50 to 0.19 to 0.10 to 0.12"]
+    V6["LocalProxy witness<br/>assign call_index 0..6<br/>sha256 raw_response, record ProviderCall"]
+    V7["assemble_trace<br/>pop_calls + seal trace_hash<br/>final 0.12, cost ~0.034, ~26 sources"]
+    V8GAP["save_trace to data/traces/*.json<br/>GAP: written but NOT read by scoring"]:::gap
+    V9["build_prediction_submit_payload<br/>predictedOutcomeId NO (0.12 < 0.5)<br/>outcomePricesAtPrediction from assignment ~0.485"]
+    V10["submit prediction<br/>submit_validator_prediction<br/>signed body"]
+    V11["fetch scored-predictions DTO<br/>hourly, paginated<br/>only resolved rows"]
+    V12["score_agent_predictions<br/>Accuracy40 Calib20 Early30 Ens10<br/>reads DTO only, not trace"]
+    V13["combine_weights (two weight sources)<br/>set_weights on chain"]
+    GAPA["GAP: no declared to verified join<br/>docker drops agent chain (agent_steps None)<br/>synth steps carry no belief path; refs empty"]:::gap
+    GAPB["GAP: PROB: not parsed at witness<br/>extractor only PREDICTION/CONVICTION<br/>0.19/0.10 only agent-asserted"]:::gap
+    GAPC["GAP: belief path invisible to scoring<br/>lives in trace file only<br/>DTO carries only endpoint 0.12"]:::gap
+  end
+  subgraph GW["Gateway service (central hub)"]
+    H1["GET /v1/validators/agent-and-event<br/>reads R2, inlines agent.code + sha256<br/>event + currentOutcomePrices ~0.485"]
+    H2["POST /v1/gateway/validator/completions<br/>prices + relays LLM upstream<br/>bills org via x-miner-hotkey"]
+    H3["POST /v1/validators/prediction<br/>prediction to Postgres jsonb<br/>reasoningTrace to Mongo"]
+    H4["GET /v1/validators/scored-predictions<br/>resolved DTO from Postgres<br/>trace never returned"]
+  end
+  CHAIN["Bittensor subtensor<br/>set_weights"]
+  V0 --> V1
+  H1 -->|"assignment: event + agent.code"| V1 --> V2 --> V3 --> V4 --> V5 --> V6
+  V6 -->|"witnessed upstream"| H2
+  H2 -->|"raw response"| V6
+  V6 --> V7 --> V8GAP
+  V7 --> V9 --> V10 -->|"prediction + trace"| H3
+  H3 -.-> H4
+  V0 -->|"hourly tick"| V11
+  H4 -->|"scored DTO"| V11 --> V12 --> V13 --> CHAIN
+  V7 -.-> GAPA
+  V6 -.-> GAPB
+  V12 -.-> GAPC
+  classDef gap fill:#f8d7da,stroke:#c0392b,color:#000;
+  classDef vali fill:#cfe0fb,stroke:#1c6fd8,color:#000;
+  classDef scoring fill:#ffe4bf,stroke:#e07b1a,color:#000;
+  classDef gw fill:#e6d3f7,stroke:#7a3cc0,color:#000;
+  classDef chain fill:#dde1e6,stroke:#57606a,color:#000;
+  class V0,V1,V2,V3,V4,V5,V6,V7,V9,V10 vali;
+  class V11,V12,V13 scoring;
+  class H1,H2,H3,H4 gw;
+  class CHAIN chain;
+  style VAL fill:#edf0f5,stroke:#aeb9cc;
+  style GW fill:#f3eafc,stroke:#c9a9ea;</div>
+</details>
+</section>
+
+<section id="after" class="panel" hidden>
+  <div class="key"><strong>Colour key</strong>
+    <span class="sw" style="background:#edf0f5"></span>miner / validator side
+    <span class="sw" style="background:#f3eafc"></span>gateway service (unchanged)
+    <span class="sw" style="background:#cdefd6"></span>miner
+    <span class="sw" style="background:#cfe0fb"></span>validator
+    <span class="sw" style="background:#ffe4bf"></span>scoring
+    <span class="sw" style="background:#e6d3f7"></span>gateway-hub
+    <span class="sw" style="background:#cdeee9"></span>new in v1
+    <span class="sw" style="background:#c9f2d4"></span>gap fixed
+    <span class="sw" style="background:#fff3cd"></span>gated / blocked on server or sign-off
+    </div>
+  <details class="wf miner" open><summary>Miner workflow (v1)</summary>
+  <div class="mermaid">flowchart TD
+  subgraph ARC["Miner side - v1"]
+    A1["Author agent.py<br/>subclass BaseAgent<br/>agent_id + agent_version + predict(ctx)"]
+    A2["Agent 5: V1Agent5Orchestrated<br/>orchestrated belief loop<br/>agent_id a0000005"]
+    A3["Step 0 prior<br/>gpt-4o-mini, no evidence<br/>belief ~0.50"]
+    A4["Step 1 search current state<br/>ctx.call_provider openrouter sonar-pro<br/>~15 links"]
+    A5["Step 2 update<br/>gpt-4o-mini over search1<br/>belief 0.19"]
+    A6["Step 3 gap query<br/>gpt-4o-mini<br/>belief 0.19 carried"]
+    A7["Step 3b search gap<br/>ctx.call_provider sonar-pro<br/>~15 links"]
+    A8["Step 3c update<br/>gpt-4o-mini over search1+2<br/>belief 0.10"]
+    A9["Step 4 final synthesis<br/>claude-sonnet-4-6<br/>final 0.12, conviction 0.65"]
+    A10["Return AgentResult<br/>prediction 0.12 + reasoning<br/>7 provider calls (2 search, 5 reason)"]
+    A11["record_reasoning_step per hop (v1)<br/>emits PROB: + intermediate_probability<br/>DECLARES provider_call_index + input_evidence_refs<br/>in structured Pydantic output, verified by validator"]:::newv1
+    C1["miner/cli.py submit-agent<br/>read .py bytes, size <= 2MB<br/>sign hotkey over sha256(body)"]
+    C2["POST /v1/agents/submit-agent<br/>octet-stream body<br/>Bearer API key + x-miner-signature"]
+  end
+  subgraph GW["Gateway service (central hub, unchanged)"]
+    G1["MinerAuthGuard + ApiKeyAuthGuard<br/>verify sr25519 sig + api key<br/>domain sub41-agent-v1"]
+    G2["claimApiKeyLinkage<br/>bind API key to OrgMiner<br/>insert MinerAgentUpload row"]
+    G3["R2 put agent .py<br/>ContentType text/x-python<br/>Metadata.sha256"]
+    G4["SubmitAgentResponse (201)<br/>id, minerHotkey, minerUid<br/>sha256, byteSize"]
+  end
+  A1 --> A2 --> A3
+  A3 -->|"belief ~0.50"| A4 --> A5
+  A5 -->|"belief 0.19"| A6 --> A7 --> A8
+  A8 -->|"belief 0.10"| A9
+  A9 -->|"final 0.12"| A10
+  A3 -.-> A11
+  A9 -.-> A11
+  A10 --> C1 --> C2
+  C2 -->|"raw bytes"| G1 --> G2 --> G3 --> G4
+  G4 -.->|"ack id + sha256"| C1
+  classDef miner fill:#cdefd6,stroke:#2e9c4a,color:#000;
+  classDef gw fill:#e6d3f7,stroke:#7a3cc0,color:#000;
+  classDef newv1 fill:#cdeee9,stroke:#12816f,color:#000;
+  class A1,A2,A3,A4,A5,A6,A7,A8,A9,A10,C1,C2 miner;
+  class G1,G2,G3,G4 gw;
+  style ARC fill:#edf0f5,stroke:#aeb9cc;
+  style GW fill:#f3eafc,stroke:#c9a9ea;</div>
+</details>
+  <details class="wf vali" open><summary>Validator workflow (v1)</summary>
+  <div class="mermaid">flowchart TD
+  subgraph VAL["Validator side - v1"]
+    V0["Validator.run loop<br/>wake every 60s<br/>poll assignment every tick, score hourly"]
+    V1["poll assignment<br/>fetch_agent_event_assignment<br/>signed x-validator headers"]
+    V2["verify agent code in payload<br/>decode agent.code, <= 2MB<br/>sha256 must match else raise"]
+    V3["register run + track MAIN<br/>validator-owned Polymarket baseline<br/>self-fetched ~0.485"]
+    V4["Docker sandbox network=none<br/>read_only, cap_drop ALL, uid 10001<br/>only egress = UDS to LocalProxy"]
+    V5["agent 5 runs<br/>7 call_provider calls<br/>path 0.50 to 0.19 to 0.10 to 0.12"]
+    V6["LocalProxy witness (v1)<br/>assign call_index 0..6, sha256 raw_response<br/>NEW: stamp corr join key + store reasoning-prompt bytes<br/>NEW: parse PROB: to witnessed_intermediate_probability"]:::newv1
+    V7["assemble_trace v1.0.0<br/>verify declared refs (corr-JOIN, byte-match fallback)<br/>single source home + computed counts_toward_grounding<br/>seal trace_hash"]:::newv1
+    V8["save_trace + plumb belief_path into prediction DTO<br/>in-repo done; end-to-end BLOCKED on server round-trip"]:::blocked
+    V9["build_prediction_submit_payload<br/>predictedOutcomeId NO (0.12 < 0.5)<br/>market_price_at_prediction now inside hashed trace"]
+    V10["submit prediction<br/>submit_validator_prediction<br/>signed body"]
+    V11["fetch scored-predictions DTO<br/>hourly, paginated<br/>only resolved rows"]
+    V12["score_agent_predictions (v1)<br/>5 pillars: Accuracy Calib Early Ensemble + Belief-path<br/>per-event market-relative baseline"]:::scoring
+    V13["combine_weights (two weight sources)<br/>set_weights on chain"]
+    FIXA["FIXED: declared to verified join<br/>provider_call_index + input_evidence_refs verified<br/>refs index into sources_accessed[]"]:::fixed
+    FIXB["FIXED: PROB: witnessed at proxy<br/>0.19 / 0.10 from model tokens, not agent-asserted"]:::fixed
+    FIXC["belief path now scored<br/>5th pillar rewards updating-before-consensus<br/>end-to-end gated on server round-trip"]:::blocked
+    CAT["FIXED: gatedModel catalog gate<br/>sonar-pro an explicit catalog entry<br/>reject uncatalogued models (freeze needs sign-off)"]:::fixed
+  end
+  subgraph GW["Gateway service (central hub, unchanged)"]
+    H1["GET /v1/validators/agent-and-event<br/>reads R2, inlines agent.code + sha256<br/>event + currentOutcomePrices ~0.485"]
+    H2["POST /v1/gateway/validator/completions<br/>prices + relays LLM upstream<br/>bills org via x-miner-hotkey"]
+    H3["POST /v1/validators/prediction<br/>prediction to Postgres jsonb<br/>reasoningTrace to Mongo"]
+    H4["GET /v1/validators/scored-predictions<br/>resolved DTO from Postgres<br/>SERVER must re-emit beliefPath + verifiedRefs"]:::blocked
+  end
+  CHAIN["Bittensor subtensor<br/>set_weights"]
+  V0 --> V1
+  H1 -->|"assignment: event + agent.code"| V1 --> V2 --> V3 --> V4 --> V5 --> V6
+  V6 -->|"witnessed upstream"| H2
+  H2 -->|"raw response"| V6
+  V6 --> V7 --> V8
+  V7 --> V9 --> V10 -->|"prediction + belief_path + trace"| H3
+  H3 -.-> H4
+  V0 -->|"hourly tick"| V11
+  H4 -->|"scored DTO + beliefPath"| V11 --> V12 --> V13 --> CHAIN
+  V7 -.-> FIXA
+  V6 -.-> FIXB
+  V12 -.-> FIXC
+  V6 -.-> CAT
+  classDef vali fill:#cfe0fb,stroke:#1c6fd8,color:#000;
+  classDef scoring fill:#ffe4bf,stroke:#e07b1a,color:#000;
+  classDef gw fill:#e6d3f7,stroke:#7a3cc0,color:#000;
+  classDef chain fill:#dde1e6,stroke:#57606a,color:#000;
+  classDef newv1 fill:#cdeee9,stroke:#12816f,color:#000;
+  classDef fixed fill:#c9f2d4,stroke:#1e8e3e,color:#000;
+  classDef blocked fill:#fff3cd,stroke:#b8860b,color:#000;
+  class V0,V1,V2,V3,V4,V5,V9,V10 vali;
+  class V11,V13 scoring;
+  class H1,H2,H3 gw;
+  class CHAIN chain;
+  style VAL fill:#edf0f5,stroke:#aeb9cc;
+  style GW fill:#f3eafc,stroke:#c9a9ea;</div>
+</details>
+</section>
+
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs';
+mermaid.initialize({startOnLoad:false, theme:'neutral', securityLevel:'loose', flowchart:{htmlLabels:true, curve:'basis'}});
+const after = document.getElementById('after');
+after.hidden = false;
+document.querySelectorAll('details').forEach(d => d.open = true);
+await mermaid.run({querySelector:'.mermaid'});
+after.hidden = true;
+document.querySelectorAll('details.miner').forEach(d => d.open = false);
+const buttons = document.querySelectorAll('.tabs button');
+buttons.forEach(btn => btn.addEventListener('click', () => {
+  buttons.forEach(b => b.classList.toggle('active', b === btn));
+  const tab = btn.dataset.tab;
+  document.getElementById('before').hidden = tab !== 'before';
+  document.getElementById('after').hidden = tab !== 'after';
+}));
+</script>
