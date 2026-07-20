@@ -51,7 +51,7 @@ def assemble_trace(
         event_created_at=event.created_at,
     )
 
-    prediction_output = _build_prediction_output(agent_result, provider_calls)
+    prediction_output = _build_prediction_output(agent_result, execution_context)
 
     # beliefPath is the one canonical source that survives the docker sandbox
     # boundary (orchestrator drops ctx.reasoning_chain there), so it drives the
@@ -98,12 +98,19 @@ def assemble_trace(
 
 def _build_prediction_output(
     result: AgentResult,
-    provider_calls: list[ProviderCall],
+    execution_context: ExecutionContext,
 ) -> PredictionOutput:
     """Construct the structured PredictionOutput from the agent's simple result.
 
     The agent provides the probability, confidence and reasoning text; the
     assembler derives the confidence interval and the contrarian flag.
+
+    F7: the contrarian flag is computed from the VALIDATOR-sealed market baseline
+    (``execution_context.market_price_at_prediction``), never from agent-supplied
+    evidence. It is directional disagreement — the agent and the market land on
+    opposite sides of 0.5. When no baseline was sealed (non-Polymarket event or a
+    fetch failure) the flag is False. contrarianFlag is submitted but not scored
+    in-repo; this is a data-quality fix.
     """
     ci = None
     if result.confidence is not None:
@@ -113,10 +120,11 @@ def _build_prediction_output(
             min(1.0, result.prediction + half_width),
         )
 
-    market_price = _find_market_price(provider_calls)
-    contrarian = False
-    if market_price is not None:
-        contrarian = abs(result.prediction - market_price) > 0.10
+    market_price = execution_context.market_price_at_prediction
+    contrarian = (
+        market_price is not None
+        and (result.prediction - 0.5) * (market_price - 0.5) < 0
+    )
 
     return PredictionOutput(
         final_probability=result.prediction,
@@ -209,15 +217,6 @@ def _synthesise_reasoning_chain(
         inference_model_used=inference_call.model if inference_call else None,
     ))
     return steps
-
-
-def _find_market_price(provider_calls: list[ProviderCall]) -> float | None:
-    """Look for a market price in the provider evidence for contrarian detection."""
-    for pc in provider_calls:
-        for ev in pc.extracted_evidence:
-            if ev.evidence_type.value == "price" and ev.numeric_value is not None:
-                return ev.numeric_value
-    return None
 
 
 def _find_inference_call(provider_calls: list[ProviderCall]) -> ProviderCall | None:

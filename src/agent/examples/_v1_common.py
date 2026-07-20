@@ -37,6 +37,7 @@ model id.
 
 from __future__ import annotations
 
+import json
 import re
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -101,7 +102,11 @@ def _coerce_unit(v: object) -> float:
         s = v.strip().rstrip(".").strip()
         is_pct = s.endswith("%")
         s = s.rstrip("%").strip()
-        m = re.search(r"-?\d*\.?\d+", s)
+        # F10: accept scientific notation so "1e-5" parses to 1e-05 rather than
+        # matching the leading "1" and returning 1.0. This is the reference-agent
+        # helper miners fork; the universal AgentResult.prediction float already
+        # parses sci-notation.
+        m = re.search(r"-?\d*\.?\d+(?:[eE][-+]?\d+)?", s)
         if not m:
             raise ValueError(f"no number in {v!r}")
         num = float(m.group(0))
@@ -130,8 +135,10 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 
 
 def _extract_json_blob(text: str) -> str | None:
-    """Pull the first balanced ``{...}`` object out of model text, tolerating
-    markdown fences and surrounding prose."""
+    """Pull the first JSON object out of model text, tolerating markdown fences
+    and surrounding prose. Uses a real JSON parser (``raw_decode``) so braces
+    inside string values don't truncate the object the way a brace-counting
+    scan would."""
     if not text or not text.strip():
         return None
     t = text.strip()
@@ -141,15 +148,11 @@ def _extract_json_blob(text: str) -> str | None:
     start = t.find("{")
     if start == -1:
         return None
-    depth = 0
-    for i in range(start, len(t)):
-        if t[i] == "{":
-            depth += 1
-        elif t[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return t[start:i + 1]
-    return None
+    try:
+        _, end = json.JSONDecoder().raw_decode(t, start)
+    except json.JSONDecodeError:
+        return None
+    return t[start:end]
 
 
 def parse_forecast(text: str) -> Forecast | None:

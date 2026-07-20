@@ -19,8 +19,6 @@ from src.core.schemas import EvidenceType, ExtractedEvidence, ExtractionMethod
 def extract_evidence(provider_id: str, call_type: str, raw: dict[str, Any]) -> list[ExtractedEvidence]:
     """Dispatch to provider-specific extraction logic."""
     extractors = {
-        "polymarket": _extract_polymarket,
-        "web_search": _extract_web_search,
         "grok": _extract_grok,
         "perplexity": _extract_perplexity,
         "anthropic": _extract_anthropic,
@@ -30,75 +28,6 @@ def extract_evidence(provider_id: str, call_type: str, raw: dict[str, Any]) -> l
     }
     fn = extractors.get(provider_id, _extract_generic)
     return fn(call_type, raw)
-
-
-# ---------------------------------------------------------------------------
-# Data providers
-# ---------------------------------------------------------------------------
-
-def _extract_polymarket(call_type: str, raw: dict[str, Any]) -> list[ExtractedEvidence]:
-    items: list[ExtractedEvidence] = []
-
-    if "price" in raw:
-        items.append(ExtractedEvidence(
-            evidence_type=EvidenceType.PRICE,
-            content=f"Current market price: {raw['price']}",
-            extraction_method=ExtractionMethod.DIRECT_VALUE,
-            numeric_value=float(raw["price"]),
-        ))
-
-    if "volume_24h" in raw:
-        items.append(ExtractedEvidence(
-            evidence_type=EvidenceType.STATISTIC,
-            content=f"24h trading volume: {raw['volume_24h']}",
-            extraction_method=ExtractionMethod.DIRECT_VALUE,
-            numeric_value=float(raw["volume_24h"]),
-        ))
-
-    if "price_history" in raw and isinstance(raw["price_history"], list):
-        prices = [p["price"] for p in raw["price_history"] if "price" in p]
-        if len(prices) >= 2:
-            direction = "up" if prices[-1] > prices[0] else "down"
-            delta = prices[-1] - prices[0]
-            items.append(ExtractedEvidence(
-                evidence_type=EvidenceType.TREND,
-                content=f"Price trend: {direction} by {abs(delta):.4f} over {len(prices)} data points",
-                extraction_method=ExtractionMethod.STATISTICAL_SUMMARY,
-                numeric_value=delta,
-            ))
-
-    if "probability" in raw:
-        items.append(ExtractedEvidence(
-            evidence_type=EvidenceType.PROBABILITY,
-            content=f"Implied probability: {raw['probability']}",
-            extraction_method=ExtractionMethod.DIRECT_VALUE,
-            numeric_value=float(raw["probability"]),
-        ))
-
-    return items
-
-
-def _extract_web_search(call_type: str, raw: dict[str, Any]) -> list[ExtractedEvidence]:
-    items: list[ExtractedEvidence] = []
-
-    for r in raw.get("results", []):
-        snippet = r.get("snippet", r.get("title", ""))
-        if snippet:
-            items.append(ExtractedEvidence(
-                evidence_type=EvidenceType.QUOTE_SUMMARY,
-                content=snippet,
-                extraction_method=ExtractionMethod.NLP_EXTRACTION,
-            ))
-
-    if "result_count" in raw:
-        items.append(ExtractedEvidence(
-            evidence_type=EvidenceType.STATISTIC,
-            content=f"Total search results: {raw['result_count']}",
-            extraction_method=ExtractionMethod.DIRECT_VALUE,
-            numeric_value=float(raw["result_count"]),
-        ))
-
-    return items
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +443,11 @@ def _extract_openrouter(call_type: str, raw: dict[str, Any]) -> list[ExtractedEv
             source_url=cite["url"],
             source_title=cite.get("title") or None,
             excerpt=excerpt,
-            counts_toward_grounding=True,
+            # F5: grounding is UNSCORED in MVP (no domain allowlist / fetch-verify yet),
+            # so do not mark citations as admissible grounding. Keeps the audit trail
+            # (url/title/excerpt) and stays consistent with extract_sources' Source
+            # default (False). Revisit in phase-2 with a real fetch-verification step.
+            counts_toward_grounding=False,
         ))
 
     return items
@@ -526,24 +459,40 @@ def _openrouter_url_citations(raw: dict[str, Any]) -> list[dict[str, str]]:
     :online and sonar models put cited sources at
     choices[0].message.annotations[].url_citation.{url,title}.
     """
+    # F2: isinstance-guard every level. A 2xx body can carry unexpected shapes
+    # (message:null, choices[0] a str, annotations a list of strings, url_citation a
+    # str, citations a list of ints); none of these may raise on a successful call —
+    # mirror the defensiveness of _extract_llm_completion_text.
     out: list[dict[str, str]] = []
     choices = raw.get("choices")
-    msg = choices[0].get("message", {}) if isinstance(choices, list) and choices else {}
-    for ann in (msg.get("annotations") or []):
-        if ann.get("type") == "url_citation":
-            uc = ann.get("url_citation", {}) or {}
+    first = choices[0] if isinstance(choices, list) and choices else None
+    msg = first.get("message") if isinstance(first, dict) else None
+    if not isinstance(msg, dict):
+        msg = {}
+    annotations = msg.get("annotations")
+    if isinstance(annotations, list):
+        for ann in annotations:
+            if not isinstance(ann, dict) or ann.get("type") != "url_citation":
+                continue
+            uc = ann.get("url_citation")
+            if not isinstance(uc, dict):
+                uc = {}
             url = uc.get("url", "")
             if url:
                 out.append({"url": url, "title": uc.get("title", ""), "excerpt": uc.get("content", "") or ""})
     # sonar may also surface a top-level search_results / citations list.
-    for sr in (raw.get("search_results") or []):
-        if sr.get("url"):
-            out.append({"url": sr["url"], "title": sr.get("title", "")})
-    for url in (raw.get("citations") or []):
-        if isinstance(url, str):
-            out.append({"url": url, "title": ""})
+    search_results = raw.get("search_results")
+    if isinstance(search_results, list):
+        for sr in search_results:
+            if isinstance(sr, dict) and sr.get("url"):
+                out.append({"url": sr["url"], "title": sr.get("title", "")})
+    citations = raw.get("citations")
+    if isinstance(citations, list):
+        for url in citations:
+            if isinstance(url, str):
+                out.append({"url": url, "title": ""})
     # de-dup by url, preserve order
-    seen=set(); deduped=[]
+    seen = set(); deduped = []
     for c in out:
         if c["url"] not in seen:
             seen.add(c["url"]); deduped.append(c)

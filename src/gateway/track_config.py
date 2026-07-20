@@ -13,7 +13,6 @@ from __future__ import annotations
 
 TRACK_ALLOWED_PROVIDERS: dict[str, list[str]] = {
     "MAIN": ["*"],
-    "SIGNAL": ["polymarket", "web_search"],
 }
 
 

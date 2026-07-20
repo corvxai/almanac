@@ -82,18 +82,6 @@ _PROVIDER_CAPABILITIES: dict[str, dict[str, Any]] = {
         "defaultCallType": "chat_completion",
         "supportsCompletions": True,
     },
-    "polymarket": {
-        "models": [],
-        "allowsAnyModel": False,
-        "defaultCallType": "get_market",
-        "supportsCompletions": False,
-    },
-    "web_search": {
-        "models": [],
-        "allowsAnyModel": False,
-        "defaultCallType": "search",
-        "supportsCompletions": False,
-    },
 }
 
 
@@ -365,8 +353,6 @@ def _infer_default_call_type(provider_id: str) -> str:
         "grok": "chat_completion",
         "gemini": "generate_content",
         "perplexity": "chat_completion",
-        "polymarket": "get_market",
-        "web_search": "search",
     }
     return defaults.get(provider_id, "chat_completion")
 

@@ -17,9 +17,6 @@ from tests.gateway.harness import (
 
 # (provider_id, call_type, evidence types that must appear at least once)
 OFFLINE_FIXTURE_CASES: list[tuple[str, str, tuple[EvidenceType, ...]]] = [
-    ("polymarket", "get_market", (EvidenceType.PRICE, EvidenceType.PROBABILITY)),
-    ("polymarket", "get_price_history", (EvidenceType.TREND,)),
-    ("web_search", "search", (EvidenceType.QUOTE_SUMMARY, EvidenceType.STATISTIC)),
     ("grok", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("perplexity", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.QUOTE_SUMMARY)),
     ("anthropic", "messages", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
@@ -49,14 +46,14 @@ def test_extract_evidence_from_golden_fixture(
     assert_evidence_covers_types(evidence, *required_types)
 
 
-@pytest.mark.provider("polymarket")
+@pytest.mark.provider("openrouter")
 def test_call_and_extract_stub_matches_pipeline(maybe_pretty_print_raw) -> None:
     """``call_and_extract`` should mirror ``extract_from_raw`` for the same payload."""
-    provider_id, call_type = "polymarket", "get_market"
+    provider_id, call_type = "openrouter", "chat_completion"
     raw = load_raw_fixture(provider_id, call_type)
-    stub = StubProvider(provider_id, call_type, raw, ProviderTier.FREE_SIGNAL)
+    stub = StubProvider(provider_id, call_type, raw, ProviderTier.INFERENCE)
     out_raw, evidence = call_and_extract(stub, call_type, {})
-    maybe_pretty_print_raw(out_raw, banner="polymarket.get_market (stub / golden)")
+    maybe_pretty_print_raw(out_raw, banner="openrouter.chat_completion (stub / golden)")
     assert out_raw == raw
     expected = extract_from_raw(provider_id, call_type, raw)
     assert [e.model_dump() for e in evidence] == [e.model_dump() for e in expected]

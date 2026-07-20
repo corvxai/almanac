@@ -88,10 +88,16 @@ class TestRunRegistry:
 
 
 class TestTrackAllowlist:
-    def test_signal_track_blocks_disallowed_provider(self, proxy_client):
+    def test_restricted_track_blocks_disallowed_provider(self, proxy_client, monkeypatch):
+        from src.gateway import track_config
+
+        # A track with an explicit (non-'*') allowlist blocks providers not on it.
+        monkeypatch.setitem(
+            track_config.TRACK_ALLOWED_PROVIDERS, "RESTRICTED", ["openrouter"]
+        )
         client, state, _ = proxy_client
         run_id = uuid4()
-        state.register_run(run_id, track="SIGNAL")
+        state.register_run(run_id, track="RESTRICTED")
         resp = client.post(
             "/v1/call",
             json={"provider_id": "anthropic", "call_type": "messages", "params": {}},
@@ -120,27 +126,36 @@ class TestForwardingAndRecording:
 
         resp = client.post(
             "/v1/call",
-            json={"provider_id": "polymarket", "call_type": "get_market", "params": {"slug": "x"}},
+            json={
+                "provider_id": "openrouter",
+                "call_type": "chat_completion",
+                "params": {
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            },
             headers={"X-Run-Id": str(run_id)},
         )
         assert resp.status_code == 200
-        assert resp.json()["data"] == {"echo": {"slug": "x"}}
 
-        # Upstream saw exactly one request.
+        # Upstream saw exactly one request — a plain completions payload
+        # (never callType/params; those typed calls no longer exist).
         assert len(captured["requests"]) == 1
         upstream = captured["requests"][0]
         assert upstream["url"].endswith("/v1/gateway/validator/completions")
-        assert upstream["body"]["provider"] == "polymarket"
-        assert upstream["body"]["callType"] == "get_market"
-        assert upstream["body"]["params"] == {"slug": "x"}
+        assert upstream["body"]["provider"] == "openrouter"
+        assert upstream["body"]["model"] == "anthropic/claude-3.5-sonnet"
+        assert upstream["body"]["messages"] == [{"role": "user", "content": "hi"}]
+        assert "callType" not in upstream["body"]
+        assert "params" not in upstream["body"]
         assert "minerHotkey" not in upstream["body"]
         assert upstream["headers"]["x-miner-hotkey"] == "5MinerHotkey"
 
         # The proxy records the call against the run.
         calls = state.pop_calls(run_id)
         assert len(calls) == 1
-        assert calls[0].provider_id == "polymarket"
-        assert calls[0].call_type == "get_market"
+        assert calls[0].provider_id == "openrouter"
+        assert calls[0].call_type == "chat_completion"
         assert calls[0].call_index == 0
 
     def test_pop_calls_deregisters_run(self, proxy_client):

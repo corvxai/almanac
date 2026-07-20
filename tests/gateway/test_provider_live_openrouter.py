@@ -1,17 +1,54 @@
 """Optional live call to OpenRouter (``pytest --live`` + ``OPENROUTER_API_KEY``).
 
-Uses the same system prompt, user-message shape, and chat parameters as
-``OpenRouterAgent`` in ``run_forecast.py`` so live smoke matches production inference.
+Uses a forecasting system prompt, user-message shape, and chat parameters that
+mirror an OpenRouter-driven agent so live smoke matches production inference.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from src.agent.examples.openrouter_agent import MODELS, SYSTEM_PROMPT, _build_user_prompt
 from src.gateway.providers.openrouter import OpenRouterProvider
 
 from tests.gateway.harness import assert_evidence_nonempty, call_and_extract, require_env_vars
+
+MODELS = [
+    "anthropic/claude-haiku-4-5",
+    "openai/gpt-4o-mini",
+    "meta-llama/llama-4-maverick",
+    "deepseek/deepseek-r1",
+]
+
+SYSTEM_PROMPT = """\
+You are an expert forecaster specialising in probabilistic predictions on \
+binary events (YES/NO outcomes).
+
+Key principles:
+- Consider base rates and historical precedents
+- Weigh evidence quality and recency
+- Account for uncertainty and missing information
+- Avoid extreme predictions (0 or 1) unless evidence is overwhelming
+- Use the full probability range: 0.0 (impossible) to 1.0 (certain)"""
+
+
+def _build_user_prompt(title: str, description: str, context: str) -> str:
+    return f"""\
+**Event to Forecast:**
+{title}
+
+**Full Description:**
+{description}
+
+**Research Context:**
+{context if context else "No additional research context available."}
+
+**Your Task:**
+Estimate the probability (0.0 to 1.0) that this event will resolve YES.
+
+**Required Output Format:**
+PREDICTION: [number between 0.0 and 1.0]
+CONVICTION: [number between 0.0 and 1.0 indicating your confidence in the prediction value]
+REASONING: [2-4 sentences explaining your probability estimate]"""
 
 # Fixed sample event + synthetic research block (mirrors agent phase-1 context string).
 _SAMPLE_TITLE = "Sample binary event: major US tech IPO above $20B valuation in Q3 2026?"

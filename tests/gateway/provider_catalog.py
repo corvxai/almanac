@@ -21,8 +21,6 @@ from src.gateway.providers.grok import GrokProvider
 from src.gateway.providers.openai import OpenAIProvider
 from src.gateway.providers.openrouter import OpenRouterProvider
 from src.gateway.providers.perplexity import PerplexityProvider
-from src.gateway.providers.polymarket import PolymarketProvider
-from src.gateway.providers.web_search import WebSearchProvider
 
 _MIN_LLM_USER = (
     "Reply with exactly two lines of text, nothing else:\n"
@@ -47,8 +45,6 @@ def _openrouter_mock() -> BaseProvider:
 
 
 _MOCK_FACTORY: dict[str, Callable[[], BaseProvider]] = {
-    "polymarket": PolymarketProvider,
-    "web_search": WebSearchProvider,
     "grok": GrokProvider,
     "perplexity": PerplexityProvider,
     "openai": OpenAIProvider,
@@ -69,24 +65,6 @@ def build_mock_provider(provider_id: str) -> BaseProvider:
 
 # Every row is executed by ``test_provider_mock_calls`` (offline, in-process mocks).
 MOCK_PROVIDER_CALL_EXAMPLES: tuple[ProviderCallExample, ...] = (
-    ProviderCallExample(
-        "polymarket",
-        "get_market",
-        {"market_slug": "pytest-market"},
-        (EvidenceType.PRICE, EvidenceType.PROBABILITY),
-    ),
-    ProviderCallExample(
-        "polymarket",
-        "get_price_history",
-        {"market_slug": "pytest-market", "days": 4},
-        (EvidenceType.TREND,),
-    ),
-    ProviderCallExample(
-        "web_search",
-        "search",
-        {"query": "arcratio pytest query", "num_results": 2},
-        (EvidenceType.QUOTE_SUMMARY, EvidenceType.STATISTIC),
-    ),
     ProviderCallExample(
         "grok",
         "chat_completion",

@@ -22,10 +22,10 @@ from src.core.config import AppConfig
 from src.core.events import Event
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import DEFAULT_GATEWAY_SERVICE_URL, gateway_service_url
-from src.agent.examples.simple_agent import SimpleAgent
-from src.agent.examples.openrouter_agent import OpenRouterAgent
-from src.agent.examples.openrouter_agent2 import OpenRouterAgent as OpenRouterAgent2
-from src.agent.examples.claude_agent import ClaudeAgent
+from src.agent.examples.v1_agent1_llm_only import V1Agent1LLMOnly
+from src.agent.examples.v1_agent2_basic import V1Agent2Basic
+from src.agent.examples.v1_agent3_greatsearch_basicllm import V1Agent3GreatSearchBasicLLM
+from src.agent.examples.v1_agent5_orchestrated import V1Agent5Orchestrated
 from src.storage.json_store import build_trace_store
 from src.validator.orchestrator import Orchestrator
 from src.validator.validator import start_local_proxy as _start_local_proxy
@@ -122,9 +122,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--agent", "-a",
-        choices=["simple", "openrouter", "openrouter2", "anthropic", "all"],
-        default="openrouter",
-        help="Which agent to run (default: openrouter)",
+        choices=["llm_only", "basic", "search", "orchestrated", "all"],
+        default="basic",
+        help="Which agent to run (default: basic)",
     )
     parser.add_argument(
         "--all-events",
@@ -215,10 +215,10 @@ def main() -> None:
     miner_hotkey = _dev_miner_hotkey(local_proxy_state, config)
 
     agent_map = {
-        "simple": SimpleAgent,
-        "openrouter": OpenRouterAgent,
-        "openrouter2": OpenRouterAgent2,
-        "anthropic": ClaudeAgent,
+        "llm_only": V1Agent1LLMOnly,
+        "basic": V1Agent2Basic,
+        "search": V1Agent3GreatSearchBasicLLM,
+        "orchestrated": V1Agent5Orchestrated,
     }
     if args.agent == "all":
         agents = [cls() for cls in agent_map.values()]

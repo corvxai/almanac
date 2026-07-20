@@ -34,14 +34,12 @@ from src.core.schemas import ProviderCall, ProviderTier
 from src.gateway.client import _DEFAULT_TIERS, optional_completions_fields
 from src.gateway.constants import gateway_service_url
 from src.gateway.gateway import build_provider_call_record, default_summarise_params
-from src.gateway.provider_capabilities import DATA_PROVIDERS, provider_default_call_type
+from src.gateway.provider_capabilities import provider_default_call_type
 from src.gateway.signing import LoadedKeypair, load_hotkey
 from src.gateway.track_config import is_provider_allowed
 from src.gateway.validator_protocol import canonical_json, sign_validator_completions_request
 
 logger = logging.getLogger("arcratio.local_proxy")
-# Data providers whose typed `params` must be forwarded (single source of truth).
-_NON_COMPLETIONS_PROVIDERS = DATA_PROVIDERS
 
 
 # ---------------------------------------------------------------------------
@@ -330,9 +328,6 @@ def _forward_and_record(
     for key, value in optional_completions_fields(params).items():
         completion_payload.setdefault(key, value)
     completion_payload.pop("minerHotkey", None)
-    if provider_id in _NON_COMPLETIONS_PROVIDERS:
-        completion_payload.setdefault("callType", call_type)
-        completion_payload.setdefault("params", params)
     outbound_text = canonical_json(completion_payload)
     outbound_bytes = outbound_text.encode("utf-8")
     headers = {

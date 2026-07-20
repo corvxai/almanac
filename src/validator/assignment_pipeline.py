@@ -333,6 +333,12 @@ def build_prediction_submit_payload(
                 "latencyMs": digest.execution_context.execution_duration_ms,
                 "predictionIsInvalid": not is_valid_prediction,
                 "predictionInvalidReason": invalid_reason,
+                # F8: confidence stays optional (kept for training, not required). We
+                # still send confidence:0.0 (the Sub41 DTO needs a number), so carry an
+                # explicit flag letting consumers exclude omitters from confidence
+                # stats. rawObserved.confidence already carries the 'None' repr; this is
+                # the machine-readable version.
+                "confidenceOmitted": digest.prediction_output.confidence is None,
                 "predictionValidation": {
                     "isValid": is_valid_prediction,
                     "reasons": invalid_reasons,
@@ -350,6 +356,11 @@ def build_prediction_submit_payload(
             "traceSummary": {
                 "strategy": "validator-assignment-pipeline",
                 "executionId": execution_context.get("execution_id"),
+                # F6 / TODO(phase-2): this traceHash was sealed over the PRE-COMPACTION
+                # snake_case digest (see EvidenceDigest.seal). It cannot be recomputed
+                # from this compacted camelCase payload and nothing in apps/api verifies
+                # it today — it is a local-store integrity marker only. Phase-2: add a
+                # second hash over the exact wire payload and verify server-side.
                 "traceHash": trace_integrity.get("trace_hash"),
                 "providerCallCount": len(provider_calls),
                 "reasoningStepCount": len(steps),

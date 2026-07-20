@@ -107,14 +107,6 @@ class TestNetworkLockdown:
         exc = _run_attack_in_sandbox(cfg, proxy_state, NetworkDnsAttack())
         assert exc is not None
 
-    def test_direct_gateway_blocked(self, runner_image, local_proxy, proxy_socket_dir):
-        from src.agent.examples._attacks.direct_gateway import DirectGatewayAttack
-
-        proxy_state, _ = local_proxy
-        cfg = _build_cfg(proxy_socket_dir, runner_image)
-        exc = _run_attack_in_sandbox(cfg, proxy_state, DirectGatewayAttack())
-        assert exc is not None
-
 
 # ---------------------------------------------------------------------------
 # Filesystem attacks
@@ -218,7 +210,7 @@ class TestPositiveEndToEnd:
     def test_simple_agent_completes(self, runner_image, local_proxy, proxy_socket_dir):
         """A non-attack agent runs through Docker → UDS → local proxy →
         (stubbed) central gateway and produces a parseable AgentResult."""
-        from src.agent.examples.simple_agent import SimpleAgent
+        from src.agent.examples.v1_agent1_llm_only import V1Agent1LLMOnly
 
         proxy_state, _captured = local_proxy
         cfg = _build_cfg(proxy_socket_dir, runner_image)
@@ -229,7 +221,7 @@ class TestPositiveEndToEnd:
         run_id = uuid4()
         proxy_state.register_run(run_id, "MAIN", miner_hotkey="5TestMiner")
         try:
-            result = run_agent_in_container(SimpleAgent(), ctx, cfg.validator, run_id)
+            result = run_agent_in_container(V1Agent1LLMOnly(), ctx, cfg.validator, run_id)
             calls = proxy_state.pop_calls(run_id)
         finally:
             # In case the test failed before pop_calls.

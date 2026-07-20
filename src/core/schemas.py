@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
@@ -249,7 +250,11 @@ class BeliefStep(BaseModel):
     step: int = Field(ge=0)
     type: Literal["prior", "update", "final"]
     probability: float = Field(ge=0.0, le=1.0)
-    text: str = Field(min_length=1)
+    # F4: cap belief text. It is TRIPLICATED downstream (future_graph.beliefPath[].text,
+    # steps[].reasoningText, and reasoning_summary) and compaction strips only ONE copy,
+    # so an uncapped step can blow the gateway 1MB submit ceiling. See the aggregate
+    # byte-budget guard in tests/agent/test_v1_json_contract.py.
+    text: str = Field(min_length=1, max_length=4000)
     usedCall: Optional[str] = None
     usedSources: Optional[list[int]] = None
 
@@ -272,9 +277,13 @@ class AgentResult(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     prediction: float = Field(ge=0, le=1)
-    reasoning: str = Field(min_length=1)
+    # F4: cap the free-text reasoning; it also lands in reasoning_summary and (via the
+    # terminal belief step) is triplicated, so the aggregate submit payload must stay
+    # under the gateway 1MB ceiling. Enforced at this docker boundary so an oversize
+    # agent fails locally before any submit.
+    reasoning: str = Field(min_length=1, max_length=8000)
     confidence: Optional[float] = Field(default=None, ge=0, le=1)
-    beliefPath: list[BeliefStep] = Field(min_length=1)
+    beliefPath: list[BeliefStep] = Field(min_length=1, max_length=32)
     metadata: Optional[dict[str, Any]] = None
 
     @model_validator(mode="after")
@@ -282,7 +291,11 @@ class AgentResult(BaseModel):
         finals = [s for s in self.beliefPath if s.type == "final"]
         if len(finals) != 1 or self.beliefPath[-1].type != "final":
             raise ValueError("beliefPath must end with exactly one 'final' step")
-        if round(self.beliefPath[-1].probability, 4) != round(self.prediction, 4):
+        # F11: tolerance compare, not round(_,4) equality. Every uploaded agent
+        # validates through here, so a hard 4dp equality rejects honest agents at
+        # .xxxx5 rounding boundaries. 5e-5 is tighter than the 6dp submit rounding,
+        # so no real disagreement leaks through.
+        if not math.isclose(self.beliefPath[-1].probability, self.prediction, abs_tol=5e-5):
             raise ValueError("final belief-path probability must equal prediction")
         return self
 
@@ -342,7 +355,16 @@ class EvidenceDigest(BaseModel):
         return hashlib.sha256(payload).hexdigest()
 
     def seal(self) -> "EvidenceDigest":
-        """Return a copy with trace_hash computed and set."""
+        """Return a copy with trace_hash computed and set.
+
+        F6 / TODO(phase-2): this hash is sealed over the PRE-COMPACTION snake_case
+        digest. The traceHash transmitted in the submit payload therefore covers a
+        digest the server never receives (the wire payload is compacted + camelCased),
+        so it is NOT recomputable / verifiable server-side today. It remains valid as a
+        LOCAL-store integrity marker (json_store.get_trace.verify_integrity over the
+        intact on-disk snapshot). Phase-2: add a second hash over the exact compacted
+        camelCase payload and verify it in apps/api when scoring consumes traces.
+        """
         h = self.compute_trace_hash()
         return self.model_copy(
             update={

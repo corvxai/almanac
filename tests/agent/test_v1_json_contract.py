@@ -70,6 +70,42 @@ def test_coerce_unit_percent_and_reject():
         _coerce_unit("not a number")
 
 
+# --- F10: scientific notation ------------------------------------------------
+
+def test_coerce_unit_accepts_scientific_notation():
+    # The old regex matched the leading "1" of "1e-5" and returned 1.0; the fix
+    # parses the full mantissa+exponent.
+    assert _coerce_unit("1e-5") == pytest.approx(1e-5)
+    assert _coerce_unit("2.5e-1") == pytest.approx(0.25)
+    assert _coerce_unit("1E-3") == pytest.approx(0.001)
+    # bare integer still parses to itself (regression guard)
+    assert _coerce_unit("1") == pytest.approx(1.0)
+    # a string with no parseable number is still rejected
+    with pytest.raises(ValueError):
+        _coerce_unit("e+")
+
+
+# --- F9: JSON blob extraction is string/escape-aware (raw_decode) -------------
+
+def test_extract_json_blob_tolerates_braces_inside_strings():
+    # A '}' inside a string value must NOT truncate the object (brace-counting bug).
+    text = '{"reasoning": "the market closes} soon", "prediction": 0.5, "confidence": 0.6}'
+    fc = parse_forecast(text)
+    assert fc is not None and fc.prediction == pytest.approx(0.5)
+
+
+def test_extract_json_blob_handles_nested_braces_and_trailing_prose():
+    text = 'Here you go:\n{"reasoning": "note {inner} detail", "prediction": 0.4, "confidence": 0.7}\nThanks!'
+    fc = parse_forecast(text)
+    assert fc is not None and fc.prediction == pytest.approx(0.4) and fc.confidence == pytest.approx(0.7)
+
+
+def test_extract_json_blob_fenced_json_with_prose():
+    text = 'Sure.\n```json\n{"reasoning": "x", "prediction": 0.3, "confidence": 0.55}\n```\ndone'
+    fc = parse_forecast(text)
+    assert fc is not None and fc.prediction == pytest.approx(0.3)
+
+
 # --- the v1.1.0 trace shape --------------------------------------------------
 
 def _event() -> Event:
@@ -268,6 +304,70 @@ def test_single_final_belief_path_is_valid():
 def test_malformed_agent_result_raises(kwargs):
     with pytest.raises(ValidationError):
         AgentResult(**kwargs)
+
+
+# --- F11: belief-final vs prediction tolerance compare -----------------------
+
+def test_belief_final_within_tolerance_of_prediction_validates():
+    # ~1e-12 apart validates (was exact/4dp equality before).
+    ar = AgentResult(
+        prediction=0.5, reasoning="r",
+        beliefPath=[BeliefStep(step=0, type="final", probability=0.5 + 1e-12, text="t")],
+    )
+    assert ar.prediction == 0.5
+
+
+def test_belief_final_across_rounding_boundary_validates():
+    # 0.12344 vs 0.12346 differ by 2e-5 (< 5e-5 tol) but round to different 4dp
+    # values, so the old round(_,4) equality REJECTED this honest agent; the
+    # tolerance compare accepts it.
+    assert round(0.12344, 4) != round(0.12346, 4)  # the old check would have failed
+    ar = AgentResult(
+        prediction=0.12346, reasoning="r",
+        beliefPath=[BeliefStep(step=0, type="final", probability=0.12344, text="t")],
+    )
+    assert ar.prediction == pytest.approx(0.12346)
+
+
+def test_belief_final_exact_equal_still_validates():
+    ar = AgentResult(
+        prediction=0.62, reasoning="r",
+        beliefPath=[BeliefStep(step=0, type="final", probability=0.62, text="t")],
+    )
+    assert ar.prediction == 0.62
+
+
+def test_belief_final_genuine_disagreement_still_raises():
+    with pytest.raises(ValidationError):
+        AgentResult(
+            prediction=0.7, reasoning="r",
+            beliefPath=[BeliefStep(step=0, type="final", probability=0.6, text="t")],
+        )
+
+
+# --- F4: size caps at the docker boundary ------------------------------------
+
+def test_agent_result_rejects_oversize_reasoning():
+    with pytest.raises(ValidationError):
+        AgentResult(
+            prediction=0.5, reasoning="x" * 8001,
+            beliefPath=[_final(0.5)],
+        )
+
+
+def test_belief_step_rejects_oversize_text():
+    with pytest.raises(ValidationError):
+        BeliefStep(step=0, type="final", probability=0.5, text="x" * 4001)
+
+
+def test_belief_path_rejects_too_many_items():
+    # 33 well-formed steps (prior, 31 updates, final) — only the >32 length is invalid.
+    steps = [BeliefStep(step=0, type="prior", probability=0.5, text="p")]
+    steps += [BeliefStep(step=i, type="update", probability=0.5, text="u") for i in range(1, 32)]
+    steps.append(BeliefStep(step=32, type="final", probability=0.5, text="f"))
+    assert len(steps) == 33
+    with pytest.raises(ValidationError):
+        AgentResult(prediction=0.5, reasoning="r", beliefPath=steps)
 
 
 def test_extra_key_and_inf_prediction_raise():
