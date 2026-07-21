@@ -27,7 +27,7 @@ from src.agent.examples.v1_agent2_basic import V1Agent2Basic
 from src.agent.examples.v1_agent3_greatsearch_basicllm import V1Agent3GreatSearchBasicLLM
 from src.agent.examples.v1_agent5_orchestrated import V1Agent5Orchestrated
 from src.storage.json_store import build_trace_store
-from src.validator.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator import Orchestrator
 from src.validator.validator import start_local_proxy as _start_local_proxy
 
 

@@ -19,7 +19,7 @@ from src.core.schemas import (
 )
 from src.gateway.providers.base import BaseProvider
 from src.storage.store import TraceStore
-from src.validator.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator import Orchestrator
 
 _FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="test")]
 
@@ -91,7 +91,7 @@ def test_market_baseline_not_added_to_provider_calls() -> None:
     )
 
     with patch(
-        "src.validator.orchestrator.fetch_polymarket_baseline",
+        "src.validator.forecasting.orchestrator.fetch_polymarket_baseline",
         return_value={
             "provider": "polymarket",
             "market_slug": "test-market",

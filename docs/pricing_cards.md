@@ -47,8 +47,8 @@ Example:
 
 ## Runtime overrides
 
-- `ARCRATIO_MODEL_PRICING_FILE`: absolute path to an alternate pricing cards file.
-- `ARCRATIO_MODEL_PRICING_JSON`: JSON object merged on top of file cards.
+- `FORECASTING_MODEL_PRICING_FILE`: absolute path to an alternate pricing cards file.
+- `FORECASTING_MODEL_PRICING_JSON`: JSON object merged on top of file cards.
 
 Use the JSON override for temporary hotfixes and keep long-term pricing in the
 versioned file.

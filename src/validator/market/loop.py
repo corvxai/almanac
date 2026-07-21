@@ -3,7 +3,7 @@
 Standalone functions for the Almanac incentive mechanism. (trade-history fetch,
 pagination, retry policy, profile validation, set_weights wrapper).
 
-Public entry point: ``score_almanac`` — returns a score/weight vector of
+Public entry point: ``score_market`` — returns a score/weight vector of
 length ``len(metagraph.uids)`` for the current epoch.
 """
 
@@ -23,8 +23,8 @@ from .constants import ROLLING_HISTORY_IN_DAYS, TOTAL_MINER_ALPHA_PER_DAY
 from .metadata_manager import MetadataManager
 
 # ``scoring`` pulls cvxpy (and a chain of heavy scientific deps) at import
-# time. Defer the import to ``score_almanac`` so the rest of the package
-# is usable on installs that don't need the Almanac scoring math.
+# time. Defer the import to ``score_market`` so the rest of the package
+# is usable on installs that don't need the Almanac Market scoring math.
 
 logger = logging.getLogger("almanac.market")
 
@@ -109,7 +109,7 @@ def fetch_trading_history(
 
     When ``use_synthetic_data`` is true, loads the sn41-shipped mock dataset
     from ``synthetic_data_path`` (defaults to the vendored test fixture under
-    ``src/validator/almanac/tests/advanced_mock_data.json``) and rewrites
+    ``src/validator/market/tests/advanced_mock_data.json``) and rewrites
     ``miner_id`` 170 -> 17 + ``miner_hotkey`` per the sn41 convention.
     """
 
@@ -291,7 +291,7 @@ def validate_miner_profiles(
     return miners_to_penalize
 
 
-def score_almanac(
+def score_market(
     *,
     network: str,
     wallet,  # unused in scoring, kept for symmetry with future signing paths
@@ -311,7 +311,7 @@ def score_almanac(
     apply profile-validation penalties, and return the final scores.
 
     Returns ``None`` if the upstream data fetch fails. Callers should treat
-    that as "skip the Almanac mechanism for this epoch". Any non-fatal error inside
+    that as "skip the Almanac Market mechanism for this epoch". Any non-fatal error inside
     scoring will propagate normally.
     """
     try:
@@ -345,10 +345,10 @@ def score_almanac(
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to fetch required Almanac data for scoring: %s", exc)
-        logger.warning("Skipping Almanac scoring for this epoch.")
+        logger.warning("Skipping Almanac Market scoring for this epoch.")
         return None
 
-    # Imported here so that callers who never enable the Almanac mechanism
+    # Imported here so that callers who never enable the Almanac Market mechanism
     # don't have to install cvxpy / scipy / tabulate.
     from .scoring import calculate_weights, print_pool_stats, score_miners
 

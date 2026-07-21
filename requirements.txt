@@ -7,7 +7,7 @@ docker>=7.1
 bittensor>=9.0,<11
 #async-substrate-interface>=1.5.6,<2
 
-# --- Almanac ---
+# --- Almanac Market ---
 cvxpy
 ecos
 numpy

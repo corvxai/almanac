@@ -5,7 +5,7 @@
 services:
   validator:
     volumes:
-      - arcratio-run:/var/run/arcratio
+      - almanac-run:/var/run/almanac
 
 volumes:
-  arcratio-run:
+  almanac-run:

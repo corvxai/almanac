@@ -18,7 +18,7 @@ from src.core.config import AppConfig
 from src.core.events import Event
 from src.core.schemas import AgentResult, BeliefStep, EventCategory, ResolutionRecord
 from src.storage.store import TraceStore
-from src.validator.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator import Orchestrator
 
 _FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="test")]
 
@@ -90,10 +90,10 @@ def test_run_agent_registers_with_miner_hotkey() -> None:
     proxy = _FakeProxyState()
     orch = _docker_orchestrator(proxy)
     with patch(
-        "src.validator.orchestrator.execute_agent",
+        "src.validator.forecasting.orchestrator.execute_agent",
         return_value=AgentResult(prediction=0.5, reasoning="ok", beliefPath=_FINAL_BP),
     ), patch(
-        "src.validator.orchestrator.fetch_polymarket_baseline", return_value=None
+        "src.validator.forecasting.orchestrator.fetch_polymarket_baseline", return_value=None
     ):
         orch.run_agent(_event(), _NoopAgent(), miner_hotkey="5RealMiner")
 
@@ -107,10 +107,10 @@ def test_run_all_agents_forwards_miner_hotkey() -> None:
     orch = _docker_orchestrator(proxy)
     agents = [_NoopAgent(), _NoopAgent()]
     with patch(
-        "src.validator.orchestrator.execute_agent",
+        "src.validator.forecasting.orchestrator.execute_agent",
         return_value=AgentResult(prediction=0.5, reasoning="ok", beliefPath=_FINAL_BP),
     ), patch(
-        "src.validator.orchestrator.fetch_polymarket_baseline", return_value=None
+        "src.validator.forecasting.orchestrator.fetch_polymarket_baseline", return_value=None
     ):
         orch.run_all_agents(_event(), agents, miner_hotkey="5RealMiner")
 

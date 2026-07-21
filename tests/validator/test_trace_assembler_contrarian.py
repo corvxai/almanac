@@ -24,7 +24,7 @@ from src.core.schemas import (
     SandboxEnvironment,
 )
 from src.agent.examples._v1_common import belief_path_single_final
-from src.validator.trace_assembler import assemble_trace
+from src.validator.forecasting.trace_assembler import assemble_trace
 
 
 def _event() -> Event:

@@ -6,8 +6,8 @@ from uuid import NAMESPACE_URL, uuid5
 import pytest
 
 from src.core.schemas import EventCategory
-from src.validator.orchestrator_api import OrchestratorAssignment
-from src.validator.orchestrator_event_mapper import assignment_to_event
+from src.validator.forecasting.orchestrator_api import OrchestratorAssignment
+from src.validator.forecasting.orchestrator_event_mapper import assignment_to_event
 
 
 def _assignment(*, description: str | None = "Binary event", source_market_id: str | None = "2411919"):

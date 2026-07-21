@@ -84,12 +84,12 @@ class ValidatorLoopConfig(BaseModel):
     """
 
     loop_enabled: bool = constants.VALIDATOR_LOOP.loop_enabled
-    almanac_enabled: bool = constants.VALIDATOR_LOOP.almanac_enabled
-    arcratio_enabled: bool = constants.VALIDATOR_LOOP.arcratio_enabled
+    market_enabled: bool = constants.VALIDATOR_LOOP.market_enabled
+    forecasting_enabled: bool = constants.VALIDATOR_LOOP.forecasting_enabled
     metadata_manager_enabled: bool = constants.VALIDATOR_LOOP.metadata_manager_enabled
-    almanac_weight_share: float = constants.VALIDATOR_LOOP.almanac_weight_share
-    arcratio_weight_share: float = constants.VALIDATOR_LOOP.arcratio_weight_share
-    almanac_api_url: Optional[str] = constants.VALIDATOR_LOOP.almanac_api_url
+    market_weight_share: float = constants.VALIDATOR_LOOP.market_weight_share
+    forecasting_weight_share: float = constants.VALIDATOR_LOOP.forecasting_weight_share
+    market_api_url: Optional[str] = constants.VALIDATOR_LOOP.market_api_url
     use_synthetic_trading_data: bool = constants.VALIDATOR_LOOP.use_synthetic_trading_data
     write_trading_history: bool = constants.VALIDATOR_LOOP.write_trading_history
     db_score_logging: bool = constants.VALIDATOR_LOOP.db_score_logging

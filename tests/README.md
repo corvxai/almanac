@@ -22,17 +22,17 @@ python3 scripts/run_forecast.py --event fed
 `scripts/run_validator.py` is the production entrypoint and Docker `CMD`. Once per hour it:
 
 1. Syncs metagraph data for the configured subnet.
-2. Optionally scores miners under the Almanac mechanism.
-3. Optionally scores miners under the ARCRATIO mechanism.
+2. Optionally scores miners under the Almanac Market mechanism.
+3. Optionally scores miners under the Almanac Forecasting mechanism.
 4. Blends the two score vectors and emits one `set_weights` call.
 
 Key toggles in `src/core/constants.py`:
 
 - `VALIDATOR_LOOP.loop_enabled`
-- `VALIDATOR_LOOP.almanac_enabled`
-- `VALIDATOR_LOOP.arcratio_enabled`
-- `VALIDATOR_LOOP.almanac_weight_share`
-- `VALIDATOR_LOOP.arcratio_weight_share`
+- `VALIDATOR_LOOP.market_enabled`
+- `VALIDATOR_LOOP.forecasting_enabled`
+- `VALIDATOR_LOOP.market_weight_share`
+- `VALIDATOR_LOOP.forecasting_weight_share`
 
 ## Testing
 
@@ -196,10 +196,10 @@ PM2 examples:
 
 ```bash
 # Host process
-pm2 start "python3 scripts/run_validator.py --netuid 172 --wallet.name st-vali --wallet.hotkey st-vali-hot --subtensor.network finney --logging.debug" --name arcratio-validator
+pm2 start "python3 scripts/run_validator.py --netuid 172 --wallet.name st-vali --wallet.hotkey st-vali-hot --subtensor.network finney --logging.debug" --name almanac-validator
 
 # Docker process
-pm2 start "docker compose up validator" --name arcratio-validator-docker
+pm2 start "docker compose up validator" --name almanac-validator-docker
 ```
 
 For host gateway usage, set:

@@ -1,0 +1,1 @@
+"""Almanac Forecasting validator components."""

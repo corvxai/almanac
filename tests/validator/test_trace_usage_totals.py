@@ -17,7 +17,7 @@ from src.core.schemas import (
     SandboxEnvironment,
     UsageMeta,
 )
-from src.validator.trace_assembler import assemble_trace
+from src.validator.forecasting.trace_assembler import assemble_trace
 
 _FINAL_BP = [BeliefStep(step=0, type="final", probability=0.5, text="test")]
 

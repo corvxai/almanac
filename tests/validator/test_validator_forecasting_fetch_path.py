@@ -45,7 +45,7 @@ def test_score_agent_predictions_fetches_from_orchestrator_no_trace_store(monkey
 
     monkeypatch.setattr("src.validator.validator.fetch_all_scored_predictions", _fake_fetch)
     monkeypatch.setattr(
-        "src.validator.validator.arcratio_scoring.score_agent_predictions",
+        "src.validator.validator.forecasting_scoring.score_agent_predictions",
         _fake_score,
     )
 

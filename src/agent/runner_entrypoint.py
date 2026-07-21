@@ -7,15 +7,15 @@ spawns the runner image with:
 - `--read-only` rootfs + small tmpfs for /tmp
 - `cap_drop=ALL`, `no-new-privileges`, non-root UID 10001
 - a single read-only bind mount: the UNIX domain socket exposed by the
-  validator-local signing proxy at `/run/arcratio/proxy.sock`
-- env: `SANDBOX_PROXY_URL=http+unix:///run/arcratio/proxy.sock`,
-  `RUN_ID=<uuid>`, and `ARCRATIO_RUNNER_INPUT_FILE=/run/arcratio/inputs/.arcratio_stdin_<uuid>.json`
+  validator-local signing proxy at `/run/almanac/proxy.sock`
+- env: `SANDBOX_PROXY_URL=http+unix:///run/almanac/proxy.sock`,
+  `RUN_ID=<uuid>`, and `FORECASTING_RUNNER_INPUT_FILE=/run/almanac/inputs/.almanac_stdin_<uuid>.json`
   (JSON payload on the shared bind mount; stdin is not used because Docker
   stdin EOF is unreliable.)
 
 The entrypoint:
 
-1. Reads the input JSON from ``ARCRATIO_RUNNER_INPUT_FILE`` (preferred), from
+1. Reads the input JSON from ``FORECASTING_RUNNER_INPUT_FILE`` (preferred), from
    ``--input-file``, or from stdin for manual runs.
 2. Builds a `RemoteProvider` factory that posts over the UDS to the local
    proxy, attaching `X-Run-Id` so the proxy can attribute calls.
@@ -77,7 +77,7 @@ def _socket_path_from_env() -> str:
     """
     raw = os.environ.get("SANDBOX_PROXY_URL", "").strip()
     if not raw:
-        return "/run/arcratio/proxy.sock"
+        return "/run/almanac/proxy.sock"
     if raw.startswith("http+unix://"):
         return raw[len("http+unix://"):]
     return raw
@@ -127,10 +127,10 @@ def _read_stdin_payload() -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     # Early stderr line so `docker logs` shows life before payload/agent work.
-    sys.stderr.write("[arcratio-runner] entering main\n")
+    sys.stderr.write("[almanac-runner] entering main\n")
     sys.stderr.flush()
 
-    parser = argparse.ArgumentParser(description="Arcratio agent sandbox runner")
+    parser = argparse.ArgumentParser(description="Almanac Forecasting agent sandbox runner")
     parser.add_argument(
         "--input-file",
         default=None,
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    env_input = os.environ.get("ARCRATIO_RUNNER_INPUT_FILE", "").strip()
+    env_input = os.environ.get("FORECASTING_RUNNER_INPUT_FILE", "").strip()
     if env_input:
         with open(env_input, "r", encoding="utf-8") as fh:
             payload = json.load(fh)

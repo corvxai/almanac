@@ -1,4 +1,4 @@
-# Arcratio — Architecture & Production-Readiness Audit
+# Almanac — Architecture & Production-Readiness Audit
 
 A high-level audit of the current codebase against the goal of moving from
 prototype to a robust foundation for a commercial service. Findings are
@@ -9,7 +9,7 @@ code changes were made for this audit.
 
 ## 1. Executive summary
 
-Arcratio is split into two distinct pillars; only one of them lives in this
+Almanac is split into two distinct pillars; only one of them lives in this
 repo.
 
 - **Pillar 1 (this repo + a separate scoring service):** Subnet ingestion
@@ -57,7 +57,7 @@ default seccomp profile.
 >   to the orchestrator, but the path is lossy and runs over an unenforced
 >   transport. See the revised C7, plus H9/H10.
 > - **A plaintext DB credential is committed to the repo** —
->   `src/validator/almanac/storage/storage.env`. This is the single
+>   `src/validator/market/storage/storage.env`. This is the single
 >   highest-urgency item in the document. See **C9**.
 > - **The Almanac Postgres store repeats C1's mistakes** for the new IM's
 >   payout data (single reused connection, no pool, no rollback). See **C10**.
@@ -66,12 +66,12 @@ default seccomp profile.
 
 > **Third-pass update (2026-06-10).** A further review was run after the
 > `origin/assignment_pipeline` sync (which refactored the orchestrator
-> assignment flow into `src/validator/assignment_pipeline.py`). It found a
+> assignment flow into `src/validator/forecasting/assignment_pipeline.py`). It found a
 > set of **new findings the first two passes missed** — including two
-> payout-correctness bugs in the Almanac scoring path — and several were
+> payout-correctness bugs in the Almanac Market scoring path — and several were
 > remediated in a non-breaking patch this pass. The most consequential:
 >
-> - **Two latent payout bugs in Almanac scoring (now fixed).** A
+> - **Two latent payout bugs in Almanac Market scoring (now fixed).** A
 >   case-sensitivity bug falsely flagged legitimate miners as multi-profile
 >   and zeroed their weight; an unguarded division crashed the entire
 >   weight-setting step on a zero-fee epoch. See **N1** and **N2**.
@@ -92,7 +92,7 @@ default seccomp profile.
 
 Three actors, one execution cycle per event:
 
-- **Validator** (`src/validator/orchestrator.py`): receives an event,
+- **Validator** (`src/validator/forecasting/orchestrator.py`): receives an event,
   spawns the agent in a sibling Docker container, drains gateway-side
   call logs, assembles the trace, seals it, and writes it locally.
 - **Agent** (`src/agent/`): a `BaseAgent` subclass running inside the
@@ -126,7 +126,7 @@ Three artefacts are needed to bridge pillar 1 → pillar 2:
    via the orchestrator API: the validator polls
    `GET /v1/validators/agent-and-event` for an assignment, runs the agent,
    and `POST`s the prediction plus the full `EvidenceDigest` to
-   `/v1/validators/prediction` (`src/validator/orchestrator_api.py:17-19`).
+   `/v1/validators/prediction` (`src/validator/forecasting/orchestrator_api.py:17-19`).
    The path is real but lossy and transport-insecure — see the revised C7,
    H9, H10.
 2. **Scoring contract** — the interface between the trace producer (this
@@ -157,7 +157,7 @@ rather than design from scratch. See Q1/Q2 below for the revised framing.
 3. **Sandbox baseline flags are correct.** `network_mode="none"`,
    `read_only=True`, `cap_drop=["ALL"]`, `no-new-privileges`, non-root
    UID 10001, mem/cpu/pids limits, tmpfs `/tmp`
-   (`src/validator/sandbox_docker.py:266-296`).
+   (`src/validator/forecasting/sandbox_docker.py:266-296`).
 4. **Attack-suite-as-tests.** `src/agent/examples/_attacks/*.py` runs
    the sandbox against fork-bombs, memory hogs, raw sockets, DNS,
    urllib, /etc/passwd reads, wallet reads, and allowlist bypass; each
@@ -165,7 +165,7 @@ rather than design from scratch. See Q1/Q2 below for the revised framing.
    `tests/security/test_sandbox_lockdown.py`. This is a real moat;
    keep growing it.
 5. **Signing wire format is finalised.**
-   `arcratio:v1:{netuid}:{ts}:{nonce}:sha256(body)` in
+   `almanac:v1:{netuid}:{ts}:{nonce}:sha256(body)` in
    `src/gateway/signing.py` is a clean canonical form that can be
    turned on without changing clients.
 6. **Cost estimation is deterministic and externalised.**
@@ -332,7 +332,7 @@ unchanged and still recommended.
 read-write so it can spawn sibling agent containers. This is the
 documented design, but the validator process itself has **no secondary
 containment** — a single RCE in the validator (FastAPI input parsing, a
-dependency CVE, or a bug in `src/validator/sandbox_docker.py` payload
+dependency CVE, or a bug in `src/validator/forecasting/sandbox_docker.py` payload
 handling) gives the attacker full control of the host *and* the
 in-memory hotkey loaded at `src/gateway/local_proxy.py:144`. No
 user-namespace remap, no AppArmor profile, no read-only validator
@@ -358,7 +358,7 @@ onboarded. Concretely needed:
 Sealed traces now leave the validator: after each run the validator POSTs
 the prediction plus the full `EvidenceDigest` (in `reasoningTrace.trace`)
 to the orchestrator at `/v1/validators/prediction`
-(`src/validator/orchestrator_api.py:18,208`; payload built in
+(`src/validator/forecasting/orchestrator_api.py:18,208`; payload built in
 `validator.py` `_build_prediction_submit_payload`). Authentication to the
 orchestrator is Bittensor hotkey signing — the right primitive. The
 remaining gaps that keep this from being production-grade:
@@ -392,7 +392,7 @@ depend on it. See Q2.
 ### C9. A plaintext database credential was committed to the repo
 
 **New finding (2026-06-08). Tracking fixed this pass; history scrub still
-outstanding.** `src/validator/almanac/storage/storage.env` was
+outstanding.** `src/validator/market/storage/storage.env` was
 **git-tracked** and contained a plaintext Postgres password
 (`DB_PASSWORD=...`, line 6) alongside `DB_USER`, `DB_NAME`, host and port.
 Per the maintainer this is a **local/test credential** (`almanac_market_test`
@@ -419,7 +419,7 @@ Status of remediation:
 ### C10. Almanac Postgres store is not concurrency- or crash-safe
 
 **New finding (2026-06-08). This is C1 repeated for the new IM's data.**
-`src/validator/almanac/storage/postgres_validator_storage.py` is a
+`src/validator/market/storage/postgres_validator_storage.py` is a
 singleton holding a single long-lived connection literally named
 `continuous_connection_do_not_reuse` (line 55, created at 148, returned at
 293) guarded by a process-local `RLock`. Queries are correctly
@@ -458,7 +458,7 @@ dedicated change with a Postgres integration harness.
 ### H1. Agent image is referenced by floating tag, not digest
 
 `src/core/config.py:34` and `docker-compose.yaml:45` both use
-`arcratio/agent-runner:latest`. `latest` is resolved at pull time on the
+`almanac/agent-runner:latest`. `latest` is resolved at pull time on the
 host daemon. There is no `--digest` pin, no signature check, no
 `docker pull --policy` discipline. A registry compromise (or a developer
 accidentally pushing a debug image to that tag) replaces the sandbox
@@ -466,7 +466,7 @@ runtime for every subsequent run with no audit signal.
 
 ### H2. No seccomp/AppArmor profile on the agent sandbox
 
-`src/validator/sandbox_docker.py:266-296` relies on Docker's *default*
+`src/validator/forecasting/sandbox_docker.py:266-296` relies on Docker's *default*
 seccomp profile plus `cap_drop=ALL`. The default profile still permits
 roughly 300 syscalls, including `ptrace`, `process_vm_readv`, and
 `madvise(MADV_DONTNEED)`. For a Bittensor-style untrusted-agent threat
@@ -490,7 +490,7 @@ default path.
 
 `logger.info` calls in the gateway (`src/gateway/server.py:106-114`) and
 `print` calls in the orchestrator
-(`src/validator/orchestrator.py:129-143`) are the entirety of the
+(`src/validator/forecasting/orchestrator.py:129-143`) are the entirety of the
 operational signal. No structured logs (JSON), no correlation ID
 joining validator → local proxy → central gateway → provider, no
 metrics endpoint, no OpenTelemetry. You cannot run a paid service SLA
@@ -574,7 +574,7 @@ orchestrator integration:
 dev-only behaviours into production code paths:
 
 - **Toggleable synthetic/mock trading data.** `use_synthetic_data`
-  (`src/validator/almanac/loop.py:100`) swaps real trading history for an
+  (`src/validator/market/loop.py:100`) swaps real trading history for an
   sn41-shipped mock dataset. Left true (or defaulted true in a config),
   the entire subnet rewards miners against static fixture data.
 - **Hardcoded localhost test endpoint.**
@@ -587,7 +587,7 @@ dev-only behaviours into production code paths:
   id for privacy"), but substring matching is weaker than a prefix/exact
   match and widens the space for id collision/spoofing; worth tightening
   to an explicit prefix match with a minimum length.
-- **Dual-IM blend edge cases.** The Almanac/Arcratio weight blend can
+- **Dual-IM blend edge cases.** The Almanac Market/Almanac Forecasting weight blend can
   silently misbehave: a non-zero `share` on a *disabled* mechanism is
   ignored with no warning, and a total share of zero falls back to equal
   weighting rather than erroring. An operator can believe they are running
@@ -636,11 +636,10 @@ value for the integrity story.
 will silently load old data and fail Pydantic validation in unhelpful
 ways. The scoring contract (Q2) needs to pin this down.
 
-### M6. `pyproject.toml` still says `forecasting-prototype` v0.1.0
+### M6. Package metadata used the prototype name
 
-Cosmetic, but a paid product cannot ship from a
-`name = "forecasting-prototype"` package. Worth doing alongside any
-rename of imports from `src.*` to a proper package namespace.
+**Resolved by the Almanac naming refactor.** `pyproject.toml` now uses
+`name = "almanac"`.
 
 ### M7. Tests don't cover the central gateway in concurrent / adversarial mode
 
@@ -664,7 +663,7 @@ range across a major version. Pin these (ideally via a lockfile /
 `pip-compile`) and declare `psycopg2-binary` as an extra.
 
 **Status (2026-06-08): `psycopg2-binary` now declared** in a dedicated
-optional `requirements-almanac-postgres.txt` (additive — keeps it off the
+optional `requirements-market-postgres.txt` (additive — keeps it off the
 default install since the Postgres path is import-guarded). Pinning the
 `cvxpy`/`ecos`/`scipy` stack is still open: it needs a full resolve + smoke
 test that this environment cannot run, so it is left for a lockfile pass.
@@ -738,7 +737,7 @@ findings:
 5. **Sandbox baseline (H2):** `docker inspect` a live agent container
    and confirm `SecurityOpt` lacks any `seccomp=` and `apparmor=`
    entries.
-6. **Image pinning (H1):** `docker image inspect arcratio/agent-runner:latest`
+6. **Image pinning (H1):** `docker image inspect almanac/agent-runner:latest`
    — the digest is whatever was pulled last; nothing in the codebase
    pins it.
 
@@ -757,9 +756,9 @@ Files that any remediation pass will touch most:
 - `src/gateway/server.py:54-121` — gateway auth gap (C3, C6)
 - `src/gateway/signing.py` — signature wire format and verification
   (C4)
-- `src/validator/sandbox_docker.py:262-298` — sandbox flags and
+- `src/validator/forecasting/sandbox_docker.py:262-298` — sandbox flags and
   runtime (C5, H1, H2)
-- `src/validator/orchestrator.py` — failure semantics, identity
+- `src/validator/forecasting/orchestrator.py` — failure semantics, identity
   propagation (H4, H6)
 - `src/gateway/local_proxy.py:89-91, 176-216` — hotkey lifetime
   (H7), proxy recording
@@ -770,18 +769,18 @@ Files that any remediation pass will touch most:
 
 New hot files added by the orchestrator + Almanac merges (2026-06-08):
 
-- `src/validator/orchestrator_api.py` — assignment poll + prediction
+- `src/validator/forecasting/orchestrator_api.py` — assignment poll + prediction
   submit + scored-prediction read (C7, C8, H9, H10)
 - `src/validator/validator.py` — submit payload build, code SHA check,
   lossy submit/return paths (C7, H9, H10)
-- `src/validator/almanac/storage/storage.env` — committed DB credential
+- `src/validator/market/storage/storage.env` — committed DB credential
   (C9); untracked + gitignored this pass, history scrub still pending
-- `src/validator/almanac/storage/postgres_validator_storage.py` —
+- `src/validator/market/storage/postgres_validator_storage.py` —
   connection reuse, no pool/rollback/migrations (C10)
-- `src/validator/almanac/loop.py` — synthetic-data toggle, localhost
+- `src/validator/market/loop.py` — synthetic-data toggle, localhost
   test endpoint, substring miner-id match (H11)
-- `src/validator/almanac/scoring.py` + `src/validator/scoring.py` +
-  `src/validator/uid_map.py` — dual-IM scoring + blend (H11)
+- `src/validator/market/scoring.py` + `src/validator/forecasting/scoring.py` +
+  `src/validator/forecasting/uid_map.py` — dual-IM scoring + blend (H11)
 - `requirements.txt` — unpinned `cvxpy`/`ecos`, undeclared
   `psycopg2-binary` (M8)
 
@@ -813,7 +812,7 @@ current.
 | C6 | No per-validator gateway metering | STILL VALID | `server.py:73-121` |
 | C7 | Trace egress | REFRAMED — now exists, lossy/insecure | `orchestrator_api.py:18,208` |
 | C8 | Scoring contract | REFRAMED — now implicit, unversioned | submit payload in `validator.py` |
-| **C9** | **Committed DB credential** | **FIXED (tracking) — untracked + gitignored; history scrub pending** | `almanac/storage/storage.env:6` |
+| **C9** | **Committed DB credential** | **FIXED (tracking) — untracked + gitignored; history scrub pending** | `market/storage/storage.env:6` |
 | **C10** | **Almanac Postgres not crash/concurrency-safe** | **NEW — deferred (needs PG harness)** | `postgres_validator_storage.py:55,148,293` |
 | H1 | Agent image floating `:latest` | STILL VALID (cross-arch build now scripted) | `core/constants.py`, `docker-compose.yaml` |
 | H2 | No seccomp/AppArmor on sandbox | STILL VALID | `sandbox_docker.py` (`no-new-privileges` only) |
@@ -823,8 +822,8 @@ current.
 | H8 | No idempotency for re-ingestion | STILL VALID — now concrete | submit payload has no key |
 | **H9** | **Prediction submit is lossy** | **NEW (high)** | `validator.py:469-490` |
 | **H10** | **No TLS / no code-signature on orch path** | **NEW (high)** | `constants.py:86`, `validator.py:515-521` |
-| **H11** | **Almanac production footguns** | **NEW (high)** | `almanac/loop.py:34,100,246` |
-| **M8** | **Unpinned/undeclared deps** | **PARTIALLY FIXED — `psycopg2-binary` declared** | `requirements-almanac-postgres.txt` (cvxpy/ecos pins open) |
+| **H11** | **Almanac Market production footguns** | **NEW (high)** | `market/loop.py:34,100,246` |
+| **M8** | **Unpinned/undeclared deps** | **PARTIALLY FIXED — `psycopg2-binary` declared** | `requirements-market-postgres.txt` (cvxpy/ecos pins open) |
 
 ### 12.1 Remediation applied in this pass (non-breaking, verified)
 
@@ -851,7 +850,7 @@ to what could be exercised):
   document the footgun. Verified end-to-end by cross-building `agent-runner`
   for `linux/amd64` on an arm64 host and confirming `Architecture=amd64`.
 - **M8 — optional Postgres dep declared** in
-  `requirements-almanac-postgres.txt`.
+  `requirements-market-postgres.txt`.
 
 Deferred deliberately (need an environment this pass lacks): C10 (Postgres
 pool/rollback/migrations — needs a live PG + bittensor), `cvxpy`/`ecos`
@@ -864,7 +863,7 @@ pinning (needs a full resolve), and the larger gateway/orchestrator work
 
 Run after the `origin/assignment_pipeline` sync. That sync refactored the
 orchestrator-assignment flow out of `validator.py` into
-`src/validator/assignment_pipeline.py`; the load-bearing safety guard was
+`src/validator/forecasting/assignment_pipeline.py`; the load-bearing safety guard was
 re-verified intact (`assignment_pipeline.py:274` still refuses to execute
 orchestrator-supplied agent code unless `sandbox_type` is docker-based, and
 the untrusted `exec()` only ever runs inside the sandbox container, never the
@@ -981,7 +980,7 @@ prior passes, the full validator/Almanac suites need `bittensor`+`cvxpy`
 
 - **N1, N2 — payout bugs fixed.** `scoring.py`: lowercase-to-lowercase
   profile-id compare with dedupe; zero-budget guards on both weight
-  divisions. `almanac/constants.py`: import-time range validation
+  divisions. `market/constants.py`: import-time range validation
   (`[0, 1]`) on `EXCESS_MINER_TAKE_PERCENTAGE` and
   `GENERAL_POOL_WEIGHT_PERCENTAGE` to prevent negative/over-unity burn
   weights. Verified pass + reject paths in isolation.
@@ -999,7 +998,7 @@ prior passes, the full validator/Almanac suites need `bittensor`+`cvxpy`
 ### 13.3 Still outstanding after this pass
 
 - **C9 history scrub — confirmed still reachable.**
-  `git show 67a949a:src/validator/almanac/storage/storage.env` still returns
+  `git show 67a949a:src/validator/market/storage/storage.env` still returns
   the plaintext password. Rotate the credential and `git filter-repo` +
   coordinated force-push. Unchanged from §12.
 - **Dockerfile hardening + dependency lockfile** (validator image runs as

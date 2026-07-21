@@ -34,9 +34,9 @@ from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
 from src.storage.json_store import JsonTraceStore
-from src.validator.assignment_pipeline import process_single_assignment
-from src.validator.orchestrator import Orchestrator
-from src.validator.orchestrator_api import (
+from src.validator.forecasting.assignment_pipeline import process_single_assignment
+from src.validator.forecasting.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator_api import (
     PREDICTION_ENDPOINT,
     fetch_agent_event_assignment,
 )
@@ -138,7 +138,7 @@ def main() -> int:
     # live in the compose-mounted run dir, and host-loopback URLs must go via
     # the Docker host gateway.
     if _running_in_container():
-        mounted_run_dir = Path("/var/run/arcratio")
+        mounted_run_dir = Path("/var/run/almanac")
         if mounted_run_dir.is_dir() and cfg.validator.sandbox_socket_dir != mounted_run_dir:
             print(f"Container runtime detected; sandbox socket dir -> {mounted_run_dir}")
             cfg.validator.sandbox_socket_dir = mounted_run_dir

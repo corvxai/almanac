@@ -34,8 +34,8 @@ from src.agent.examples._v1_common import (
     belief_path_steps,
     parse_forecast,
 )
-from src.validator.assignment_pipeline import normalize_prediction_values
-from src.validator.trace_assembler import assemble_trace
+from src.validator.forecasting.assignment_pipeline import normalize_prediction_values
+from src.validator.forecasting.trace_assembler import assemble_trace
 
 
 # --- the provider-LLM output contract ---------------------------------------

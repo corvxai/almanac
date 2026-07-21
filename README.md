@@ -15,11 +15,11 @@
 
 </div>
 
-Almanac is a validator stack for decentralized forecasting on Bittensor. It combines two incentive mechanisms, both geared towards improving prediction accuracy.
+Almanac is a validator stack for decentralized forecasting on Bittensor. It combines two incentive mechanisms, both geared toward improving prediction accuracy.
 
-IM1: Almanac.market is the front end, a prediction market terminal that makes competing and submitting predictions by trading simpler and much more accessible.
+IM1 — **Almanac Market** (`almanac.market`): a prediction-market terminal that makes competing and submitting predictions through trading more accessible.
 
-IM2: Miners submit forecasting agents that predict events while validators build reasoning traces for our data pipeline.
+IM2 — **Almanac Forecasting**: miners submit forecasting agents that predict events while validators build reasoning traces for our data pipeline.
 
 Both incentive mechanisms generate scores and publish blended weights on-chain.
 
@@ -51,8 +51,8 @@ The goal is production-safe validator behavior with transparent scoring and repr
 Each scoring cycle, the validator:
 
 1. Syncs the subnet metagraph and miner metadata.
-2. Computes Market incentive scores (when enabled).
-3. Computes Forecasting scores (when enabled).
+2. Computes Almanac Market incentive scores (when enabled).
+3. Computes Almanac Forecasting scores (when enabled).
 4. Blends score vectors and submits a single `set_weights` update.
 
 Mechanism toggles and blend shares are configured in `src/core/constants.py` under `VALIDATOR_LOOP`.
@@ -61,13 +61,14 @@ Mechanism toggles and blend shares are configured in `src/core/constants.py` und
 
 ### Miner
 
-- Miners participate through Almanac trading and metadata registration.
+- Almanac Market miners participate through trading and metadata registration.
+- Almanac Forecasting miners submit agents through `miner/cli.py`.
 - Miner onboarding and CLI flows are documented in `miner/README.md`.
 - Miner metadata can be registered with:
 
 ```bash
 pip install -r requirements-miner.txt
-python3 scripts/run_almanac_miner.py
+python3 scripts/run_market_miner.py
 ```
 
 ### Validator
@@ -87,7 +88,7 @@ python3 scripts/run_almanac_miner.py
 
 ### Production: Docker required
 
-When Forecasting IM is enabled, the validator must spawn sandboxed agent-runner
+When Almanac Forecasting is enabled, the validator must spawn sandboxed agent-runner
 child containers. In this repo, that means running the validator with Docker
 access (`docker.sock`) via Compose.
 
@@ -177,13 +178,18 @@ Additional references:
 ```text
 src/
   core/        Shared schemas, config, and constants
-  validator/   Scoring and orchestrator pipeline
+  validator/
+    validator.py   Shared blend loop and on-chain weight submission
+    market/        Almanac Market scoring and metadata
+    forecasting/   Almanac Forecasting scoring, orchestration, and sandboxing
   gateway/     Provider proxy and evidence extraction
   agent/       Agent framework and examples
   storage/     Trace persistence backends
 scripts/       Runtime entrypoints and utilities
 tests/         Unit/integration/live test suites and contributor docs
-miner/         Miner-facing CLI and onboarding docs
+miner/
+  cli.py       Almanac Forecasting agent submission CLI
+  market/      Almanac Market miner registration and trading integration
 ```
 
 ## Environments

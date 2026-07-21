@@ -67,7 +67,7 @@ def runner_image(docker_enabled) -> str:
     import docker  # type: ignore
 
     client = docker.from_env()
-    tag = "arcratio/agent-runner:test"
+    tag = "almanac/agent-runner:test"
     dockerfile = PROJECT_ROOT / "docker" / "agent-runner.Dockerfile"
     client.images.build(
         path=str(PROJECT_ROOT),
@@ -150,7 +150,7 @@ def local_proxy(proxy_socket_dir: Path, upstream_capture):
             break
         time.sleep(0.05)
     assert socket_path.exists(), "proxy UDS failed to start"
-    from src.validator.proxy_socket import make_proxy_socket_connectable
+    from src.validator.forecasting.proxy_socket import make_proxy_socket_connectable
 
     make_proxy_socket_connectable(socket_path)
 

@@ -99,7 +99,7 @@ def _price_cards() -> dict[str, PriceCard]:
 
 
 def _load_price_cards_from_file() -> dict[str, PriceCard]:
-    path = Path(os.environ.get("ARCRATIO_MODEL_PRICING_FILE", str(_DEFAULT_PRICE_FILE)))
+    path = Path(os.environ.get("FORECASTING_MODEL_PRICING_FILE", str(_DEFAULT_PRICE_FILE)))
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -120,7 +120,7 @@ def _load_price_cards_from_file() -> dict[str, PriceCard]:
 
 
 def _merge_env_override(base_cards: dict[str, PriceCard]) -> dict[str, PriceCard]:
-    raw = os.environ.get("ARCRATIO_MODEL_PRICING_JSON", "").strip()
+    raw = os.environ.get("FORECASTING_MODEL_PRICING_JSON", "").strip()
     if not raw:
         return base_cards
 

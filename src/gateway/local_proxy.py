@@ -39,7 +39,7 @@ from src.gateway.signing import LoadedKeypair, load_hotkey
 from src.gateway.track_config import is_provider_allowed
 from src.gateway.validator_protocol import canonical_json, sign_validator_completions_request
 
-logger = logging.getLogger("arcratio.local_proxy")
+logger = logging.getLogger("almanac.local_proxy")
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ def create_app(cfg: AppConfig, *, http_client: Optional[httpx.Client] = None) ->
             )
         yield
 
-    app = FastAPI(title="Arcratio Validator Local Proxy", version="0.1.0", lifespan=_lifespan)
+    app = FastAPI(title="Almanac Validator Local Proxy", version="0.1.0", lifespan=_lifespan)
     app.state.proxy = state
 
     @app.get("/health")

@@ -9,7 +9,7 @@ outbound request to the central provider gateway with sr25519, and enforces
 per-track allowlists.
 
 Usage:
-    python scripts/run_local_proxy.py [--socket /var/run/arcratio/proxy.sock]
+    python scripts/run_local_proxy.py [--socket /var/run/almanac/proxy.sock]
                                        [--unsafe-no-signing]
 
 For local development without a Bittensor wallet, pass --unsafe-no-signing.
@@ -30,7 +30,7 @@ import uvicorn  # noqa: E402
 
 from src.core.config import AppConfig  # noqa: E402
 from src.gateway.local_proxy import create_app  # noqa: E402
-from src.validator.proxy_socket import proxy_socket_bind_umask  # noqa: E402
+from src.validator.forecasting.proxy_socket import proxy_socket_bind_umask  # noqa: E402
 
 
 logging.basicConfig(
@@ -38,11 +38,11 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-24s  %(levelname)-5s  %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("arcratio.local_proxy")
+log = logging.getLogger("almanac.local_proxy")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Arcratio Validator Local Proxy")
+    parser = argparse.ArgumentParser(description="Almanac Validator Local Proxy")
     parser.add_argument(
         "--socket",
         default=None,
@@ -74,7 +74,7 @@ def main() -> None:
 
     print()
     print("=" * 60)
-    print("  ARCRATIO VALIDATOR LOCAL PROXY")
+    print("  ALMANAC VALIDATOR LOCAL PROXY")
     print(f"  Socket:        {socket_path}")
     print(f"  Signing:       {'DISABLED (dev)' if not cfg.bittensor.signing_required else 'ENABLED'}")
     print(f"  Wallet:        {cfg.bittensor.wallet_path}/{cfg.bittensor.wallet_name}/{cfg.bittensor.wallet_hotkey}")

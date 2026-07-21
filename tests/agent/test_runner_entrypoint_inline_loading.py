@@ -52,13 +52,13 @@ def test_inline_code_ignores_module_agent_class_for_inline_lookup(tmp_path: Path
         tmp_path,
         {
             "event": {},
-            "agent_module": "src.validator.assignment_pipeline",
+            "agent_module": "src.validator.forecasting.assignment_pipeline",
             "agent_class": "_InlineCodeSandboxAgent",
             "agent_code": "class Ignored:\n    pass\n",
         },
     )
     _common_monkeypatch(monkeypatch)
-    monkeypatch.setenv("ARCRATIO_RUNNER_INPUT_FILE", str(payload_path))
+    monkeypatch.setenv("FORECASTING_RUNNER_INPUT_FILE", str(payload_path))
 
     seen = {"inline_class": "unset"}
 
@@ -85,14 +85,14 @@ def test_inline_code_uses_inline_class_key_when_present(tmp_path: Path, monkeypa
         tmp_path,
         {
             "event": {},
-            "agent_module": "src.validator.assignment_pipeline",
+            "agent_module": "src.validator.forecasting.assignment_pipeline",
             "agent_class": "_InlineCodeSandboxAgent",
             "agent_code": "class Ignored:\n    pass\n",
             "inline_class": "MinerClaudeAgent",
         },
     )
     _common_monkeypatch(monkeypatch)
-    monkeypatch.setenv("ARCRATIO_RUNNER_INPUT_FILE", str(payload_path))
+    monkeypatch.setenv("FORECASTING_RUNNER_INPUT_FILE", str(payload_path))
 
     seen = {"inline_class": None}
 

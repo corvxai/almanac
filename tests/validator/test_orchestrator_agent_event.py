@@ -7,7 +7,7 @@ import httpx
 
 from src.core.config import AppConfig
 from src.core.constants import ORCHESTRATOR_API_URL
-from src.validator.orchestrator_api import (
+from src.validator.forecasting.orchestrator_api import (
     AGENT_AND_EVENT_ENDPOINT,
     AgentAndEventResponse,
     OrchestratorAssignment,
@@ -204,7 +204,7 @@ def test_fetch_agent_event_assignment_accepts_alias_fields_and_missing_optional_
 def test_validator_polling_calls_assignment_handler(monkeypatch) -> None:
     cfg = AppConfig()
     cfg.loop.loop_enabled = False
-    cfg.loop.arcratio_enabled = True
+    cfg.loop.forecasting_enabled = True
 
     validator = Validator(config=cfg, store=None, bt_objects=_bt_objects(), metadata_manager=None)
     cfg.validator.orchestrator_api_url = ORCHESTRATOR_API_URL
@@ -256,7 +256,7 @@ def test_validator_polling_calls_assignment_handler(monkeypatch) -> None:
 def test_validator_polling_skips_during_assignment_execution_cooldown(monkeypatch) -> None:
     cfg = AppConfig()
     cfg.loop.loop_enabled = False
-    cfg.loop.arcratio_enabled = True
+    cfg.loop.forecasting_enabled = True
     cfg.loop.assignment_execution_cooldown_seconds = 180
 
     now = datetime.datetime(2026, 6, 5, 15, 0, 0, tzinfo=datetime.timezone.utc)
@@ -286,7 +286,7 @@ def test_validator_polling_skips_during_assignment_execution_cooldown(monkeypatc
 def test_validator_polling_runs_after_assignment_execution_cooldown(monkeypatch) -> None:
     cfg = AppConfig()
     cfg.loop.loop_enabled = False
-    cfg.loop.arcratio_enabled = True
+    cfg.loop.forecasting_enabled = True
     cfg.loop.assignment_execution_cooldown_seconds = 180
 
     now = datetime.datetime(2026, 6, 5, 15, 0, 0, tzinfo=datetime.timezone.utc)

@@ -32,9 +32,9 @@ from src.gateway.providers.base import BaseProvider
 from src.gateway.signing import verify_request_headers
 from src.gateway.validator_protocol import verify_validator_completions_request
 
-logger = logging.getLogger("arcratio.gateway")
+logger = logging.getLogger("almanac.gateway")
 
-app = FastAPI(title="Arcratio Provider Gateway (Simulated)", version="0.1.0")
+app = FastAPI(title="Almanac Provider Gateway (Simulated)", version="0.1.0")
 
 # Max accepted request body for /v1/call. The body is buffered fully in
 # memory before parsing, so without a cap a single large POST can OOM the

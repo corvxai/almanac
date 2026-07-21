@@ -3,9 +3,9 @@
 
 This wrapper just adds the repo root to ``sys.path`` so the miner script can be invoked from anywhere via:
 
-    python scripts/run_almanac_miner.py [--polymarket-id ...] [--non-interactive]
+    python scripts/run_market_miner.py [--polymarket-id ...] [--non-interactive]
 
-See ``miner/almanac/miner.py`` ``--help`` for the full argument list.
+See ``miner/market/miner.py`` ``--help`` for the full argument list.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Build arcratio Docker images for an explicit target CPU architecture (Windows).
+  Build Almanac Docker images for an explicit target CPU architecture (Windows).
 
 .DESCRIPTION
   The validator spawns the agent-runner image as sibling containers at runtime.
@@ -55,11 +55,11 @@ function Build-Image($dockerfile, $tag) {
 }
 
 switch ($Target) {
-  "agent-runner" { Build-Image "docker/agent-runner.Dockerfile" "arcratio/agent-runner:latest" }
-  "validator"    { Build-Image "docker/validator.Dockerfile"    "arcratio/validator:latest" }
+  "agent-runner" { Build-Image "docker/agent-runner.Dockerfile" "almanac/agent-runner:latest" }
+  "validator"    { Build-Image "docker/validator.Dockerfile"    "almanac/validator:latest" }
   "all" {
-    Build-Image "docker/agent-runner.Dockerfile" "arcratio/agent-runner:latest"
-    Build-Image "docker/validator.Dockerfile"    "arcratio/validator:latest"
+    Build-Image "docker/agent-runner.Dockerfile" "almanac/agent-runner:latest"
+    Build-Image "docker/validator.Dockerfile"    "almanac/validator:latest"
   }
 }
 

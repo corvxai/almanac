@@ -33,11 +33,11 @@ from src.core.schemas import (
 from src.gateway.gateway import ProviderGateway
 from src.gateway.providers.base import BaseProvider
 from src.storage.store import TraceStore
-from src.validator.polymarket_baseline import fetch_polymarket_baseline
-from src.validator.sandbox import execute_agent
-from src.validator.trace_assembler import assemble_trace
+from src.validator.forecasting.polymarket_baseline import fetch_polymarket_baseline
+from src.validator.forecasting.sandbox import execute_agent
+from src.validator.forecasting.trace_assembler import assemble_trace
 
-logger = logging.getLogger("arcratio.orchestrator")
+logger = logging.getLogger("almanac.forecasting.orchestrator")
 
 
 class Orchestrator:
@@ -151,7 +151,7 @@ class Orchestrator:
             duration_ms,
         )
         print(
-            f"[arcratio] agent execution finished: sandbox={sandbox_type} "
+            f"[almanac] agent execution finished: sandbox={sandbox_type} "
             f"duration={duration_s:.2f}s ({duration_ms} ms) "
             f"agent={agent.agent_id!r} execution_id={execution_id}",
             flush=True,

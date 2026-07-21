@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import httpx
 
 from src.core.constants import ORCHESTRATOR_API_URL
-from src.validator.orchestrator_api import (
+from src.validator.forecasting.orchestrator_api import (
     SCORED_PREDICTIONS_ENDPOINT,
     AUTH_DOMAIN,
     fetch_all_scored_predictions,

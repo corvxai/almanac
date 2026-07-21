@@ -9,7 +9,7 @@ records a full reasoning trace, scores predictions, and submits weights to the
 Bittensor chain.
 
 > Infrastructure for the [Almanac](https://almanac.market) forecasting subnet.
-> See the [repository](https://github.com/sportstensor/arcratio) for full docs.
+> See the [repository](https://github.com/Corvus-Labs/almanac) for full docs.
 
 ---
 
@@ -60,5 +60,5 @@ architecture notes.
 
 ## Links
 
-- Source & guides: https://github.com/sportstensor/arcratio
+- Source & guides: https://github.com/Corvus-Labs/almanac
 - Sandbox image: [`almanacai/agent-runner`](https://hub.docker.com/r/almanacai/agent-runner)

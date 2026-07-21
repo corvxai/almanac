@@ -59,7 +59,7 @@ from src.core.schemas import (
 )
 from src.agent.examples._v1_common import belief_path_single_final
 from src.storage.json_store import JsonTraceStore
-from src.validator.trace_assembler import assemble_trace
+from src.validator.forecasting.trace_assembler import assemble_trace
 
 
 def _sealed_digest():
@@ -133,7 +133,7 @@ def test_get_trace_roundtrip_verifies_on_disk_integrity(tmp_path) -> None:
     strict=True,
 )
 def test_submitted_trace_hash_is_recomputable_from_wire_payload() -> None:
-    from src.validator.assignment_pipeline import build_prediction_submit_payload  # noqa: F401
+    from src.validator.forecasting.assignment_pipeline import build_prediction_submit_payload  # noqa: F401
     # There is deliberately no server-side recompute path yet; asserting one exists
     # is expected to fail until phase-2 adds a hash over the exact wire payload.
     raise AssertionError("no server-side recompute of traceHash exists in v1")

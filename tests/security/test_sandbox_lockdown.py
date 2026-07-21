@@ -7,7 +7,7 @@ Skipped unless `pytest --docker` is passed and the Docker daemon is up.
 The runner image is built once per session via the `runner_image` fixture.
 
 Mirrors the network/FS/resource attacks from the Numinous security suite,
-with one arcratio-specific addition: the read-only Bittensor wallet boundary.
+with one Almanac-specific addition: the read-only Bittensor wallet boundary.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def _run_attack_in_sandbox(
     """Register a run, launch the sandbox with the attack agent, return the
     raised exception (or `None` on success).
     """
-    from src.validator.sandbox_docker import run_agent_in_container
+    from src.validator.forecasting.sandbox_docker import run_agent_in_container
 
     event = _sample_event()
     ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
@@ -121,7 +121,7 @@ class TestFilesystemLockdown:
 
         proxy_state, _ = local_proxy
         cfg = _build_cfg(proxy_socket_dir, runner_image)
-        from src.validator.sandbox_docker import run_agent_in_container
+        from src.validator.forecasting.sandbox_docker import run_agent_in_container
 
         event = _sample_event()
         ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
@@ -143,7 +143,7 @@ class TestFilesystemLockdown:
 
         proxy_state, _ = local_proxy
         cfg = _build_cfg(proxy_socket_dir, runner_image)
-        from src.validator.sandbox_docker import run_agent_in_container
+        from src.validator.forecasting.sandbox_docker import run_agent_in_container
 
         event = _sample_event()
         ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]
@@ -192,7 +192,7 @@ class TestPositiveEndToEnd:
 
         proxy_state, _captured = local_proxy
         cfg = _build_cfg(proxy_socket_dir, runner_image)
-        from src.validator.sandbox_docker import run_agent_in_container
+        from src.validator.forecasting.sandbox_docker import run_agent_in_container
 
         event = _sample_event()
         ctx = ForecastingContext(event=event, gateway=None)  # type: ignore[arg-type]

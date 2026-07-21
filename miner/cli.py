@@ -41,7 +41,7 @@ class SignedHeaders:
 def _resolve_orchestrator_url(args: argparse.Namespace) -> str:
     return (
         args.orchestrator_url
-        or os.getenv("ARCRATIO_ORCHESTRATOR_URL")
+        or os.getenv("FORECASTING_ORCHESTRATOR_URL")
         or DEFAULT_ORCHESTRATOR_URL
     ).rstrip("/")
 
@@ -49,13 +49,13 @@ def _resolve_orchestrator_url(args: argparse.Namespace) -> str:
 def _resolve_timeout(args: argparse.Namespace) -> float:
     if args.timeout_seconds is not None:
         return args.timeout_seconds
-    raw = os.getenv("ARCRATIO_TIMEOUT_SECONDS")
+    raw = os.getenv("FORECASTING_TIMEOUT_SECONDS")
     if raw is None:
         return DEFAULT_TIMEOUT_SECONDS
     try:
         return float(raw)
     except ValueError:
-        print("warning: ARCRATIO_TIMEOUT_SECONDS is invalid; using default timeout.")
+        print("warning: FORECASTING_TIMEOUT_SECONDS is invalid; using default timeout.")
         return DEFAULT_TIMEOUT_SECONDS
 
 
@@ -64,23 +64,23 @@ def _url(base_url: str, endpoint: str) -> str:
 
 
 def _resolve_wallet_path(args: argparse.Namespace) -> Path:
-    value = args.wallet_path or os.getenv("ARCRATIO_WALLET_PATH") or "~/.bittensor/wallets"
+    value = args.wallet_path or os.getenv("FORECASTING_WALLET_PATH") or "~/.bittensor/wallets"
     return Path(value).expanduser()
 
 
 def _resolve_wallet_name(args: argparse.Namespace) -> str:
-    return args.wallet_name or os.getenv("ARCRATIO_WALLET_NAME", "default")
+    return args.wallet_name or os.getenv("FORECASTING_WALLET_NAME", "default")
 
 
 def _resolve_wallet_hotkey_name(args: argparse.Namespace) -> str:
-    return args.wallet_hotkey_name or os.getenv("ARCRATIO_WALLET_HOTKEY", "default")
+    return args.wallet_hotkey_name or os.getenv("FORECASTING_WALLET_HOTKEY", "default")
 
 
 def _resolve_gateway_api_key(args: argparse.Namespace) -> str | None:
     return (
         args.gateway_api_key
         or os.getenv("GATEWAY_API_KEY")
-        or os.getenv("ARCRATIO_GATEWAY_API_KEY")
+        or os.getenv("FORECASTING_GATEWAY_API_KEY")
     )
 
 
@@ -324,7 +324,7 @@ def _handle_buy_credits(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Arcratio miner CLI")
+    parser = argparse.ArgumentParser(description="Almanac Forecasting miner CLI")
     parser.add_argument(
         "--orchestrator-url",
         default=None,
@@ -338,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "HTTP timeout in seconds. Defaults to ARCRATIO_TIMEOUT_SECONDS "
+            "HTTP timeout in seconds. Defaults to FORECASTING_TIMEOUT_SECONDS "
             f"or {DEFAULT_TIMEOUT_SECONDS}."
         ),
     )
@@ -347,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Gateway API key for submit auth. "
-            "Defaults to GATEWAY_API_KEY or ARCRATIO_GATEWAY_API_KEY."
+            "Defaults to GATEWAY_API_KEY or FORECASTING_GATEWAY_API_KEY."
         ),
     )
 
@@ -373,18 +373,18 @@ def build_parser() -> argparse.ArgumentParser:
     upload_parser.add_argument(
         "--wallet-name",
         default=None,
-        help="Bittensor wallet name (defaults to ARCRATIO_WALLET_NAME or 'default').",
+        help="Bittensor wallet name (defaults to FORECASTING_WALLET_NAME or 'default').",
     )
     upload_parser.add_argument(
         "--wallet-hotkey-name",
         default=None,
-        help="Bittensor wallet hotkey name (defaults to ARCRATIO_WALLET_HOTKEY or 'default').",
+        help="Bittensor wallet hotkey name (defaults to FORECASTING_WALLET_HOTKEY or 'default').",
     )
     upload_parser.add_argument(
         "--wallet-path",
         type=Path,
         default=None,
-        help="Bittensor wallet path (defaults to ARCRATIO_WALLET_PATH or ~/.bittensor/wallets).",
+        help="Bittensor wallet path (defaults to FORECASTING_WALLET_PATH or ~/.bittensor/wallets).",
     )
     upload_parser.add_argument(
         "--subtensor-network",

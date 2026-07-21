@@ -39,7 +39,7 @@ logging.basicConfig(
     format="%(asctime)s  %(name)-24s  %(levelname)-5s  %(message)s",
     datefmt="%H:%M:%S",
 )
-log = logging.getLogger("arcratio.gateway")
+log = logging.getLogger("almanac.gateway")
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -71,7 +71,7 @@ def _bind_policy_error(host: str, *, require_signature: bool, allow_open: bool) 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Arcratio Provider Gateway")
+    parser = argparse.ArgumentParser(description="Almanac Provider Gateway")
     parser.add_argument(
         "--host",
         default="127.0.0.1",
@@ -139,7 +139,7 @@ def main() -> None:
 
     print()
     print("=" * 60)
-    print("  ARCRATIO PROVIDER GATEWAY  [SIMULATED — not for production]")
+    print("  ALMANAC PROVIDER GATEWAY  [SIMULATED — not for production]")
     print(f"  Mode:       {'LIVE (real API keys, real spend)' if live else 'MOCK (offline, keyless)'}")
     print(f"  Listening on http://{args.host}:{args.port}")
     print(f"  Health:     http://localhost:{args.port}/health")

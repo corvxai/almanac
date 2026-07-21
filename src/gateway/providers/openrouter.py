@@ -90,7 +90,7 @@ class OpenRouterProvider(BaseProvider):
         referer = os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
         if referer:
             headers["HTTP-Referer"] = referer
-        headers["X-Title"] = os.environ.get("OPENROUTER_APP_TITLE", "arcratio-gateway")
+        headers["X-Title"] = os.environ.get("OPENROUTER_APP_TITLE", "almanac-gateway")
 
         with httpx.Client(timeout=float(constants.GATEWAY.call_timeout_seconds)) as client:
             resp = client.post(API_URL, json=body, headers=headers)

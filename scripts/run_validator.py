@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Entrypoint for the arcratio Bittensor validator.
+"""Entrypoint for the Almanac Bittensor validator.
 
 Starts the local signing proxy + agent orchestrator on a daemon
 thread (so existing tooling that spawns agent containers keeps working),
 then runs the main Validator loop — which scores each enabled
-incentivemechanism (Almanac, arcratio), blends the score vectors, and emits one
+incentive mechanism (Almanac Market, Almanac Forecasting), blends the score vectors, and emits one
 ``set_weights`` call per epoch.
 
 For ad-hoc / dev runs of just the agent orchestrator (no chain weight
@@ -185,11 +185,11 @@ def _log_startup_config_table(log: logging.Logger, config: AppConfig, args: argp
         ("logging", "color", logging_flags["color"]),
         ("logging", "wire.debug", bool(args.wire_debug)),
         ("validator_loop", "enabled", config.loop.loop_enabled),
-        ("validator_loop", "almanac_enabled", config.loop.almanac_enabled),
-        ("validator_loop", "arcratio_enabled", config.loop.arcratio_enabled),
+        ("validator_loop", "market_enabled", config.loop.market_enabled),
+        ("validator_loop", "forecasting_enabled", config.loop.forecasting_enabled),
         ("validator_loop", "metadata_manager_enabled", config.loop.metadata_manager_enabled),
-        ("validator_loop", "almanac_weight_share", config.loop.almanac_weight_share),
-        ("validator_loop", "arcratio_weight_share", config.loop.arcratio_weight_share),
+        ("validator_loop", "market_weight_share", config.loop.market_weight_share),
+        ("validator_loop", "forecasting_weight_share", config.loop.forecasting_weight_share),
         ("validator_loop", "rolling_window_days", config.loop.rolling_window_days),
         ("validator_loop", "metadata_update_interval_seconds", config.loop.metadata_update_interval_seconds),
         ("validator_loop", "metadata_batch_size", config.loop.metadata_batch_size),
@@ -396,20 +396,20 @@ def main() -> None:
         color=args.logging_color,
     )
     print(_ASCII_BANNER, flush=True)
-    log = logging.getLogger("arcratio.run_validator")
+    log = logging.getLogger("almanac.run_validator")
 
     log.info("Bittensor netuid=%d network=%s", config.bittensor.netuid, config.bittensor.subtensor_network)
     log.info(
-        "Validator loop: enabled=%s almanac=%s (share=%.2f) arcratio=%s (share=%.2f)",
+        "Validator loop: enabled=%s market=%s (share=%.2f) forecasting=%s (share=%.2f)",
         config.loop.loop_enabled,
-        config.loop.almanac_enabled,
-        config.loop.almanac_weight_share,
-        config.loop.arcratio_enabled,
-        config.loop.arcratio_weight_share,
+        config.loop.market_enabled,
+        config.loop.market_weight_share,
+        config.loop.forecasting_enabled,
+        config.loop.forecasting_weight_share,
     )
 
     if _running_in_container():
-        mounted_run_dir = Path("/var/run/arcratio")
+        mounted_run_dir = Path("/var/run/almanac")
         if mounted_run_dir.is_dir() and config.validator.sandbox_socket_dir != mounted_run_dir:
             log.info(
                 "Container runtime detected; rewriting sandbox socket dir %s -> %s",
@@ -448,7 +448,7 @@ def main() -> None:
         )
 
     # Proxy startup imports bittensor; re-sync so bt.logging emits at INFO/DEBUG
-    # through the same column formatter as arcratio.* loggers.
+    # through the same column formatter as almanac.* loggers.
     _sync_bittensor_logging(config.log_level, log_formatter)
 
     log.info(
