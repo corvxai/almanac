@@ -498,6 +498,7 @@ class Validator:
                 base_url=self._config.validator.orchestrator_api_url,
                 loaded_hotkey=self._orchestrator_hotkey,
                 payload=submit_payload,
+                assignment=assignment,
             )
         except Exception:
             logger.exception(

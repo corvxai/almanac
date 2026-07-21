@@ -4,8 +4,7 @@ fastapi>=0.115
 uvicorn>=0.34
 python-dotenv>=1.0
 docker>=7.1
-bittensor>=9.0,<11
-#async-substrate-interface>=1.5.6,<2
+bittensor==10.3.0
 
 # --- Almanac Market ---
 cvxpy
@@ -15,3 +14,4 @@ scipy
 pandas
 tabulate
 requests
+py_clob_client_v2

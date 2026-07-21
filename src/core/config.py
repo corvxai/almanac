@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal, Optional
 from uuid import UUID, uuid4
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from src.core import constants
@@ -27,7 +29,7 @@ class ValidatorConfig(BaseModel):
     )
     orchestrator_api_url: str = constants.ORCHESTRATOR_API_URL
 
-    sandbox_type: SandboxType = constants.VALIDATOR.sandbox_type  # type: ignore[assignment]
+    sandbox_type: SandboxType = constants.VALIDATOR.sandbox_type
     sandbox_image: str = constants.VALIDATOR.sandbox_image
     sandbox_timeout_seconds: int = constants.VALIDATOR.sandbox_timeout_seconds
     sandbox_max_concurrent: int = constants.VALIDATOR.sandbox_max_concurrent
@@ -116,8 +118,16 @@ class AppConfig(BaseModel):
     def load_default(cls) -> "AppConfig":
         """Build config from code defaults in :mod:`src.core.constants`.
 
-        Runtime settings are intentionally code-driven. Environment variables are
-        reserved for sensitive provider credentials and are read in gateway
-        provider clients, not here.
+        ``ORCHESTRATOR_API_URL`` from the environment (including repo-root ``.env``)
+        overrides the orchestrator URL when set. Other loop/sandbox settings stay
+        code-driven; provider credentials are still read by gateway clients.
         """
-        return cls()
+        env_file = Path(__file__).resolve().parents[2] / ".env"
+        if env_file.is_file():
+            load_dotenv(env_file, override=False)
+
+        cfg = cls()
+        orch = os.environ.get("ORCHESTRATOR_API_URL", "").strip()
+        if orch:
+            cfg.validator.orchestrator_api_url = orch.rstrip("/")
+        return cfg

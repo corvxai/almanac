@@ -1,39 +1,134 @@
 # Almanac Forecasting Miner Guide
 
-Use this guide to build an Almanac Forecasting agent and interact with gateway orchestrator miner endpoints via `miner/cli.py`.
+Use this guide to build an Almanac Forecasting agent, test it locally, and submit it to the Almanac gateway
+with `miner/cli.py`.
 
-For Almanac Market metadata registration, use `python3 scripts/run_market_miner.py`.
 
-## What this CLI does
+## Quick start
 
-- Submit your agent file to gateway (`submit-agent`, alias `upload-agent`)
-- List published agents (`list-agents`)
-- Reserve a credits command for later (`buy-credits`, currently stubbed)
+### 1. Install Forecasting deps
 
-`get-agent` is intentionally not part of this miner CLI because that route is validator-facing.
-
-## Prerequisites
-
-- Python 3.10+
-- Dependencies installed from repo root:
+From the repo root (Python 3.10+):
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Creating agents
+### 2. Get a gateway API key
 
-Your agent should follow the project contract in `src/agent/base.py`:
+1. Open the Almanac portal: [https://portal.almnc.ai](https://portal.almnc.ai)
+2. Create an account / org and generate a **gateway API key**.
+3. Put it in a repo-root `.env` (preferred) or pass `--gateway-api-key` on the CLI:
+
+```bash
+# repo-root .env
+GATEWAY_API_KEY=your-gateway-api-key
+```
+
+You also need a registered Bittensor miner wallet/hotkey on the subnet (mainnet
+netuid `41`, testnet `172`). The CLI signs uploads with that hotkey.
+
+The CLI already talks to the production orchestrator by default — no URL config
+needed unless you are pointing at a non-prod environment.
+
+**Key linking:** the first successful `submit-agent` with an unused API key
+auto-links that key to your miner hotkey/org. If the key is already linked to
+another miner, upload fails — request a fresh key.
+
+### 3. Create an agent
+
+Start from a reference implementation and adapt it:
+
+| Starter | Path | Notes |
+|---|---|---|
+| **Recommended** | `src/agent/examples/v1_agent2_basic.py` | One web search + one LLM call |
+| Minimal LLM-only | `src/agent/examples/v1_agent1_llm_only.py` | No external search |
+| JSON contract | `src/agent/examples/v1_agent_json_output.py` | Validated forecast JSON shape |
+| Capability ladder | `v1_agent3` … `v1_agent6` | Search / orchestration / markets |
+
+Contract (`src/agent/base.py`):
 
 - Subclass `BaseAgent`
-- Set `agent_id` and `agent_version`
-- Implement `predict(ctx: ForecastingContext)`
+- Set stable `agent_id` (UUID) and `agent_version`
+- Implement `predict(ctx) -> AgentResult`
+- Include a valid `beliefPath` (required; see [Belief path](#belief-path-required))
 
-Reference implementations are in `src/agent/examples/`.
+Submit a **single `.py` file** (max 2MB). Prefer one `BaseAgent` subclass per
+file. Reach external data and LLMs only through
+`ctx.call_provider(...)` — see [Allowed dependencies](#allowed-dependencies)
+and [Calling providers](#calling-providers).
 
-### Returning a belief path (required)
+### 4. Test locally before submit
 
-Every `AgentResult` must include a `beliefPath`: the ordered trajectory of your agent's probability as it reasons, from an optional prior through updates to a final belief. It is **required** and validated at the sandbox boundary. It is stored in the trace but **not scored in MVP** (it is the phase-2 grounding signal), but an agent that omits it, or returns an ill-formed one, is **rejected**.
+There is no `test path/to/agent.py` CLI yet. Use the reference harness to learn
+the sandbox and provider path, then port the same patterns into your file.
+
+```bash
+# Fast in-process smoke test against a reference agent
+python3 scripts/run_forecast.py --agent basic --sandbox in_process --unsafe-no-signing
+
+# Closer to production: Docker sandbox (build once)
+docker compose build agent-runner
+python3 scripts/run_forecast.py --agent basic --sandbox docker_runc --unsafe-no-signing
+```
+
+`--agent` choices: `llm_only`, `basic`, `search`, `orchestrated`, `all`.
+
+Before uploading your own file, check:
+
+- [ ] Subclasses `BaseAgent`, returns `AgentResult` with `prediction` + `reasoning`
+- [ ] `beliefPath` present and well-formed (final step matches `prediction`)
+- [ ] No direct provider SDKs / raw sockets / HTTP except via `ctx.call_provider`
+- [ ] Imports stay within the runner allowlist (stdlib + packages below)
+
+Contributor-oriented gateway and sandbox details: `tests/README.md`.
+
+### 5. Submit and verify
+
+With `GATEWAY_API_KEY` in `.env`:
+
+```bash
+python3 miner/cli.py submit-agent path/to/agent.py \
+  --wallet-name <wallet-name> \
+  --wallet-hotkey-name <hotkey-name>
+
+python3 miner/cli.py list-agents   # confirm your upload appears
+```
+
+Prefer `.env` for the API key over `--gateway-api-key` (shell history).
+---
+
+## Allowed dependencies
+
+Validators run miner agents inside the `almanacai/agent-runner` image with
+`--network=none`. The agent can only import what that image ships.
+
+Curated third-party packages (`docker/runner-requirements.txt`):
+
+- `httpx`
+- `pydantic`
+- `python-dotenv`
+
+Plus the Almanac agent/runtime packages baked into the image (`src.agent`,
+`src.core`, gateway client helpers used by the runner).
+
+**Do not** import:
+
+- Provider SDKs (`anthropic`, `openai`, `google-generativeai`, …) — call
+  `ctx.call_provider` instead; the gateway holds API keys.
+- Chain libraries (`bittensor`, `web3`, …) — not present in the sandbox.
+- Arbitrary network clients or OS process tools aimed at escaping the sandbox.
+
+If an import is not on the runner image, the agent will fail at runtime even if
+it works on your laptop.
+
+## Belief path (required)
+
+Every `AgentResult` must include a `beliefPath`: the ordered trajectory of your
+agent's probability as it reasons, from an optional prior through updates to a
+final belief. It is **required** and validated at the sandbox boundary. It is
+stored in the trace but **not scored in MVP** (phase-2 grounding signal). An
+agent that omits it, or returns an ill-formed one, is **rejected**.
 
 `BeliefStep` fields (no extra fields allowed):
 
@@ -43,7 +138,7 @@ Every `AgentResult` must include a `beliefPath`: the ordered trajectory of your 
 | `type` | `"prior" \| "update" \| "final"` | yes | The path must end with exactly one `final`. |
 | `probability` | `float` (0.0–1.0) | yes | Your belief at this step. |
 | `text` | `str` (non-empty) | yes | Why the belief is where it is. |
-| `usedCall` | `str \| null` | no | Provider-call id this step used. Phase-2 grounding hook; not verified in MVP. |
+| `usedCall` | `str \| null` | no | Provider-call id this step used. Phase-2; not verified. |
 | `usedSources` | `list[int] \| null` | no | Source indices this step used. Phase-2; not verified. |
 
 Validation rules (enforced by Pydantic; agent rejected on failure):
@@ -64,7 +159,7 @@ return AgentResult(
 )
 ```
 
-Evidence-linked path — declare how each piece of evidence moved your belief:
+Evidence-linked path:
 
 ```python
 return AgentResult(
@@ -79,13 +174,14 @@ return AgentResult(
 )
 ```
 
-The validator maps this path into the reasoning trace and preserves the raw declared path (with its `type` labels and `usedCall`/`usedSources` links) for the phase-2 grounding join. Your links are stored **as declared**; they are not verified in MVP.
+Links are stored **as declared**; they are not verified in MVP.
 
-### Calling providers
+## Calling providers
 
-Use `ctx.call_provider(provider_id, call_type, params)` to reach external data and LLM APIs. Every key in `params` is forwarded as-is through the validator gateway — **the platform does not inject defaults** for LLM sampling or token limits. If you omit a param, it is not sent upstream.
-
-Example:
+Use `ctx.call_provider(provider_id, call_type, params)` for external data and
+LLM APIs. Every key in `params` is forwarded as-is through the validator
+gateway — **the platform does not inject defaults** for LLM sampling or token
+limits. If you omit a param, it is not sent upstream.
 
 ```python
 ctx.call_provider("openrouter", "chat_completion", {
@@ -108,72 +204,54 @@ Common `provider_id` / `call_type` pairs:
 | `polymarket` | `get_market` | Market odds and metadata |
 | `web_search` | `search` | Web search results |
 
-Provider-specific params (for example `system`, `tools`, `grounding`) are also pass-through — include them in `params` when your chosen provider supports them. See the example agents and `src/gateway/providers/` for what each adapter accepts.
+Provider-specific params (`system`, `tools`, `grounding`, …) are also
+pass-through when the adapter supports them. See example agents and
+`src/gateway/providers/`.
 
 ### LLM params you must define
 
-These are the most common params for inference providers. **Only params you set in your agent code are forwarded.** Calibrate them per provider and model — some models reject certain sampling params entirely (for example newer Claude models may 400 on `temperature` or `top_p`).
+Only params you set in agent code are forwarded. Calibrate per provider/model —
+some models reject certain sampling params (for example newer Claude models may
+400 on `temperature` or `top_p`).
 
 | Param | Type | Description |
 |---|---|---|
 | `model` | `str` | Model ID for the provider (required for LLM calls). |
 | `messages` | `list[dict]` | Chat messages, typically `[{"role": "user", "content": "..."}]`. |
-| `max_tokens` | `int` | Maximum tokens in the completion. Omit only if you accept the provider adapter's own fallback. |
-| `temperature` | `float` | Randomness (lower = more deterministic). Often `0.1`–`0.3` for forecasting. Omit on models that reject sampling params. |
-| `top_p` | `float` | Nucleus sampling alternative to temperature. Use one or the other, not both, on Claude 4+ models. |
-| `stop` | `list[str]` | Sequences that stop generation when encountered. |
+| `max_tokens` | `int` | Maximum tokens in the completion. |
+| `temperature` | `float` | Randomness; often `0.1`–`0.3` for forecasting. Omit if the model rejects it. |
+| `top_p` | `float` | Nucleus sampling. Prefer one of temperature / top_p on Claude 4+. |
+| `stop` | `list[str]` | Stop sequences. |
 
-Anthropic-only params (pass-through when using `anthropic` / `messages`):
+Anthropic-only (with `anthropic` / `messages`):
 
 | Param | Type | Description |
 |---|---|---|
 | `system` | `str` | System prompt. |
 | `tools` | `list[dict]` | Tool definitions (for example web search). |
 
-You are responsible for choosing values that work with your target model, testing them locally, and handling provider errors when a model rejects a param combination.
-
-## Quick start
-
-From the repo root:
-
-```bash
-python3 miner/cli.py --help
-python3 miner/cli.py list-agents
-python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name>
-```
-Optionally run with explicit gateway API key defined, but MORE SECURE to define GATEWAY_API_KEY in .env:
-```bash
-python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name> --gateway-api-key <gateway-api-key>
-```
+---
 
 ## Configuration
 
-The CLI uses the shared orchestrator constant from `src/core/constants.py`:
-`ORCHESTRATOR_API_URL` (default: `http://localhost:4000`).
+Defaults target production. Override only when you intentionally need something else.
 
-You can still override the URL per command with `--orchestrator-url`.
-The CLI also auto-loads repo-root `.env` (`python-dotenv`) before resolving env vars.
+| Setting | Default | Override (optional) |
+|---|---|---|
+| Orchestrator base URL | production (`ORCHESTRATOR_API_URL` in `src/core/constants.py`) | `FORECASTING_ORCHESTRATOR_URL` or `--orchestrator-url` |
+| Gateway API key | — (required for submit) | `GATEWAY_API_KEY` (or `FORECASTING_GATEWAY_API_KEY` / `--gateway-api-key`) |
+| Timeout | `20.0` s | `FORECASTING_TIMEOUT_SECONDS` / `--timeout-seconds` |
+| Wallet path | `~/.bittensor/wallets` | `FORECASTING_WALLET_PATH` / `--wallet-path` |
+| Wallet name | `default` | `FORECASTING_WALLET_NAME` / `--wallet-name` |
+| Hotkey name | `default` | `FORECASTING_WALLET_HOTKEY` / `--wallet-hotkey-name` |
 
-- `FORECASTING_TIMEOUT_SECONDS` (default: `20.0`)
-- `FORECASTING_WALLET_PATH` (default: `~/.bittensor/wallets`)
-- `FORECASTING_WALLET_NAME` (default: `default`)
-- `FORECASTING_WALLET_HOTKEY` (default: `default`)
-- `GATEWAY_API_KEY` or `FORECASTING_GATEWAY_API_KEY`
-
-Flag equivalents:
-
-- `--orchestrator-url`
-- `--timeout-seconds`
-- `--wallet-path`
-- `--wallet-name`
-- `--wallet-hotkey-name`
-- `--gateway-api-key`
+The CLI auto-loads repo-root `.env` (`python-dotenv`) before resolving env vars.
 
 ## Command reference
 
 ### `list-agents`
 
-Calls `GET /v1/agents/list-agents`.
+`GET /v1/agents/list-agents`
 
 ```bash
 python3 miner/cli.py list-agents --limit 25 --offset 0
@@ -181,58 +259,45 @@ python3 miner/cli.py list-agents --limit 25 --offset 0
 
 ### `submit-agent` (alias: `upload-agent`)
 
-Calls `POST /v1/agents/submit-agent` with the raw `.py` file bytes as the request body.
+`POST /v1/agents/submit-agent` with the raw `.py` file bytes as the body.
 
 ```bash
-python3 miner/cli.py submit-agent path/to/agent.py --wallet-name <wallet-name> --wallet-hotkey-name <hotkey-name> --gateway-api-key <gateway-api-key>
+python3 miner/cli.py submit-agent path/to/agent.py \
+  --wallet-name <wallet-name> \
+  --wallet-hotkey-name <hotkey-name>
 ```
 
-Submit auth + request shape:
+Request shape:
 
 - Content type: `application/octet-stream`
 - Header: `x-agent-filename: <agent file name>`
 - Header: `Authorization: Bearer <gateway_api_key>`
-- Signed headers:
-  - `x-miner-hotkey`
-  - `x-miner-signature`
-  - `x-miner-nonce`
-  - `x-miner-timestamp`
+- Signed headers: `x-miner-hotkey`, `x-miner-signature`, `x-miner-nonce`,
+  `x-miner-timestamp`
 
-How signing works:
+Signing:
 
-- CLI loads miner hotkey from local Bittensor wallet files.
-- CLI builds canonical message domain `sub41-agent-v1`:
-  - method
-  - path (and query when present)
-  - subject hotkey
-  - nonce
-  - timestamp (ms)
-  - sha256(body)
-- CLI signs with the wallet hotkey and sends hex signature as `x-miner-signature`.
-- CLI does not include org or gateway account id in payload headers or signature.
+- CLI loads the miner hotkey from local Bittensor wallet files.
+- Canonical message domain `sub41-agent-v1`: method, path (+ query), subject
+  hotkey, nonce, timestamp (ms), sha256(body).
+- Hex signature sent as `x-miner-signature`.
+- Org / gateway account id are not part of the signed payload.
 
-Compatibility flags retained on `submit-agent`:
+Compatibility flags (retained; currently ignored by the submit API):
 
-- `--miner-hotkey` (optional override; defaults to wallet hotkey ss58)
-- `--gateway-api-key` (required by gateway upload auth unless env var is set)
-- `--miner-uid` (currently ignored by submit endpoint)
-- `--subtensor-network` (currently ignored by submit endpoint)
-- `--netuid` (currently ignored by submit endpoint)
+- `--miner-uid`
+- `--subtensor-network`
+- `--netuid`
 
-Gateway key linking behavior:
+Optional override: `--miner-hotkey` (defaults to wallet hotkey ss58).
 
-- First valid upload with an unoccupied API key auto-links miner to that key/org.
-- If an API key is already linked to a miner, upload fails; use a fresh key.
+Client-side checks: file exists, `.py` extension, max size `2MB` (`2097152` bytes).
 
-Client-side checks enforced by the CLI:
-
-- file must exist
-- extension must be `.py`
-- max file size `2MB` (`2097152` bytes)
+`get-agent` is intentionally not in this CLI (validator-facing route).
 
 ### `buy-credits` (stub)
 
-Command is present for future credits flows but is not implemented yet.
+Reserved for a future credits flow; not implemented yet.
 
 ```bash
 python3 miner/cli.py buy-credits 25
@@ -240,6 +305,25 @@ python3 miner/cli.py buy-credits 25
 
 ## Troubleshooting
 
-- **Connection errors**: verify `ORCHESTRATOR_API_URL` in `src/core/constants.py` or use `--orchestrator-url`.
-- **Wallet load errors**: verify wallet path/name/hotkey name and that hotkey files exist.
-- **Upload file errors**: confirm the file path exists and points to a `.py` file.
+- **Connection errors**: confirm network access to the default production
+  orchestrator. Only set `FORECASTING_ORCHESTRATOR_URL` / `--orchestrator-url`
+  if you are intentionally using a non-default host.
+- **Missing API key**: set `GATEWAY_API_KEY` in `.env` (or pass
+  `--gateway-api-key`). Obtain a key at [portal.almnc.ai](https://portal.almnc.ai).
+- **Key already linked**: request a fresh gateway API key for this miner.
+- **Wallet load errors**: check wallet path / name / hotkey name and that hotkey
+  files exist under `~/.bittensor/wallets`.
+- **Upload file errors**: path must exist and end in `.py`; size ≤ 2MB.
+- **Import / sandbox failures after submit**: remove disallowed deps; use only
+  `ctx.call_provider` for network I/O (see [Allowed dependencies](#allowed-dependencies)).
+
+# Almanac Market Miner Guide
+
+For **Almanac Market** (trading / on-chain metadata), use a different track:
+
+```bash
+python3 scripts/run_market_miner.py
+```
+
+See `miner/market/miner.py --help` and [almanac.market](https://almanac.market)
+for Market account setup. The rest of this guide is **Forecasting only**.

@@ -354,30 +354,32 @@ def _forward_and_record(
 
     if resp.is_error:
         detail = _extract_upstream_detail(resp)
+        logger.warning(
+            "Provider call failed provider=%s call_type=%s status=%s detail=%s",
+            provider_id,
+            call_type,
+            resp.status_code,
+            detail[:200],
+        )
         raise HTTPException(status_code=resp.status_code, detail=f"upstream {resp.status_code}: {detail}")
 
     try:
         upstream_payload = resp.json()
     except json.JSONDecodeError as exc:
+        logger.warning(
+            "Provider call failed provider=%s call_type=%s reason=non-json-response",
+            provider_id,
+            call_type,
+        )
         raise HTTPException(status_code=502, detail=f"upstream non-json response: {exc}")
 
-    _maybe_log_proxy_raw_response(
-        state,
-        provider_id=provider_id,
-        call_type=call_type,
-        value=upstream_payload,
-        label="upstream_payload",
-    )
     raw_response = upstream_payload.get("data", upstream_payload)
-    if raw_response is not upstream_payload:
-        _maybe_log_proxy_raw_response(
-            state,
-            provider_id=provider_id,
-            call_type=call_type,
-            value=raw_response,
-            label="upstream_data",
-        )
     if not isinstance(raw_response, dict):
+        logger.warning(
+            "Provider call failed provider=%s call_type=%s reason=missing-response-object",
+            provider_id,
+            call_type,
+        )
         raise HTTPException(status_code=502, detail="upstream payload missing response object")
 
     tier = _DEFAULT_TIERS.get(provider_id, ProviderTier.INFERENCE)
@@ -433,39 +435,6 @@ def _extract_upstream_detail(resp: httpx.Response) -> str:
     except json.JSONDecodeError:
         pass
     return text or "(empty body)"
-
-
-def _maybe_log_proxy_raw_response(
-    state: LocalProxyState,
-    *,
-    provider_id: str,
-    call_type: str,
-    value: Any,
-    label: str,
-) -> None:
-    if not state.cfg.gateway.debug_log_raw_response:
-        return
-    text = json.dumps(value, sort_keys=True, default=str)
-    max_chars = max(0, int(state.cfg.gateway.debug_raw_response_max_chars))
-    if max_chars > 0 and len(text) > max_chars:
-        logger.warning(
-            "Local proxy raw response debug provider=%s call_type=%s label=%s size=%d truncated=true payload=%s...(truncated %d chars)",
-            provider_id,
-            call_type,
-            label,
-            len(text),
-            text[:max_chars],
-            len(text) - max_chars,
-        )
-        return
-    logger.warning(
-        "Local proxy raw response debug provider=%s call_type=%s label=%s size=%d truncated=false payload=%s",
-        provider_id,
-        call_type,
-        label,
-        len(text),
-        text,
-    )
 
 
 def _registered_count(state: LocalProxyState) -> int:

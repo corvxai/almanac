@@ -324,8 +324,8 @@ def _handle_buy_credits(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Almanac Forecasting miner CLI")
-    parser.add_argument(
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--orchestrator-url",
         default=None,
         help=(
@@ -333,7 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"{DEFAULT_ORCHESTRATOR_URL}."
         ),
     )
-    parser.add_argument(
+    common.add_argument(
         "--timeout-seconds",
         type=float,
         default=None,
@@ -342,7 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"or {DEFAULT_TIMEOUT_SECONDS}."
         ),
     )
-    parser.add_argument(
+    common.add_argument(
         "--gateway-api-key",
         default=None,
         help=(
@@ -351,11 +351,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser = argparse.ArgumentParser(
+        description="Almanac Forecasting miner CLI",
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     upload_parser = subparsers.add_parser(
         "submit-agent",
         aliases=["upload-agent"],
+        parents=[common],
         help="Submit a miner agent .py file to the orchestrator.",
     )
     upload_parser.add_argument("agent_file", type=Path, help="Path to the .py agent file.")
@@ -401,6 +406,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser(
         "list-agents",
+        parents=[common],
         help="List published agents from the orchestrator.",
     )
     list_parser.add_argument("--limit", type=int, default=25, help="Max results to return.")
@@ -409,6 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     credits_parser = subparsers.add_parser(
         "buy-credits",
+        parents=[common],
         help="Buy credits (stub command for future implementation).",
     )
     credits_parser.add_argument("amount", type=float, help="Requested credit amount.")
