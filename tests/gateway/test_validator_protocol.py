@@ -45,8 +45,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def loaded():
-    mnemonic = Keypair.generate_mnemonic()
-    kp = Keypair.create_from_mnemonic(mnemonic, crypto_type=1)
+    # Omit crypto_type: older bittensor-wallet builds reject the kwarg, and
+    # SR25519 is the default on every supported backend.
+    kp = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     return LoadedKeypair(keypair=kp, hotkey_ss58=kp.ss58_address, coldkey_ss58=None)
 
 

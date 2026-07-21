@@ -66,8 +66,9 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def keypair():
     """Throwaway sr25519 keypair for the test."""
-    mnemonic = Keypair.generate_mnemonic()
-    return Keypair.create_from_mnemonic(mnemonic, crypto_type=1)
+    # Omit crypto_type: older bittensor-wallet builds reject the kwarg, and
+    # SR25519 is the default on every supported backend.
+    return Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
 
 
 @pytest.fixture
@@ -136,7 +137,7 @@ class TestVerifyRequestHeaders:
         # Replace hotkey ss58 with a different one — verifier will rebuild
         # canonical, see signature doesn't match the (different) public key,
         # and fail.
-        other_kp = Keypair.create_from_mnemonic(Keypair.generate_mnemonic(), crypto_type=1)
+        other_kp = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
         headers = {**headers, HEADER_HOTKEY: other_kp.ss58_address}
         result = verify_request_headers(headers, body)
         assert not result.verified
