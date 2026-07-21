@@ -51,12 +51,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.config import AppConfig
 from src.gateway.signing import load_hotkey
-from src.validator.orchestrator_api import (
+from src.validator.forecasting.orchestrator_api import (
     ScoredPredictionItem,
     ScoredPredictionsPage,
     fetch_all_scored_predictions,
 )
-from src.validator import scoring as arcratio_scoring
+from src.validator.forecasting import scoring as forecasting_scoring
 
 DEFAULT_AGENT_PREDICTIONS_FILE = (
     PROJECT_ROOT / "scripts" / "tests" / "agent_predictions.json"
@@ -84,7 +84,7 @@ MOCK_SHARED_MARKET_RATE = 0.75
 MOCK_MARKET_NOISE_SIGMA = 0.18
 
 
-logger = logging.getLogger("arcratio.sim_scoring")
+logger = logging.getLogger("almanac.forecasting.sim_scoring")
 
 
 def _clamp_prob(value: float, *, low: float = 0.08, high: float = 0.92) -> float:
@@ -422,7 +422,7 @@ def _fetch_live_predictions(
 
 
 def _normalise_weights(vec: np.ndarray) -> np.ndarray:
-    """Match validator ``combine_weights`` normalization for arcratio-only scores."""
+    """Match validator ``combine_weights`` normalization for forecasting-only scores."""
     clipped = np.clip(np.asarray(vec, dtype=float), 0.0, None)
     total = float(clipped.sum())
     if total <= 0.0:
@@ -500,7 +500,7 @@ def graph_results(
 
     axes[1].set_xlabel("Miners (sorted by post-Pareto score)", fontsize=12, color="white")
     fig.suptitle(
-        "Arcratio scoring simulation: pre-Pareto composite vs metagraph weights",
+        "Almanac Forecasting scoring simulation: pre-Pareto composite vs metagraph weights",
         fontsize=15,
         color="white",
         y=0.98,
@@ -666,10 +666,10 @@ def main() -> int:
     )
     metagraph = SimpleNamespace(uids=metagraph_uids)
     now_utc = datetime.now(timezone.utc)
-    scoring_result = arcratio_scoring.score_agent_predictions(
+    scoring_result = forecasting_scoring.score_agent_predictions(
         metagraph=metagraph,
         scored_predictions=rows,
-        rolling_window_days=arcratio_scoring.DEFAULT_ROLLING_WINDOW_DAYS,
+        rolling_window_days=forecasting_scoring.DEFAULT_ROLLING_WINDOW_DAYS,
         now=now_utc,
         return_pre_pareto=True,
     )
@@ -687,7 +687,7 @@ def main() -> int:
         print("No minerUid values found; no scores generated.")
         return 0
 
-    print("Per-miner diagnostics table is emitted by arcratio.scoring INFO logs.")
+    print("Per-miner diagnostics table is emitted by almanac.scoring INFO logs.")
     if not args.no_graph:
         graph_path = graph_results(
             metagraph_uids,

@@ -44,9 +44,9 @@ jobs:
           pytest -q \
             --deselect "tests/gateway/test_gateway_usage_metadata.py::test_gateway_normalizes_claude_style_usage_tokens" \
             --deselect "tests/gateway/test_extractor_offline.py::test_extract_evidence_from_golden_fixture[anthropic.messages]" \
-            --deselect "tests/validator/test_validator_scoring_step.py::test_arcratio_only_scoring_step_scores_resolved_traces" \
+            --deselect "tests/validator/test_validator_scoring_step.py::test_forecasting_only_scoring_step_scores_resolved_traces" \
             --deselect "tests/validator/test_validator_scoring_step.py::test_both_enabled_blends_score_vectors" \
-            --deselect "tests/validator/test_validator_scoring_step.py::test_almanac_score_failure_returns_none_and_falls_back_to_arcratio"
+            --deselect "tests/validator/test_validator_scoring_step.py::test_market_score_failure_returns_none_and_falls_back_to_forecasting"
 
   docker-security:
     name: Docker sandbox lockdown (--docker)

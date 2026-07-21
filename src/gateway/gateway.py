@@ -25,7 +25,7 @@ from src.gateway.cost_estimator import estimate_cost_usd
 from src.gateway.extractor import extract_evidence, extract_sources
 from src.gateway.providers.base import BaseProvider
 
-logger = logging.getLogger("arcratio.gateway")
+logger = logging.getLogger("almanac.gateway")
 
 
 def default_summarise_params(call_type: str, params: dict[str, Any]) -> str:

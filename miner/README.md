@@ -1,6 +1,8 @@
-# Miner Guide
+# Almanac Forecasting Miner Guide
 
-Use this guide to build an agent and interact with gateway orchestrator miner endpoints via `miner/cli.py`.
+Use this guide to build an Almanac Forecasting agent and interact with gateway orchestrator miner endpoints via `miner/cli.py`.
+
+For Almanac Market metadata registration, use `python3 scripts/run_market_miner.py`.
 
 ## What this CLI does
 
@@ -152,11 +154,11 @@ The CLI uses the shared orchestrator constant from `src/core/constants.py`:
 You can still override the URL per command with `--orchestrator-url`.
 The CLI also auto-loads repo-root `.env` (`python-dotenv`) before resolving env vars.
 
-- `ARCRATIO_TIMEOUT_SECONDS` (default: `20.0`)
-- `ARCRATIO_WALLET_PATH` (default: `~/.bittensor/wallets`)
-- `ARCRATIO_WALLET_NAME` (default: `default`)
-- `ARCRATIO_WALLET_HOTKEY` (default: `default`)
-- `GATEWAY_API_KEY` or `ARCRATIO_GATEWAY_API_KEY`
+- `FORECASTING_TIMEOUT_SECONDS` (default: `20.0`)
+- `FORECASTING_WALLET_PATH` (default: `~/.bittensor/wallets`)
+- `FORECASTING_WALLET_NAME` (default: `default`)
+- `FORECASTING_WALLET_HOTKEY` (default: `default`)
+- `GATEWAY_API_KEY` or `FORECASTING_GATEWAY_API_KEY`
 
 Flag equivalents:
 

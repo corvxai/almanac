@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.validator import sandbox_docker as sd
+from src.validator.forecasting import sandbox_docker as sd
 
 
 def test_wait_cli_uses_subprocess(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

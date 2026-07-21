@@ -47,10 +47,10 @@ import secrets
 import bittensor as bt
 from datetime import datetime
 from tabulate import tabulate
-from src.validator.almanac.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE
+from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE
 
-ALMANAC_API_URL = "https://api.almanac.market/api"
-#ALMANAC_API_URL = "http://localhost:3001/api"
+MARKET_API_URL = "https://api.almanac.market/api"
+#MARKET_API_URL = "http://localhost:3001/api"
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
 # EIP-712 domain contract for Polymarket CTF Exchange -- V2
@@ -1025,7 +1025,7 @@ def fetch_positions(filter_type: str = "all", limit: int = 100, offset: int = 0)
     
     try:
         response = requests.get(
-            f"{ALMANAC_API_URL}/v1/trading/positions",
+            f"{MARKET_API_URL}/v1/trading/positions",
             headers=headers,
             params=params,
             timeout=30
@@ -1070,7 +1070,7 @@ def fetch_positions_summary():
     
     try:
         response = requests.get(
-            f"{ALMANAC_API_URL}/v1/trading/positions/summary",
+            f"{MARKET_API_URL}/v1/trading/positions/summary",
             headers=headers,
             timeout=30
         )
@@ -1128,7 +1128,7 @@ def fetch_orders(status: str | None = None, limit: int = 100, offset: int = 0):
     
     try:
         response = requests.get(
-            f"{ALMANAC_API_URL}/v1/trading/orders",
+            f"{MARKET_API_URL}/v1/trading/orders",
             headers=headers,
             params=params,
             timeout=30
@@ -1180,7 +1180,7 @@ def cancel_order(order_id: str):
     
     try:
         response = requests.delete(
-            f"{ALMANAC_API_URL}/v1/trading/orders/{order_id}",
+            f"{MARKET_API_URL}/v1/trading/orders/{order_id}",
             headers=headers,
             timeout=30
         )
@@ -1728,7 +1728,7 @@ def _select_position_for_trade(positions: list):
         market_dict = None
         if event_id:
             try:
-                event_resp = requests.get(f"{ALMANAC_API_URL}/markets/events/{event_id}", timeout=30)
+                event_resp = requests.get(f"{MARKET_API_URL}/markets/events/{event_id}", timeout=30)
                 if event_resp.status_code == 200:
                     event_data = event_resp.json()
                     # Handle response wrapped in 'data' or direct event object
@@ -2456,7 +2456,7 @@ def initiate_trading_session():
         "passphrase": _get_credential("POLYMARKET_API_PASSPHRASE")
     }
 
-    response = requests.post(f'{ALMANAC_API_URL}/v1/trading/sessions', 
+    response = requests.post(f'{MARKET_API_URL}/v1/trading/sessions',
         headers={'Content-Type': 'application/json'},
         json={
         'signature': signature,
@@ -2683,7 +2683,7 @@ def place_order(
 
         try:
             resp = requests.post(
-                f"{ALMANAC_API_URL}/v1/trading/orders",
+                f"{MARKET_API_URL}/v1/trading/orders",
                 headers=headers,
                 json=signed_flow_payload,
                 timeout=30,
@@ -2740,7 +2740,7 @@ def search_markets():
         return
     try:
         resp = requests.get(
-            f"{ALMANAC_API_URL}/markets/search",
+            f"{MARKET_API_URL}/markets/search",
             params={"q": query, "limit": 10},
             timeout=30,
         )
@@ -2815,7 +2815,7 @@ def search_markets():
         event_id = chosen_event.get("id") or chosen_event.get("eventId") or chosen_event.get("_id")
         if event_id:
             try:
-                event_resp = requests.get(f"{ALMANAC_API_URL}/markets/events/{event_id}", timeout=30)
+                event_resp = requests.get(f"{MARKET_API_URL}/markets/events/{event_id}", timeout=30)
                 if event_resp.status_code == 200:
                     event_data = event_resp.json()
                     # Use the full event data (may include child events and more complete market data)
@@ -2845,7 +2845,7 @@ def search_markets():
         parent_event_id = chosen_event.get("parentEventId") or chosen_event.get("parent_event_id")        
         if parent_event_id:
             try:
-                parent_resp = requests.get(f"{ALMANAC_API_URL}/events/{parent_event_id}", timeout=30)
+                parent_resp = requests.get(f"{MARKET_API_URL}/events/{parent_event_id}", timeout=30)
                 if parent_resp.status_code == 200:
                     parent_event_data = parent_resp.json()
                     # Handle response wrapped in 'data' or direct event object
@@ -2981,7 +2981,7 @@ def initiate_wallet_session():
         signature = "0x" + signature
 
     response = requests.post(
-        f'{ALMANAC_API_URL}/wallet/session',
+        f'{MARKET_API_URL}/wallet/session',
         headers={'Content-Type': 'application/json'},
         json={
             'signature': signature,
@@ -3027,7 +3027,7 @@ def unlink_bittensor_hotkey(session_id: str, wallet_address: str):
     
     try:
         response = requests.post(
-            f"{ALMANAC_API_URL}/subnet/unlink-hotkey",
+            f"{MARKET_API_URL}/subnet/unlink-hotkey",
             headers={
                 "x-session-id": session_id,
                 "x-wallet-address": wallet_address,
@@ -3066,7 +3066,7 @@ def check_account_exists(wallet_address: str) -> bool:
     """
     try:
         response = requests.get(
-            f"{ALMANAC_API_URL}/accounts/{wallet_address}",
+            f"{MARKET_API_URL}/accounts/{wallet_address}",
             headers={
                 "Content-Type": "application/json"
             },
@@ -3091,7 +3091,7 @@ def check_account_bittensor_status(wallet_address: str):
     """
     try:
         response = requests.get(
-            f"{ALMANAC_API_URL}/accounts/{wallet_address}",
+            f"{MARKET_API_URL}/accounts/{wallet_address}",
             headers={
                 "Content-Type": "application/json"
             },
@@ -3240,7 +3240,7 @@ def link_bittensor_uid():
     
     try:
         response = requests.post(
-            f"{ALMANAC_API_URL}/subnet/select-hotkey",
+            f"{MARKET_API_URL}/subnet/select-hotkey",
             headers={
                 "x-session-id": session_id,
                 "x-wallet-address": wallet_address,

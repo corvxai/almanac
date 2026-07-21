@@ -7,7 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from src.core.events import Event
 from src.core.schemas import EventCategory
-from src.validator.orchestrator_api import OrchestratorAssignment
+from src.validator.forecasting.orchestrator_api import OrchestratorAssignment
 
 
 def assignment_to_event(

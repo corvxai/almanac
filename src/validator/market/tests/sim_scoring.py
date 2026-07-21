@@ -19,15 +19,15 @@ import numpy as np
 from tabulate import tabulate
 import argparse
 
-# Add repo root so `src.validator.almanac.*` imports work when run as a script.
+# Add repo root so `src.validator.market.*` imports work when run as a script.
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import bittensor as bt
 
-from src.validator.almanac.scoring import score_miners, calculate_weights, print_pool_stats, print_dust_gate_diagnostics, compute_joint_kappa_from_history
-from src.validator.almanac.constants import MINER_WEIGHT_PERCENTAGE, GENERAL_POOL_WEIGHT_PERCENTAGE, ROLLING_HISTORY_IN_DAYS, KAPPA_NEXT, TOTAL_MINER_ALPHA_PER_DAY, EXCESS_MINER_WEIGHT_UID, BURN_UID, DUST_GATE
+from src.validator.market.scoring import score_miners, calculate_weights, print_pool_stats, print_dust_gate_diagnostics, compute_joint_kappa_from_history
+from src.validator.market.constants import MINER_WEIGHT_PERCENTAGE, GENERAL_POOL_WEIGHT_PERCENTAGE, ROLLING_HISTORY_IN_DAYS, KAPPA_NEXT, TOTAL_MINER_ALPHA_PER_DAY, EXCESS_MINER_WEIGHT_UID, BURN_UID, DUST_GATE
 
 _TRADING_HISTORY_PATH = _REPO_ROOT / "data" / "trading_history.json"
 

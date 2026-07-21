@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Build arcratio Docker images for an explicit target CPU architecture.
+# Build Almanac Docker images for an explicit target CPU architecture.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -64,11 +64,11 @@ build() {
 }
 
 case "$TARGET" in
-  agent-runner) build docker/agent-runner.Dockerfile arcratio/agent-runner:latest ;;
-  validator)    build docker/validator.Dockerfile    arcratio/validator:latest ;;
+  agent-runner) build docker/agent-runner.Dockerfile almanac/agent-runner:latest ;;
+  validator)    build docker/validator.Dockerfile    almanac/validator:latest ;;
   all)
-    build docker/agent-runner.Dockerfile arcratio/agent-runner:latest
-    build docker/validator.Dockerfile    arcratio/validator:latest
+    build docker/agent-runner.Dockerfile almanac/agent-runner:latest
+    build docker/validator.Dockerfile    almanac/validator:latest
     ;;
   *)
     echo "ERROR: unknown target '$TARGET' (use: agent-runner | validator | all)" >&2

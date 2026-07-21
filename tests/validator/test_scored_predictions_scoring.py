@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.validator import scoring
+from src.validator.forecasting import scoring
 
 
 class _StubUids:

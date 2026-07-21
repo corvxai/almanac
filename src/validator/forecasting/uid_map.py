@@ -11,7 +11,7 @@ v1 fallback chain — honest about what's actually present in traces today:
    without spamming the validator log every epoch.
 
 Returning ``None`` is a hard skip: the scorer drops the trace, and that
-miner gets zero arcratio score until the trace pipeline starts attaching
+miner gets zero forecasting score until the trace pipeline starts attaching
 identity to its prediction output.
 """
 
@@ -22,7 +22,7 @@ from typing import Optional
 
 from src.core.schemas import EvidenceDigest
 
-logger = logging.getLogger("arcratio.uid_map")
+logger = logging.getLogger("almanac.forecasting.uid_map")
 
 
 _seen_misses: set[tuple[str, str]] = set()

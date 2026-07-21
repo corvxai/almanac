@@ -70,5 +70,5 @@ sandbox mode (see the repository's miner guide / `scripts/run_forecast.py`).
 
 ## Links
 
-- Source & guides: https://github.com/sportstensor/arcratio
+- Source & guides: https://github.com/Corvus-Labs/almanac
 - Companion image: [`almanacai/validator`](https://hub.docker.com/r/almanacai/validator)

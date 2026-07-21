@@ -10,7 +10,7 @@
 #
 # Network isolation, FS hardening, and resource limits are applied by the
 # *runtime* (`docker run --network=none --read-only ...`) — see
-# `src/validator/sandbox_docker.py`. This Dockerfile only sets up the
+# `src/validator/forecasting/sandbox_docker.py`. This Dockerfile only sets up the
 # minimum software environment.
 
 FROM python:3.11-slim AS base
@@ -44,7 +44,7 @@ COPY src/__init__.py                 /opt/runner/src/__init__.py
 
 ENV PYTHONPATH=/opt/runner
 
-# The validator-local proxy mounts its UDS into /run/arcratio/proxy.sock and
+# The validator-local proxy mounts its UDS into /run/almanac/proxy.sock and
 # sets SANDBOX_PROXY_URL + RUN_ID. The runtime overrides USER too.
 USER 10001:10001
 

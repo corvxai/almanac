@@ -1,4 +1,4 @@
-"""Arcratio forecasting scoring from orchestrator scored predictions.
+"""Almanac Forecasting scoring from orchestrator scored predictions.
 
 Composite score per miner is a weighted blend of three pillars, computed over
 that miner's most recent predictions (``MAX_EVENTS_PER_MINER``) within the
@@ -69,7 +69,7 @@ from typing import Optional
 import numpy as np
 from tabulate import tabulate
 
-logger = logging.getLogger("arcratio.scoring")
+logger = logging.getLogger("almanac.forecasting.scoring")
 
 
 # Orchestrator fetch/cutoff window. This is a data-retrieval bound, not a
@@ -175,7 +175,7 @@ def score_agent_predictions(
     now: Optional[datetime] = None,
     return_pre_pareto: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
-    """Return arcratio composite scores from orchestrator ``scored-predictions`` rows.
+    """Return forecasting composite scores from orchestrator ``scored-predictions`` rows.
 
     Output is a float ``np.ndarray`` indexed by metagraph UID position.
     Positive composite scores are shaped via :func:`_apply_pareto` before
@@ -316,7 +316,7 @@ def score_agent_predictions(
     scores = _apply_pareto(scores)
 
     logger.info(
-        "arcratio composite scoring: %d valid rows | %d miners scored, "
+        "forecasting composite scoring: %d valid rows | %d miners scored, "
         "%d gated (invalid-rate), %d gated (min-sample-hard-floor), %d gated (baseline-accuracy), "
         "%d gated (inactive) "
         "| cutoff=%s window=%dd cap=%d",
@@ -804,6 +804,6 @@ def _log_score_table(
         legends.append(f"\u2020 age_h > {INACTIVITY_GRACE_HOURS:.0f}h (inactivity decay region).")
 
     if legends:
-        logger.info("arcratio scoring miner table:\n%s\n%s", table, "\n".join(legends))
+        logger.info("forecasting scoring miner table:\n%s\n%s", table, "\n".join(legends))
     else:
-        logger.info("arcratio scoring miner table:\n%s", table)
+        logger.info("forecasting scoring miner table:\n%s", table)

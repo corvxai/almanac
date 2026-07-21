@@ -1,13 +1,13 @@
-"""Bittensor validator for the arcratio subnet.
+"""Bittensor validator for the Almanac subnet.
 
 This is the entrypoint of the validator container's main process.
 
 * :class:`Validator` — owns the bittensor objects (wallet, subtensor,
-  dendrite, metagraph), the Almanac ``MetadataManager`` thread (when the
-  Almanac mechanism is enabled), and the per-epoch tick that scores each
+  dendrite, metagraph), the Almanac Market ``MetadataManager`` thread (when the
+  Almanac Market mechanism is enabled), and the per-epoch tick that scores each
   enabled mechanism, blends, and sets weights on chain.
 * :func:`combine_weights` + :class:`BlendConfig` — pure functions that
-  combine two raw score vectors (Almanac trader-PnL + arcratio forecasting
+  combine two raw score vectors (Almanac Market trader-PnL + Almanac Forecasting
   Brier) into a single normalised weight vector that satisfies chain
   constraints. Tests import these directly.
 * :func:`start_local_proxy` — lifts the
@@ -17,7 +17,7 @@ This is the entrypoint of the validator container's main process.
 
 The dev orchestrator + signing-proxy daemon stays running on a daemon
 thread (it's needed by anything that spawns agent containers). The validator
-loop now also polls orchestrator assignment availability when the arcratio
+loop now also polls orchestrator assignment availability when the forecasting
 mechanism is enabled.
 """
 
@@ -38,7 +38,7 @@ import numpy as np
 
 from src.core.config import AppConfig
 from src.core.schemas import EvidenceDigest
-from src.validator.proxy_socket import (
+from src.validator.forecasting.proxy_socket import (
     make_proxy_socket_connectable,
     proxy_socket_bind_umask,
 )
@@ -46,7 +46,7 @@ from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
 from src.storage.store import TraceStore
-from src.validator.assignment_pipeline import (
+from src.validator.forecasting.assignment_pipeline import (
     build_prediction_submit_payload,
     build_sandbox_assignment_agent,
     log_prediction_submit_invariants,
@@ -55,16 +55,16 @@ from src.validator.assignment_pipeline import (
     resolve_binary_outcome_ids,
     trace_primary_model_info,
 )
-from src.validator.orchestrator import Orchestrator
-from src.validator.orchestrator_api import (
+from src.validator.forecasting.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator_api import (
     OrchestratorAssignment,
     fetch_all_scored_predictions,
     fetch_agent_event_assignment,
     submit_validator_prediction,
 )
-from src.validator import scoring as arcratio_scoring
+from src.validator.forecasting import scoring as forecasting_scoring
 
-logger = logging.getLogger("arcratio.validator")
+logger = logging.getLogger("almanac.validator")
 
 
 @dataclass
@@ -79,15 +79,15 @@ class BlendConfig:
     their renormalised score vectors.
     """
 
-    almanac_enabled: bool
-    arcratio_enabled: bool
-    almanac_share: float
-    arcratio_share: float
+    market_enabled: bool
+    forecasting_enabled: bool
+    market_share: float
+    forecasting_share: float
 
 
 def combine_weights(
-    weights_almanac: Optional[np.ndarray],
-    weights_arcratio: Optional[np.ndarray],
+    weights_market: Optional[np.ndarray],
+    weights_forecasting: Optional[np.ndarray],
     cfg: BlendConfig,
 ) -> np.ndarray:
     """Combine raw score vectors into a normalised weight vector.
@@ -104,10 +104,10 @@ def combine_weights(
     """
     contributions: list[tuple[np.ndarray, float]] = []
 
-    if cfg.almanac_enabled and weights_almanac is not None:
-        contributions.append((_normalise(weights_almanac), max(cfg.almanac_share, 0.0)))
-    if cfg.arcratio_enabled and weights_arcratio is not None:
-        contributions.append((_normalise(weights_arcratio), max(cfg.arcratio_share, 0.0)))
+    if cfg.market_enabled and weights_market is not None:
+        contributions.append((_normalise(weights_market), max(cfg.market_share, 0.0)))
+    if cfg.forecasting_enabled and weights_forecasting is not None:
+        contributions.append((_normalise(weights_forecasting), max(cfg.forecasting_share, 0.0)))
 
     if not contributions:
         raise ValueError(
@@ -171,7 +171,7 @@ def _prepare_proxy_socket_path(config: AppConfig) -> Path:
         socket_path.unlink()
         return socket_path
     except PermissionError:
-        fallback_dir = Path("/tmp") / "arcratio" / str(os.getuid())
+        fallback_dir = Path("/tmp") / "almanac" / str(os.getuid())
         fallback_inputs_dir = fallback_dir / "inputs"
         fallback_dir.mkdir(parents=True, exist_ok=True)
         fallback_inputs_dir.mkdir(parents=True, exist_ok=True)
@@ -221,7 +221,7 @@ def start_local_proxy(config: AppConfig):
 
     thread = threading.Thread(
         target=server.run,
-        name="arcratio-local-proxy",
+        name="almanac-local-proxy",
         daemon=True,
     )
     old_umask = proxy_socket_bind_umask()
@@ -250,11 +250,11 @@ def start_local_proxy(config: AppConfig):
 # ---------------------------------------------------------------------------
 
 class Validator:
-    """Long-running Bittensor validator for the arcratio subnet.
+    """Long-running Bittensor validator for the Almanac subnet.
 
     Wakes once per minute, runs the scoring + ``set_weights`` flow at a
     randomised minute of each hour, and supervises a background
-    ``MetadataManager`` (Almanac) when the Almanac mechanism is enabled.
+    ``MetadataManager`` (Almanac Market) when the Almanac Market mechanism is enabled.
     """
 
     _AUTO = object()
@@ -281,7 +281,7 @@ class Validator:
 
         if metadata_manager is Validator._AUTO:
             if (
-                config.loop.almanac_enabled
+                config.loop.market_enabled
                 and config.loop.loop_enabled
                 and config.loop.metadata_manager_enabled
             ):
@@ -322,7 +322,7 @@ class Validator:
         loop_cfg = self._config.loop
         if not loop_cfg.loop_enabled:
             return
-        if not loop_cfg.almanac_enabled and not loop_cfg.arcratio_enabled:
+        if not loop_cfg.market_enabled and not loop_cfg.forecasting_enabled:
             raise ValueError(
                 "Validator loop enabled but both mechanisms disabled in config constants. "
                 "Refusing to start a validator that would set zero weights forever."
@@ -337,20 +337,20 @@ class Validator:
             logger.info("Validator loop disabled in config constants; main loop will not start.")
             return
 
-        logger.info("=========== STARTING ARCRATIO VALIDATOR LOOP ===========")
+        logger.info("=========== STARTING ALMANAC VALIDATOR LOOP ===========")
         logger.info(
             "Scoring%s will run once per hour at minute %d (UTC). "
-            "Almanac enabled=%s, Arcratio enabled=%s",
+            "Almanac Market enabled=%s, Almanac Forecasting enabled=%s",
             "/set_weights" if self._config.loop.set_weights_enabled else " (dry-run, no set_weights)",
             self._scoring_minute,
-            self._config.loop.almanac_enabled,
-            self._config.loop.arcratio_enabled,
+            self._config.loop.market_enabled,
+            self._config.loop.forecasting_enabled,
         )
 
         while not self._stopped:
             try:
                 current_time = self._clock()
-                if self._config.loop.arcratio_enabled:
+                if self._config.loop.forecasting_enabled:
                     self._poll_orchestrator_assignment()
                 if self._should_score(current_time):
                     self.run_scoring_step()
@@ -368,7 +368,7 @@ class Validator:
     def _should_score(self, current_time: datetime.datetime) -> bool:
         if current_time.minute != self._scoring_minute:
             return False
-        if self._metadata_manager is None or not self._config.loop.almanac_enabled:
+        if self._metadata_manager is None or not self._config.loop.market_enabled:
             return True
         # If Almanac is enabled, ensure the metadata sync isn't stale (sn41 behavior).
         stats = self._metadata_manager.get_stats()
@@ -416,7 +416,7 @@ class Validator:
         if not base_url:
             if not self._orchestrator_poll_config_warned:
                 logger.info(
-                    "Arcratio assignment polling disabled: set validator.orchestrator_api_url "
+                    "Almanac Forecasting assignment polling disabled: set validator.orchestrator_api_url "
                     "in src/core/constants.py."
                 )
                 self._orchestrator_poll_config_warned = True
@@ -427,7 +427,7 @@ class Validator:
         if self._orchestrator_hotkey is None:
             if not self._orchestrator_poll_signing_warned:
                 logger.warning(
-                    "Arcratio assignment polling disabled: validator hotkey signing is unavailable."
+                    "Almanac Forecasting assignment polling disabled: validator hotkey signing is unavailable."
                 )
                 self._orchestrator_poll_signing_warned = True
             return
@@ -605,26 +605,26 @@ class Validator:
 
         loop_cfg = self._config.loop
 
-        weights_almanac: Optional[np.ndarray] = None
-        if loop_cfg.almanac_enabled:
-            weights_almanac = self._score_almanac()
+        weights_market: Optional[np.ndarray] = None
+        if loop_cfg.market_enabled:
+            weights_market = self._score_market()
 
-        weights_arcratio: Optional[np.ndarray] = None
-        if loop_cfg.arcratio_enabled:
-            weights_arcratio = self._score_agent_predictions()
+        weights_forecasting: Optional[np.ndarray] = None
+        if loop_cfg.forecasting_enabled:
+            weights_forecasting = self._score_agent_predictions()
 
         blend_cfg = BlendConfig(
-            almanac_enabled=loop_cfg.almanac_enabled,
-            arcratio_enabled=loop_cfg.arcratio_enabled,
-            almanac_share=loop_cfg.almanac_weight_share,
-            arcratio_share=loop_cfg.arcratio_weight_share,
+            market_enabled=loop_cfg.market_enabled,
+            forecasting_enabled=loop_cfg.forecasting_enabled,
+            market_share=loop_cfg.market_weight_share,
+            forecasting_share=loop_cfg.forecasting_weight_share,
         )
 
-        if weights_almanac is None and weights_arcratio is None:
+        if weights_market is None and weights_forecasting is None:
             logger.warning("Both mechanism score paths returned no data this epoch; skipping set_weights.")
             return None
 
-        weights = combine_weights(weights_almanac, weights_arcratio, blend_cfg)
+        weights = combine_weights(weights_market, weights_forecasting, blend_cfg)
 
         if loop_cfg.set_weights_enabled:
             self._set_weights(weights)
@@ -636,16 +636,16 @@ class Validator:
             )
         return weights
 
-    def _score_almanac(self) -> Optional[np.ndarray]:
+    def _score_market(self) -> Optional[np.ndarray]:
         try:
-            from src.validator.almanac import score_almanac
+            from src.validator.market import score_market
         except Exception:
-            logger.exception("Failed to import Almanac mechanism; skipping for this epoch.")
+            logger.exception("Failed to import Almanac Market mechanism; skipping for this epoch.")
             return None
 
         loop_cfg = self._config.loop
         try:
-            return score_almanac(
+            return score_market(
                 network=self._bt.network,
                 wallet=self._bt.wallet,
                 dendrite=self._bt.dendrite,
@@ -658,22 +658,22 @@ class Validator:
                     else None
                 ),
                 db_score_logging=loop_cfg.db_score_logging,
-                budget_share=loop_cfg.almanac_weight_share,
+                budget_share=loop_cfg.market_weight_share,
             )
         except Exception:
-            logger.exception("Almanac scoring failed for this epoch.")
+            logger.exception("Almanac Market scoring failed for this epoch.")
             return None
 
     def _score_agent_predictions(self) -> Optional[np.ndarray]:
         base_url = self._config.validator.orchestrator_api_url.strip()
         if not base_url:
-            logger.warning("Arcratio scoring disabled: validator.orchestrator_api_url is empty.")
+            logger.warning("Almanac Forecasting scoring disabled: validator.orchestrator_api_url is empty.")
             return None
 
         if self._orchestrator_hotkey is Validator._AUTO:
             self._orchestrator_hotkey = load_hotkey(self._config.bittensor)
         if self._orchestrator_hotkey is None:
-            logger.warning("Arcratio scoring disabled: validator hotkey signing is unavailable.")
+            logger.warning("Almanac Forecasting scoring disabled: validator hotkey signing is unavailable.")
             return None
 
         try:
@@ -683,14 +683,14 @@ class Validator:
                 days=self._config.loop.rolling_window_days,
                 include_trace_summary=False,
             )
-            return arcratio_scoring.score_agent_predictions(
+            return forecasting_scoring.score_agent_predictions(
                 metagraph=self._bt.metagraph,
                 scored_predictions=scored_predictions,
                 rolling_window_days=self._config.loop.rolling_window_days,
                 now=self._clock(),
             )
         except Exception:
-            logger.exception("Arcratio scoring failed for this epoch.")
+            logger.exception("Almanac Forecasting scoring failed for this epoch.")
             return None
 
     def _set_weights(self, weights: np.ndarray) -> None:
@@ -761,8 +761,8 @@ def _build_bittensor_objects(config: AppConfig) -> _BtObjects:
 
 
 def _build_metadata_manager(config: AppConfig):
-    """Construct the Almanac ``MetadataManager`` against ``config.bittensor``."""
-    from src.validator.almanac.metadata_manager import MetadataManager
+    """Construct the Almanac Market ``MetadataManager`` against ``config.bittensor``."""
+    from src.validator.market.metadata_manager import MetadataManager
 
     state_dir = config.storage.data_dir
     state_dir.mkdir(parents=True, exist_ok=True)

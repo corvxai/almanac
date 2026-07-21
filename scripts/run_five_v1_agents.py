@@ -35,7 +35,7 @@ from src.core.config import AppConfig
 from src.core.events import Event
 from src.gateway.client import build_remote_providers
 from src.storage.json_store import build_trace_store
-from src.validator.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator import Orchestrator
 
 from src.agent.examples.v1_agent1_llm_only import V1Agent1LLMOnly
 from src.agent.examples.v1_agent2_basic import V1Agent2Basic

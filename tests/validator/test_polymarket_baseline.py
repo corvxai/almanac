@@ -8,7 +8,7 @@ import httpx
 
 from src.core.events import Event
 from src.core.schemas import EventCategory
-from src.validator.polymarket_baseline import fetch_polymarket_baseline
+from src.validator.forecasting.polymarket_baseline import fetch_polymarket_baseline
 
 
 def _event(**overrides: Any) -> Event:

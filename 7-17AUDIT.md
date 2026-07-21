@@ -60,7 +60,7 @@ The six v0.1 values (`evidence_gathering`, `synthesis`, `conflict_resolution`, `
 
 ### F6 — traceHash is unrecomputable from the submitted payload and never verified server-side
 
-`src/validator/assignment_pipeline.py:297` (also :80, :99) — **integrity envelope is decorative**
+`src/validator/forecasting/assignment_pipeline.py:297` (also :80, :99) — **integrity envelope is decorative**
 
 The hash is sealed over the intact snake_case digest (full `provider_calls`, `reasoning_chain`, original texts). `_compact_evidence_digest` then strips those arrays from the submitted `evidenceDigest` **and mutates content** (final belief `text` → `textRef`, one step's `reasoningText` → `reasoningTextRef`), and the retained copies at `trace.providerCalls`/`trace.steps` are camelized. No recipient can recompute the pre-image, and nothing in `apps/api` references `traceHash` at all — a tampered payload submitted alongside the original hash is accepted and stored as if verified.
 
@@ -68,7 +68,7 @@ The hash is sealed over the intact snake_case digest (full `provider_calls`, `re
 
 ### F7 — contrarianFlag ignores the sealed baseline this PR introduced
 
-`src/validator/trace_assembler.py:119` — **agent-controllable signal**
+`src/validator/forecasting/trace_assembler.py:119` — **agent-controllable signal**
 
 `contrarian_flag` is still derived from agent-controlled provider evidence via `_find_market_price` (first `price` evidence item), ignoring the validator-sealed `execution_context.market_price_at_prediction` added by this PR for exactly this purpose. All six v1 example agents (and any agent that never calls polymarket) always emit `contrarianFlag=False` regardless of deviation from the sealed baseline; conversely a miner can suppress or trigger the flag by choosing which provider calls to make.
 
@@ -76,7 +76,7 @@ The hash is sealed over the intact snake_case digest (full `provider_calls`, `re
 
 ### F8 — Missing confidence is submitted as declared 0.0 with isValid=true
 
-`src/validator/assignment_pipeline.py:222` — **data quality for downstream consumers**
+`src/validator/forecasting/assignment_pipeline.py:222` — **data quality for downstream consumers**
 
 With `confidence_missing` no longer an invalid reason, `confidence=None` is filled with `INVALID_CONFIDENCE_SENTINEL = 0.0` and submitted as `prediction.confidence: 0.0` (the Sub41 DTO requires a number 0..1; null cannot be sent). Downstream Sub41 scoring/portal consumers see a _declared_ extreme zero-confidence for every confidence-omitting miner; only the free-text `rawObserved.confidence` repr (`'None'`) distinguishes the cases.
 
@@ -132,7 +132,7 @@ With `confidence_missing` no longer an invalid reason, `confidence=None` is fill
 
 ### F15 — reasoningTrace.schemaVersion still "1.0" despite a materially changed Mongo shape
 
-`src/validator/assignment_pipeline.py:344` — **versioning / mixed-shape store**
+`src/validator/forecasting/assignment_pipeline.py:344` — **versioning / mixed-shape store**
 
 The wrapper `reasoningTrace.schemaVersion` stays `"1.0"` while the stored shape changes materially (evidenceDigest compacted, steps gain `stage`/`origin`/`reasoningTextRef`, `futureGraph.beliefPath` with `textRef`; internal `trace_integrity` version bumped to 1.1.0). After validators upgrade, Mongo holds two incompatible shapes under the same version marker; a scorer or migration dispatching on `schemaVersion` will process new documents with the old reader and drop or misread reasoning text.
 
@@ -142,7 +142,7 @@ The wrapper `reasoningTrace.schemaVersion` stays `"1.0"` while the stored shape 
 
 ## Refuted during verification
 
-- `src/validator/orchestrator.py:165` — claim that an out-of-range/NaN live Polymarket `yes_price` fed into `ExecutionContext.market_price_at_prediction` (ge=0, le=1) would raise post-execution and abort the run. Refuted by the verifier pass.
+- `src/validator/forecasting/orchestrator.py:165` — claim that an out-of-range/NaN live Polymarket `yes_price` fed into `ExecutionContext.market_price_at_prediction` (ge=0, le=1) would raise post-execution and abort the run. Refuted by the verifier pass.
 
 ---
 

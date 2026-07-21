@@ -1,7 +1,7 @@
 [project]
-name = "forecasting-prototype"
+name = "almanac"
 version = "0.1.0"
-description = "Decentralised AI forecasting — validator-agent execution loop prototype"
+description = "Almanac decentralized agent forecasting and prediction market validator and miner stack"
 requires-python = ">=3.10"
 
 [tool.ruff]

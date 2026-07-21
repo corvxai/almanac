@@ -22,13 +22,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class ValidatorDefaults:
     available_providers: list[str] = field(default_factory=lambda: ["polymarket", "web_search"])
     sandbox_type: str = "docker_runc"
-    sandbox_image: str = "arcratio/agent-runner:latest"
+    sandbox_image: str = "almanac/agent-runner:latest"
     sandbox_timeout_seconds: int = 240
     sandbox_max_concurrent: int = 8
     sandbox_memory_mb: int = 1024
     sandbox_cpus: float = 1.0
     sandbox_pids_limit: int = 256
-    sandbox_socket_dir: Path = field(default_factory=lambda: _PROJECT_ROOT / "var/run/arcratio")
+    sandbox_socket_dir: Path = field(default_factory=lambda: _PROJECT_ROOT / "var/run/almanac")
     sandbox_socket_host_bind: str | None = None
 
 
@@ -66,12 +66,12 @@ class GatewayDefaults:
 @dataclass(frozen=True)
 class ValidatorLoopDefaults:
     loop_enabled: bool = True
-    almanac_enabled: bool = True
-    arcratio_enabled: bool = True
+    market_enabled: bool = True
+    forecasting_enabled: bool = True
     metadata_manager_enabled: bool = True
-    almanac_weight_share: float = 0.95
-    arcratio_weight_share: float = 0.05
-    almanac_api_url: str | None = None
+    market_weight_share: float = 0.95
+    forecasting_weight_share: float = 0.05
+    market_api_url: str | None = None
     use_synthetic_trading_data: bool = False
     write_trading_history: bool = False
     db_score_logging: bool = False

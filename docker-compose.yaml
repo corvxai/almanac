@@ -1,4 +1,4 @@
-# Arcratio validator stack.
+# Almanac validator stack.
 #
 # `validator`         — orchestrator + signing proxy + Bittensor wallet.
 # `agent-runner`      — built once, referenced by tag. Spawned per agent run
@@ -26,7 +26,7 @@
 
 services:
   agent-runner:
-    image: arcratio/agent-runner:latest
+    image: almanac/agent-runner:latest
     build:
       context: .
       dockerfile: docker/agent-runner.Dockerfile
@@ -34,7 +34,7 @@ services:
     profiles: ["build-only"]
 
   validator:
-    image: arcratio/validator:latest
+    image: almanac/validator:latest
     build:
       context: .
       dockerfile: docker/validator.Dockerfile
@@ -42,7 +42,7 @@ services:
       # Central provider gateway target
       GATEWAY_SERVICE_URL: ${GATEWAY_SERVICE_URL:-http://localhost:4000}
       # Omit agent-runner log tails after each exit (default is print).
-      ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET: ${ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET:-}
+      FORECASTING_SANDBOX_RUNNER_LOGS_QUIET: ${FORECASTING_SANDBOX_RUNNER_LOGS_QUIET:-}
       # Agent provider keys passed through to the central gateway are NOT
       # set here — secrets live with the central gateway, not the validator.
     # Defence-in-depth: the validator process must not be able to gain new
@@ -62,7 +62,7 @@ services:
       # UDS directory: the validator-local proxy creates proxy.sock here,
       # and the validator uses docker.sock to bind-mount this same host dir
       # into each sibling agent-runner container as read-only.
-      - ${ARCRATIO_RUN_DIR:-./var/run/arcratio}:/var/run/arcratio
+      - ${ALMANAC_RUN_DIR:-./var/run/almanac}:/var/run/almanac
       # Trace storage
       - ./data:/app/data
     # So GATEWAY_SERVICE_URL=http://host.docker.internal:… reaches the host

@@ -5,9 +5,9 @@ central gateway. It is **not** loaded inside the agent sandbox: the runner
 image deliberately omits `bittensor` so a compromised agent cannot reach
 keypair material or chain code.
 
-Wire format (`X-Auth-Version: arcratio-v1`):
+Wire format (`X-Auth-Version: almanac-v1`):
 
-    canonical = f"arcratio:v1:{netuid}:{unix_ts}:{nonce}:{sha256_hex(body)}"
+    canonical = f"almanac:v1:{netuid}:{unix_ts}:{nonce}:{sha256_hex(body)}"
     signature = sr25519_sign(hotkey_keypair, canonical.encode("utf-8"))
 
 The verifier reconstructs `canonical` from the headers it receives plus the
@@ -32,7 +32,7 @@ from src.core.config import BittensorConfig
 logger = logging.getLogger(__name__)
 
 
-AUTH_VERSION = "arcratio-v1"
+AUTH_VERSION = "almanac-v1"
 SIGNATURE_SCHEME = "sr25519"
 
 
@@ -141,7 +141,7 @@ def load_hotkey(cfg: BittensorConfig) -> Optional[LoadedKeypair]:
 
 def _canonical_message(netuid: int, ts: int, nonce: str, body: bytes) -> bytes:
     body_hash = hashlib.sha256(body).hexdigest()
-    return f"arcratio:v1:{netuid}:{ts}:{nonce}:{body_hash}".encode("utf-8")
+    return f"almanac:v1:{netuid}:{ts}:{nonce}:{body_hash}".encode("utf-8")
 
 
 def sign_request(

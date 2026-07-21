@@ -1,4 +1,4 @@
-"""Tests for arcratio scored-predictions scoring."""
+"""Tests for Almanac Forecasting scored-predictions scoring."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from src.validator.scoring import PARETO_BOOST, PARETO_MU, _apply_pareto, _apply_pareto_by_rank, score_agent_predictions
+from src.validator.forecasting.scoring import PARETO_BOOST, PARETO_MU, _apply_pareto, _apply_pareto_by_rank, score_agent_predictions
 
 
 class _StubMetagraph:

@@ -46,7 +46,7 @@ COPY . /app
 # UDS socket dir for the local proxy. Compose mounts a host directory onto
 # this path so the agent-runner sibling container can bind-mount the same
 # socket file read-only.
-RUN mkdir -p /var/run/arcratio
+RUN mkdir -p /var/run/almanac
 
 # Default command runs the Bittensor validator loop. It starts
 # the local signing proxy + agent orchestrator on a daemon thread internally

@@ -11,7 +11,7 @@ import pytest
 
 
 def test_constants_module_loads_known_values() -> None:
-    from src.validator.almanac import constants
+    from src.validator.market import constants
 
     assert constants.ROLLING_HISTORY_IN_DAYS == 30
     assert constants.VOLUME_FEE == 0.01
@@ -26,7 +26,7 @@ def test_scoring_module_exposes_public_entries() -> None:
     pytest.importorskip("tabulate")
     pytest.importorskip("bittensor")
 
-    from src.validator.almanac import scoring
+    from src.validator.market import scoring
 
     for name in ("score_miners", "calculate_weights", "print_pool_stats"):
         assert callable(getattr(scoring, name)), f"missing {name}"
@@ -35,7 +35,7 @@ def test_scoring_module_exposes_public_entries() -> None:
 def test_metadata_manager_imports() -> None:
     pytest.importorskip("bittensor")
 
-    from src.validator.almanac.metadata_manager import MetadataManager
+    from src.validator.market.metadata_manager import MetadataManager
 
     assert MetadataManager.__init__.__qualname__.startswith("MetadataManager")
 
@@ -43,4 +43,4 @@ def test_metadata_manager_imports() -> None:
 def test_postgres_storage_imports() -> None:
     pytest.importorskip("bittensor")
 
-    from src.validator.almanac.storage import postgres_validator_storage  # noqa: F401
+    from src.validator.market.storage import postgres_validator_storage  # noqa: F401

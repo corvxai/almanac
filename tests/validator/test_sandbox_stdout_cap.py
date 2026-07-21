@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.validator import sandbox_docker as sd
+from src.validator.forecasting import sandbox_docker as sd
 
 
 def test_under_cap_returns_joined_bytes() -> None:

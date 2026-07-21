@@ -16,13 +16,13 @@ from src.core.config import AppConfig
 from src.core.events import Event
 from src.core.schemas import EvidenceDigest
 from src.gateway.signing import LoadedKeypair
-from src.validator.orchestrator import Orchestrator
-from src.validator.orchestrator_api import (
+from src.validator.forecasting.orchestrator import Orchestrator
+from src.validator.forecasting.orchestrator_api import (
     OrchestratorAssignment,
     SubmitPredictionResponse,
     submit_validator_prediction,
 )
-from src.validator.orchestrator_event_mapper import assignment_to_event
+from src.validator.forecasting.orchestrator_event_mapper import assignment_to_event
 
 MAX_ASSIGNMENT_AGENT_CODE_BYTES = 2 * 1024 * 1024  # 2MB
 INVALID_PREDICTION_SENTINEL = 0.0
@@ -135,7 +135,7 @@ def build_sandbox_assignment_agent(assignment: OrchestratorAssignment) -> BaseAg
     agent = _InlineCodeSandboxAgent()
     agent.agent_id = uuid5(NAMESPACE_URL, f"agent-upload:{assignment.agent.agentUploadId}")
     agent.agent_version = assignment.agent.uploadedAt.isoformat()
-    setattr(agent, "_arcratio_agent_source_code", code)
+    setattr(agent, "_almanac_agent_source_code", code)
     return agent
 
 

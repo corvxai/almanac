@@ -22,14 +22,14 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 | # | Severity | Area | Issue | File | Status |
 |---|----------|------|-------|------|--------|
 | 1 | 🔴 Critical | Security | Agent can spoof signed billing/attribution hotkey | `src/gateway/local_proxy.py:315` | FIXED |
-| 2 | 🔴 Critical | Security | Whole-directory bind mount defeats X-Run-Id isolation | `src/validator/sandbox_docker.py:300` | FIXED (round-trip pending Linux CI) |
-| 3 | 🔴 Critical | Security | Sandbox runs as host root in default deployment | `src/validator/sandbox_docker.py:285` | FIXED (round-trip pending Linux CI) |
+| 2 | 🔴 Critical | Security | Whole-directory bind mount defeats X-Run-Id isolation | `src/validator/forecasting/sandbox_docker.py:300` | FIXED (round-trip pending Linux CI) |
+| 3 | 🔴 Critical | Security | Sandbox runs as host root in default deployment | `src/validator/forecasting/sandbox_docker.py:285` | FIXED (round-trip pending Linux CI) |
 | 4 | 🔴 High | Security | Provider gateway is an open relay by default | `scripts/run_gateway.py:53` | FIXED |
-| 5 | 🟠 High | Security | Agent source + event payloads world-readable on host | `src/validator/sandbox_docker.py:325` | FIXED |
-| 6 | 🟠 High | Crash | Unbounded stdout read OOMs the validator | `src/validator/sandbox_docker.py:379` | FIXED (log max-size follow-up) |
+| 5 | 🟠 High | Security | Agent source + event payloads world-readable on host | `src/validator/forecasting/sandbox_docker.py:325` | FIXED |
+| 6 | 🟠 High | Crash | Unbounded stdout read OOMs the validator | `src/validator/forecasting/sandbox_docker.py:379` | FIXED (log max-size follow-up) |
 | 7 | 🟠 High | Crash | Sync httpx blocks the async event loop | `src/gateway/local_proxy.py:351` | FIXED |
-| 8 | 🟡 Medium | Correctness | JSON brace-parsing rejects valid results | `src/validator/sandbox_docker.py:437` | FIXED |
-| 9 | 🟡 Medium | Correctness | Host-bind fallback breaks all runs | `src/validator/sandbox_docker.py:113` | FIXED |
+| 8 | 🟡 Medium | Correctness | JSON brace-parsing rejects valid results | `src/validator/forecasting/sandbox_docker.py:437` | FIXED |
+| 9 | 🟡 Medium | Correctness | Host-bind fallback breaks all runs | `src/validator/forecasting/sandbox_docker.py:113` | FIXED |
 | 10 | 🟡 Medium | Correctness | Missing `miner_hotkey` → 400 on default sandbox path | `src/gateway/local_proxy.py:316` | FIXED |
 
 **Recommended fix order:** #1, #2, #3, #6 first (identity spoofing, cross-run isolation bypass, root-on-host, OOM), then the rest.
@@ -61,12 +61,12 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 ### Issue 2 — Whole-directory bind mount defeats X-Run-Id isolation
 - **Severity:** 🔴 Critical
 - **Status:** DEFERRED — fix designed, **not applied** (needs Docker E2E; mis-set breaks every run)
-- **File:** `src/validator/sandbox_docker.py:300`
-- **Risk:** Docstrings claim each runner gets "a single read-only bind mount: the UDS," but the entire `/run/arcratio` directory — including `inputs/` holding **every concurrent run's payload** — is bind-mounted into each sibling. X-Run-Id authentication is bypassable.
-- **Failure scenario:** A malicious agent reads `/run/arcratio/inputs/.arcratio_stdin_<other>.json`, extracts another concurrent run's RUN_ID and agent_code, then issues provider calls under that run_id over the shared UDS — escaping its own track allowlist and charging/attributing calls to another run.
-- **Fix direction:** Mount only the UDS into each sibling (or a per-run isolated dir), not the shared `/run/arcratio` tree.
+- **File:** `src/validator/forecasting/sandbox_docker.py:300`
+- **Risk:** Docstrings claim each runner gets "a single read-only bind mount: the UDS," but the entire `/run/almanac` directory — including `inputs/` holding **every concurrent run's payload** — is bind-mounted into each sibling. X-Run-Id authentication is bypassable.
+- **Failure scenario:** A malicious agent reads `/run/almanac/inputs/.almanac_stdin_<other>.json`, extracts another concurrent run's RUN_ID and agent_code, then issues provider calls under that run_id over the shared UDS — escaping its own track allowlist and charging/attributing calls to another run.
+- **Fix direction:** Mount only the UDS into each sibling (or a per-run isolated dir), not the shared `/run/almanac` tree.
 - **Fixed:** 2026-06-25, working tree (uncommitted) on `docker-review`.
-- **Resolution:** Replaced the whole-socket-dir bind with **two per-run read-only file binds** (`_sandbox_volumes`): the proxy socket `<host>/proxy.sock` → `/run/arcratio/proxy.sock`, and *this run's* input file `<host>/inputs/<name>` → a fixed `/run/arcratio/input.json` (with `ARCRATIO_RUNNER_INPUT_FILE` pointed at it). The `inputs/` directory is no longer mounted, so a sibling can neither enumerate nor read another concurrent run's payload — X-Run-Id is a real capability again, since an agent only knows its own `RUN_ID` (env). The input file is chmod'd `0o644` (readable by the non-root sandbox uid through the bind) inside the still-`0o700` dir (other host users blocked).
+- **Resolution:** Replaced the whole-socket-dir bind with **two per-run read-only file binds** (`_sandbox_volumes`): the proxy socket `<host>/proxy.sock` → `/run/almanac/proxy.sock`, and *this run's* input file `<host>/inputs/<name>` → a fixed `/run/almanac/input.json` (with `FORECASTING_RUNNER_INPUT_FILE` pointed at it). The `inputs/` directory is no longer mounted, so a sibling can neither enumerate nor read another concurrent run's payload — X-Run-Id is a real capability again, since an agent only knows its own `RUN_ID` (env). The input file is chmod'd `0o644` (readable by the non-root sandbox uid through the bind) inside the still-`0o700` dir (other host users blocked).
 - **Verified:** Unit — `tests/validator/test_sandbox_mounts.py` asserts the plan: exactly two file binds, the dir itself is never mounted, all RO, and two different runs bind disjoint input sources (no cross-run reference). macOS Docker — `pytest tests/security --docker`: **9/10 lockdown tests pass**, and the runner launches as uid 10001 and **reads its bind-mounted input** before the (macOS-only) socket round-trip fails, exercising the new mount path.
 - **Linux CI (run 28188589973):** the `docker-security` job confirmed the round-trip — **all 9 isolation tests pass** and the runner **connected to the proxy over the bind-mounted socket and reached the gateway** (proving #2's file-bind mounts + #3's non-root uid + `0777` socket all work on Linux). The lone failure was a stale test, not the fix: `TestPositiveEndToEnd` registered its run without a `miner_hotkey`, which now (post-#1) 400s; fixed by passing `miner_hotkey="5TestMiner"` in all `register_run` calls in `test_sandbox_lockdown.py`. Expect green on re-run.
 - **Pending (final sign-off):** confirm the `docker-security` job is green after the test fix. Optional follow-up: an attack agent that tries to read a second run's input and asserts it cannot, for an explicit isolation assertion.
@@ -75,7 +75,7 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 ### Issue 3 — Sandbox runs as host root in the default deployment
 - **Severity:** 🔴 Critical
 - **Status:** DEFERRED — fix designed, **not applied** (needs Docker E2E + socket-perm coordination; mis-set breaks every run)
-- **File:** `src/validator/sandbox_docker.py:285`
+- **File:** `src/validator/forecasting/sandbox_docker.py:285`
 - **Risk:** `runner_user = "{uid}:{gid}" if host_uid != 0 else "0:0"`. The default compose runs the validator as root (wallet at `/root/.bittensor`), so the documented "non-root UID 10001" invariant is silently dropped and every sandbox runs as uid 0. With the default `docker_runc` runtime (no gVisor), a container escape lands as **root on the host** — a sandbox bug becomes full host compromise.
 - **Failure scenario:** In the default compose deployment every agent sandbox runs as uid 0; a runc/kernel escape by hostile agent code lands as root on the host instead of an unprivileged user.
 - **Fix direction:** Never fall back to `0:0`. Force a non-root sandbox UID regardless of the validator's own uid; document running the validator as non-root and/or gVisor for the runtime.
@@ -101,9 +101,9 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 ### Issue 5 — Agent source + event payloads are world-readable on the host
 - **Severity:** 🟠 High
 - **Status:** FIXED (awaiting sign-off → CLOSED)
-- **File:** `src/validator/sandbox_docker.py:325`
+- **File:** `src/validator/forecasting/sandbox_docker.py:325`
 - **Risk:** `os.chmod(payload_host_dir, 0o755)` makes the `inputs/` directory world-traversable/readable on the Docker host. Any other local user or unrelated container on the validator host can read in-flight agent source and event payloads.
-- **Failure scenario:** Any other local user or unrelated container reads `var/run/arcratio/inputs/*.json` and exfiltrates orchestrator-injected agent source code and event payloads for runs in flight.
+- **Failure scenario:** Any other local user or unrelated container reads `var/run/almanac/inputs/*.json` and exfiltrates orchestrator-injected agent source code and event payloads for runs in flight.
 - **Fix direction:** Restrict the dir to the validator/sandbox uid (e.g. `0o700`/`0o750`) rather than world-readable.
 - **Fixed:** 2026-06-25, working tree (uncommitted) on `docker-review`.
 - **Resolution:** Changed the inputs-dir chmod from `0o755` to `0o700` (owner-only). The sibling reads its payload through the bind mount as the same uid the validator runs as (`runner_user` is `host_uid:host_gid`, or `0:0` when the validator is root — the dir's owner in both cases), so `0o700` does not block the legitimate read while removing all other-user/other-container access on the host.
@@ -117,7 +117,7 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 ### Issue 6 — Unbounded stdout read OOMs the validator
 - **Severity:** 🟠 High
 - **Status:** FIXED (validator-OOM part); **log max-size is a remaining follow-up** (needs Docker E2E)
-- **File:** `src/validator/sandbox_docker.py:379`
+- **File:** `src/validator/forecasting/sandbox_docker.py:379`
 - **Risk:** The `_MAX_SANDBOX_STDOUT_BYTES` ceiling is checked *after* `container.logs()` has already buffered the **entire** agent stdout into a Python `bytes` object. A hostile/buggy agent writing GBs to stdout crashes the validator before the guard runs. Separately, the sibling container has no log-driver `max-size`, so the host json-file log can grow unbounded and exhaust disk. The advertised protection does not protect anything.
 - **Failure scenario:** A hostile or buggy agent writes hundreds of MB / GB to stdout; `container.logs(stdout=True)` loads the whole blob into memory before the size guard runs, OOMing the validator. The host docker log also grows unbounded.
 - **Fix direction:** Stream/cap stdout while reading (enforce the ceiling during the read, not after); set a `max-size` log driver option on the sibling container.
@@ -146,7 +146,7 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 ### Issue 8 — JSON brace-parsing rejects valid results
 - **Severity:** 🟡 Medium
 - **Status:** FIXED (awaiting sign-off → CLOSED)
-- **File:** `src/validator/sandbox_docker.py:437`
+- **File:** `src/validator/forecasting/sandbox_docker.py:437`
 - **Risk:** `_last_json_object`'s backward brace-balance walk ignores braces inside string values. If an `AgentResult` text field contains `{` or `}` (and anything is printed before it so it no longer starts/ends with a brace), the walk never rebalances to depth 0, `model_validate_json` fails, and an otherwise-valid run is rejected.
 - **Failure scenario:** An agent returns an `AgentResult` whose reasoning/text field contains `{`/`}`, and a curated dep or the agent prints a line before the result; the backward walk miscounts the in-string brace and returns the wrong slice, so validation fails.
 - **Fix direction:** Have the runner write the result to a dedicated output file (the input already uses one) rather than scraping stdout; or make the parser string-aware.
@@ -158,13 +158,13 @@ When you address an issue, fill in the **Fixed**, **Resolution**, and **Verified
 ### Issue 9 — Host-bind fallback breaks all runs
 - **Severity:** 🟡 Medium (verifier rated impact PLAUSIBLE — triggers only in a specific mount layout)
 - **Status:** FIXED (awaiting sign-off → CLOSED)
-- **File:** `src/validator/sandbox_docker.py:113`
+- **File:** `src/validator/forecasting/sandbox_docker.py:113`
 - **Risk:** When `sandbox_socket_dir` is a *subdirectory* of a bind mount (not the mountpoint) and `sandbox_socket_host_bind` is unset, `_sibling_socket_host_bind` falls back to the in-container path as the host source. Docker creates a fresh empty dir, the sibling never sees `proxy.sock`, and **every** `call_provider()` fails with connection-refused until the operator manually sets the override.
 - **Failure scenario:** `_mountinfo_host_root_for_mountpoint` returns `None`, the container-internal path is bound as if it were a host path, and all agent executions fail until `sandbox_socket_host_bind` is set manually.
 - **Fix direction:** Resolve the host root for subdirectories of a bind mount (walk parent mountpoints) or fail loudly instead of silently binding a wrong path.
 - **Fixed:** 2026-06-25, working tree (uncommitted) on `docker-review`.
 - **Resolution:** Generalised `_mountinfo_host_root_for_mountpoint` to match not just an exact mountpoint but any **ancestor** mount of the target, picking the most specific (longest mountpoint) and preferring a real `bind` entry over a non-bind fallback at equal depth, then appending the trailing path segment to the host-side root. A socket dir nested under a bind mount now resolves to `host_root/<subdir>` instead of `None`, so the caller no longer silently binds a wrong container-internal path. The existing host-run fallback (no relevant mount → use the socket dir as-is) is preserved.
-- **Verified:** `tests/validator/test_sandbox_mountinfo.py` extended: subdir-of-a-bind resolves to `host_src/arcratio`; most-specific mount wins when both an ancestor and exact mountpoint match. Original mountinfo tests (exact-match prefers bind, explicit-config, host-run fallback) still pass.
+- **Verified:** `tests/validator/test_sandbox_mountinfo.py` extended: subdir-of-a-bind resolves to `host_src/almanac`; most-specific mount wins when both an ancestor and exact mountpoint match. Original mountinfo tests (exact-match prefers bind, explicit-config, host-run fallback) still pass.
 - **Closed:** _(date / sign-off)_
 
 ### Issue 10 — Missing `miner_hotkey` → 400 on the default sandbox path

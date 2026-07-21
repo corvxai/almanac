@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from src.validator import sandbox_docker as sd
+from src.validator.forecasting import sandbox_docker as sd
 
 
 def test_plain_object_roundtrips() -> None:

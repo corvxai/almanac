@@ -84,6 +84,10 @@ def loaded(keypair):
 # ---------------------------------------------------------------------------
 
 
+def test_auth_version_uses_almanac_namespace():
+    assert AUTH_VERSION == "almanac-v1"
+
+
 class TestSignRequest:
     def test_returns_full_header_set(self, loaded):
         body = b'{"provider_id":"polymarket","call_type":"get_market","params":{}}'
@@ -213,7 +217,7 @@ class TestGatewaySignatureLogging:
         body = json.dumps({"provider_id": "stub", "call_type": "ping", "params": {}}).encode()
         headers = sign_request(loaded, body, netuid=7)
 
-        with caplog.at_level("INFO", logger="arcratio.gateway"):
+        with caplog.at_level("INFO", logger="almanac.gateway"):
             resp = gateway_app.post("/v1/call", content=body, headers={**headers, "Content-Type": "application/json"})
         assert resp.status_code == 200
         # The gateway logs `... by <hotkey> (verified=True) ...`.

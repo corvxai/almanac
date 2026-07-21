@@ -58,6 +58,6 @@ def execute_agent(
 
     # Imported lazily so the validator's main config path doesn't pay for the
     # docker SDK on dev machines that only run in-process tests.
-    from src.validator.sandbox_docker import run_agent_in_container
+    from src.validator.forecasting.sandbox_docker import run_agent_in_container
 
     return run_agent_in_container(agent, ctx, cfg, run_id)

@@ -43,12 +43,12 @@ from src.agent.context import ForecastingContext
 from src.core.config import ValidatorConfig
 from src.core.schemas import AgentResult
 
-logger = logging.getLogger("arcratio.sandbox_docker")
+logger = logging.getLogger("almanac.forecasting.sandbox_docker")
 
 
 # Where the runner image expects the validator-local proxy's UDS to be
 # mounted (read-only). Pairs with `runner_entrypoint._socket_path_from_env`.
-_SANDBOX_SOCKET_DIR = "/run/arcratio"
+_SANDBOX_SOCKET_DIR = "/run/almanac"
 _SANDBOX_SOCKET_URL = f"http+unix://{_SANDBOX_SOCKET_DIR}/proxy.sock"
 # Per-run mounts are bound as individual files (not the whole dir) so a sibling
 # never sees another run's payload — these are the in-container target paths.
@@ -85,7 +85,7 @@ def _mountinfo_host_root_for_mountpoint(
 
     When the validator runs in Docker, sibling containers are created by the
     host daemon. Binds must use the **host** path of the proxy socket directory
-    (the same inode the validator sees via compose), not e.g. ``/var/run/arcratio``
+    (the same inode the validator sees via compose), not e.g. ``/var/run/almanac``
     resolved on the host filesystem.
 
     Handles the case where `mountpoint` is a *subdirectory* of a bind mount
@@ -203,7 +203,7 @@ _LOG_PRINT_BYTES = 12_000
 
 def _sandbox_runner_logs_quiet() -> bool:
     """When true, do not print agent-runner log tails after a normal exit."""
-    v = os.environ.get("ARCRATIO_SANDBOX_RUNNER_LOGS_QUIET", "").strip().lower()
+    v = os.environ.get("FORECASTING_SANDBOX_RUNNER_LOGS_QUIET", "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
 
@@ -274,7 +274,7 @@ def _emit_sibling_container_logs(container: Any, reason: str) -> None:
     cid = getattr(container, "id", "") or ""
     short = f"{cid[:12]}…" if len(cid) > 12 else (cid or "?")
     bar = "-" * 72
-    print(f"\n{bar}\n[arcratio] agent-runner logs  {reason}\n  container: {short}\n{bar}", flush=True)
+    print(f"\n{bar}\n[almanac] agent-runner logs  {reason}\n  container: {short}\n{bar}", flush=True)
     try:
         so = container.logs(
             stdout=True, stderr=False, tail=_LOG_TAIL_LINES, timestamps=False
@@ -322,16 +322,16 @@ def run_agent_in_container(
         "agent_module": agent_module,
         "agent_class": agent_class,
     }
-    inline_code = getattr(agent, "_arcratio_agent_source_code", None)
-    inline_class = getattr(agent, "_arcratio_agent_source_class", None)
+    inline_code = getattr(agent, "_almanac_agent_source_code", None)
+    inline_class = getattr(agent, "_almanac_agent_source_class", None)
     if isinstance(inline_code, str) and inline_code.strip():
         payload["agent_code"] = inline_code
         if isinstance(inline_class, str) and inline_class.strip():
             payload["inline_class"] = inline_class
     # JSON payload is written to the shared UDS bind mount so the sibling can
-    # read it via ARCRATIO_RUNNER_INPUT_FILE. Docker stdin attach + EOF is
+    # read it via FORECASTING_RUNNER_INPUT_FILE. Docker stdin attach + EOF is
     # unreliable; ``sys.stdin.read()`` in the runner would otherwise hang.
-    payload_name = f".arcratio_stdin_{run_id}.json"
+    payload_name = f".almanac_stdin_{run_id}.json"
     payload_host_dir = cfg.sandbox_socket_dir / "inputs"
     payload_host_path = payload_host_dir / payload_name
 
@@ -378,12 +378,12 @@ def run_agent_in_container(
             "SANDBOX_PROXY_URL": _SANDBOX_SOCKET_URL,
             "RUN_ID": str(run_id),
             "PYTHONUNBUFFERED": "1",
-            "ARCRATIO_RUNNER_INPUT_FILE": _SANDBOX_INPUT_FILE,
+            "FORECASTING_RUNNER_INPUT_FILE": _SANDBOX_INPUT_FILE,
         },
         labels={
-            "arcratio.run_id": str(run_id),
-            "arcratio.agent_module": agent_module,
-            "arcratio.agent_class": agent_class,
+            "almanac.run_id": str(run_id),
+            "almanac.agent_module": agent_module,
+            "almanac.agent_class": agent_class,
         },
     )
     if runtime is not None:
@@ -416,7 +416,7 @@ def run_agent_in_container(
         container = client.containers.create(**container_kwargs)
         cid = (container.id or "")[:12]
         print(
-            f"[arcratio] spawning agent-runner sibling: container={cid}… "
+            f"[almanac] spawning agent-runner sibling: container={cid}… "
             f"image={cfg.sandbox_image} agent={agent_module}:{agent_class} "
             f"host_bind={bind_src!r} -> container:{_SANDBOX_SOCKET_DIR}\n"
             f"  (host: docker logs -f {container.id})",

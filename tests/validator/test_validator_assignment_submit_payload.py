@@ -20,14 +20,14 @@ from src.core.schemas import (
     ResponseMeta,
     SandboxEnvironment,
 )
-from src.validator.assignment_pipeline import (
+from src.validator.forecasting.assignment_pipeline import (
     build_prediction_submit_payload,
     build_sandbox_assignment_agent,
     process_single_assignment,
     resolve_binary_outcome_ids,
 )
-from src.validator.orchestrator_api import OrchestratorAssignment
-from src.validator.trace_assembler import assemble_trace
+from src.validator.forecasting.orchestrator_api import OrchestratorAssignment
+from src.validator.forecasting.trace_assembler import assemble_trace
 
 
 def _assignment(outcomes: list[dict]) -> OrchestratorAssignment:
@@ -350,7 +350,7 @@ def test_build_sandbox_assignment_agent_sets_inline_code_attrs() -> None:
         ]
     )
     agent = build_sandbox_assignment_agent(assignment)
-    assert getattr(agent, "_arcratio_agent_source_code") == assignment.agent.code
+    assert getattr(agent, "_almanac_agent_source_code") == assignment.agent.code
     assert str(agent.agent_id)
     assert agent.agent_version
 
@@ -462,10 +462,10 @@ def _real_digest_with_belief_path(prediction: float, confidence: float | None):
 
 def test_submit_payload_unchanged_and_multipoint_with_belief_path() -> None:
     # Regression guard for the belief-path change. It must NOT perturb the 4 submit
-    # fields arcratio produces, and reasoningTrace.steps must now carry a MULTI-POINT
+    # fields forecasting produces, and reasoningTrace.steps must now carry a MULTI-POINT
     # intermediateProbability. The other 5 scorer fields (resolvedOutcomeId,
     # resolutionStatus, scoredAt, minerUid, marketId) are server-attached off-repo,
-    # so this proves only the arcratio HALF of the scorer contract.
+    # so this proves only the forecasting HALF of the scorer contract.
     assignment = _assignment(
         outcomes=[
             {"outcomeId": "oid_yes", "name": "Yes"},
