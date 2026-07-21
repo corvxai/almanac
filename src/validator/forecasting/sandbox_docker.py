@@ -201,9 +201,9 @@ _LOG_TAIL_LINES = 400
 _LOG_PRINT_BYTES = 12_000
 
 
-def _sandbox_runner_logs_quiet() -> bool:
-    """When true, do not print agent-runner log tails after a normal exit."""
-    v = os.environ.get("FORECASTING_SANDBOX_RUNNER_LOGS_QUIET", "").strip().lower()
+def _sandbox_runner_logs_verbose() -> bool:
+    """When true, print agent-runner log tails after a normal exit (quiet by default)."""
+    v = os.environ.get("FORECASTING_SANDBOX_RUNNER_LOGS_VERBOSE", "").strip().lower()
     return v in {"1", "true", "yes", "on"}
 
 
@@ -455,7 +455,7 @@ def run_agent_in_container(
             ) from exc
 
         exit_code = result.get("StatusCode", -1)
-        if not _sandbox_runner_logs_quiet():
+        if _sandbox_runner_logs_verbose():
             _emit_sibling_container_logs(
                 container, f"runner finished (exit_code={exit_code})"
             )

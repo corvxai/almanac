@@ -58,7 +58,9 @@ class GatewayDefaults:
     # HTTP timeout for every provider-call hop (agent → proxy → gateway → upstream).
     # Keep aligned with ``ValidatorDefaults.sandbox_timeout_seconds``.
     call_timeout_seconds: int = 240
-    debug_log_raw_response: bool = True
+    # Full raw response dumps are off by default; enable via constant or
+    # GATEWAY_DEBUG_RAW_RESPONSE=1. Successful calls still emit a short INFO line.
+    debug_log_raw_response: bool = False
     # 0 means "no truncation" when debug logging is enabled.
     debug_raw_response_max_chars: int = 0
 
@@ -91,7 +93,6 @@ BITTENSOR = BittensorDefaults()
 STORAGE = StorageDefaults()
 GATEWAY = GatewayDefaults()
 VALIDATOR_LOOP = ValidatorLoopDefaults()
-ORCHESTRATOR_API_URL = "http://localhost:4000"
-GATEWAY_SERVICE_URL = "http://localhost:4000"
+ORCHESTRATOR_API_URL = "https://portal.almnc.ai"
+GATEWAY_SERVICE_URL = "https://portal.almnc.ai"
 LOG_LEVEL = "INFO"
-

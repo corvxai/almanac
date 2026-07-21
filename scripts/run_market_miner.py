@@ -20,6 +20,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 if __name__ == "__main__":
     runpy.run_path(
-        str(PROJECT_ROOT / "miner" / "almanac" / "miner.py"),
+        str(PROJECT_ROOT / "miner" / "market" / "miner.py"),
         run_name="__main__",
     )

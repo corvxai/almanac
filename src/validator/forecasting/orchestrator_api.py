@@ -219,17 +219,106 @@ def fetch_agent_event_assignment(
     return response
 
 
+def _abbreviated_prediction_submit_log(
+    payload: dict[str, Any],
+    *,
+    assignment: OrchestratorAssignment | None = None,
+    payload_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Build a privacy-safe at-a-glance summary of a prediction submit payload.
+
+    Omits probabilities, confidence, reasoning text, and other agent-private
+    fields. Surfaces identifiers, public market context, and structural sizes.
+    """
+    prediction = payload.get("prediction") if isinstance(payload.get("prediction"), dict) else {}
+    exec_meta = (
+        prediction.get("executionMetadata")
+        if isinstance(prediction.get("executionMetadata"), dict)
+        else {}
+    )
+    market_snap = (
+        prediction.get("marketSnapshot")
+        if isinstance(prediction.get("marketSnapshot"), dict)
+        else {}
+    )
+    reasoning_trace = (
+        payload.get("reasoningTrace") if isinstance(payload.get("reasoningTrace"), dict) else {}
+    )
+    trace = (
+        reasoning_trace.get("trace") if isinstance(reasoning_trace.get("trace"), dict) else {}
+    )
+    trace_summary = (
+        reasoning_trace.get("traceSummary")
+        if isinstance(reasoning_trace.get("traceSummary"), dict)
+        else {}
+    )
+    evidence = (
+        trace.get("evidenceDigest") if isinstance(trace.get("evidenceDigest"), dict) else {}
+    )
+    future_graph = (
+        evidence.get("futureGraph") if isinstance(evidence.get("futureGraph"), dict) else {}
+    )
+    belief_path = future_graph.get("beliefPath")
+    provider_calls = trace.get("providerCalls")
+    steps = trace.get("steps")
+
+    question = None
+    miner_uid = None
+    if assignment is not None:
+        miner_uid = assignment.miner.minerUid
+        question = (assignment.event.question or "").strip() or None
+        if question and len(question) > 160:
+            question = question[:157] + "..."
+
+    return {
+        "agentPredictionId": payload.get("agentPredictionId"),
+        "minerUid": miner_uid,
+        "question": question,
+        "source": market_snap.get("source") or (assignment.event.source if assignment else None),
+        "sourceMarketId": market_snap.get("sourceMarketId")
+        or (
+            (assignment.event.sourceMarketId or assignment.event.marketId)
+            if assignment
+            else None
+        ),
+        "prediction": "[REDACTED]",
+        "predictionIsInvalid": exec_meta.get("predictionIsInvalid"),
+        "confidenceOmitted": exec_meta.get("confidenceOmitted"),
+        "latencyMs": exec_meta.get("latencyMs"),
+        "providerCallCount": trace_summary.get("providerCallCount")
+        if trace_summary.get("providerCallCount") is not None
+        else (len(provider_calls) if isinstance(provider_calls, list) else None),
+        "reasoningStepCount": trace_summary.get("reasoningStepCount")
+        if trace_summary.get("reasoningStepCount") is not None
+        else (len(steps) if isinstance(steps, list) else None),
+        "beliefPathStepCount": len(belief_path) if isinstance(belief_path, list) else None,
+        "evidenceDigestKeyCount": len(evidence) if evidence else 0,
+        "payloadBytes": payload_bytes,
+    }
+
+
 def submit_validator_prediction(
     *,
     base_url: str,
     loaded_hotkey: LoadedKeypair,
     payload: dict[str, Any],
+    assignment: OrchestratorAssignment | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     http_client: httpx.Client | None = None,
 ) -> SubmitPredictionResponse:
     """Submit prediction payload to ``POST /v1/validators/prediction``."""
     body_text = _canonical_json(payload)
     body_bytes = body_text.encode("utf-8")
+    summary = _abbreviated_prediction_submit_log(
+        payload,
+        assignment=assignment,
+        payload_bytes=len(body_bytes),
+    )
+    logger.info(
+        "Submitting prediction %s",
+        json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+    )
+
     headers = build_assignment_auth_headers(
         loaded_hotkey=loaded_hotkey,
         method="POST",

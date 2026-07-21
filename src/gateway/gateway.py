@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -57,8 +58,13 @@ def build_provider_call_record(
     `local_proxy` (validator-side proxy path) so the trace shape is identical
     regardless of whether the agent ran in-process or in a sandbox.
     """
-    _maybe_log_raw_response(provider_id=provider_id, call_type=call_type, raw_response=raw_response)
     raw_json = json.dumps(raw_response, sort_keys=True, default=str)
+    _log_provider_response(
+        provider_id=provider_id,
+        call_type=call_type,
+        raw_json=raw_json,
+        latency_ms=latency_ms,
+    )
     raw_hash = hashlib.sha256(raw_json.encode()).hexdigest()
 
     evidence = extract_evidence(provider_id, call_type, raw_response)
@@ -103,26 +109,48 @@ def build_provider_call_record(
     )
 
 
-def _maybe_log_raw_response(*, provider_id: str, call_type: str, raw_response: dict[str, Any]) -> None:
-    if not constants.GATEWAY.debug_log_raw_response:
+def _raw_response_debug_enabled() -> bool:
+    """Full payload dumps: off by default; ``GATEWAY_DEBUG_RAW_RESPONSE=1`` opts in."""
+    v = os.environ.get("GATEWAY_DEBUG_RAW_RESPONSE", "").strip().lower()
+    if v:
+        return v in {"1", "true", "yes", "on"}
+    return bool(constants.GATEWAY.debug_log_raw_response)
+
+
+def _log_provider_response(
+    *,
+    provider_id: str,
+    call_type: str,
+    raw_json: str,
+    latency_ms: int,
+) -> None:
+    """Always log a short success line; dump the raw payload only when debug is on."""
+    size = len(raw_json)
+    logger.info(
+        "Provider call ok provider=%s call_type=%s latency_ms=%d size=%d",
+        provider_id,
+        call_type,
+        latency_ms,
+        size,
+    )
+    if not _raw_response_debug_enabled():
         return
-    raw_json = json.dumps(raw_response, sort_keys=True, default=str)
     max_chars = max(0, int(constants.GATEWAY.debug_raw_response_max_chars))
-    if max_chars > 0 and len(raw_json) > max_chars:
+    if max_chars > 0 and size > max_chars:
         logger.warning(
             "Gateway raw response debug provider=%s call_type=%s size=%d truncated=true payload=%s...(truncated %d chars)",
             provider_id,
             call_type,
-            len(raw_json),
+            size,
             raw_json[:max_chars],
-            len(raw_json) - max_chars,
+            size - max_chars,
         )
         return
     logger.warning(
         "Gateway raw response debug provider=%s call_type=%s size=%d truncated=false payload=%s",
         provider_id,
         call_type,
-        len(raw_json),
+        size,
         raw_json,
     )
 

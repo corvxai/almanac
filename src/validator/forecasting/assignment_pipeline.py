@@ -413,6 +413,7 @@ def process_single_assignment(
             base_url=config.validator.orchestrator_api_url,
             loaded_hotkey=loaded_hotkey,
             payload=submit_payload,
+            assignment=assignment,
             timeout_seconds=timeout_seconds,
         )
 

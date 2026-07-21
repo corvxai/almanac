@@ -15,7 +15,19 @@
 
 </div>
 
-Almanac is a validator stack for decentralized forecasting on Bittensor. It combines two incentive mechanisms, both geared toward improving prediction accuracy.
+- [Introduction](#introduction)
+- [Miner and Validator Functionality](#miner-and-validator-functionality)
+  - [Miner](#miner)
+  - [Validator](#validator)
+- [Running a Validator](#running-a-validator)
+- [For Miners](#for-miners)
+- [Repository Structure](#repository-structure)
+- [Status](#status)
+- [License](#license)
+
+## Introduction
+
+Almanac is a validator stack for decentralized agentic forecasting and market prediction performance on Bittensor. It combines two incentive mechanisms, both geared toward improving prediction accuracy.
 
 IM1 — **Almanac Market** (`almanac.market`): a prediction-market terminal that makes competing and submitting predictions through trading more accessible.
 
@@ -23,59 +35,33 @@ IM2 — **Almanac Forecasting**: miners submit forecasting agents that predict e
 
 Both incentive mechanisms generate scores and publish blended weights on-chain.
 
-- [Introduction](#introduction)
-- [How It Works](#how-it-works)
-- [Miner and Validator Functionality](#miner-and-validator-functionality)
-  - [Miner](#miner)
-  - [Validator](#validator)
-- [Running a Validator](#running-a-validator)
-- [For Miners](#for-miners)
-- [Developer and Test Docs](#developer-and-test-docs)
-- [Repository Structure](#repository-structure)
-- [Status](#status)
-- [License](#license)
-
-## Introduction
-
-This repository powers the validator side of the Almanac SN41 workflow:
-
-- Sync miner metadata and market activity.
-- Score miners under multiple mechanisms.
-- Blend scores into final validator weights.
-- Run an auditable agent/evidence execution path for signals.
-
-The goal is production-safe validator behavior with transparent scoring and reproducible traces.
-
-## How It Works
-
-Each scoring cycle, the validator:
-
-1. Syncs the subnet metagraph and miner metadata.
-2. Computes Almanac Market incentive scores (when enabled).
-3. Computes Almanac Forecasting scores (when enabled).
-4. Blends score vectors and submits a single `set_weights` update.
-
-Mechanism toggles and blend shares are configured in `src/core/constants.py` under `VALIDATOR_LOOP`.
-
 ## Miner and Validator Functionality
 
 ### Miner
 
-- Almanac Market miners participate through trading and metadata registration.
-- Almanac Forecasting miners submit agents through `miner/cli.py`.
-- Miner onboarding and CLI flows are documented in `miner/README.md`.
-- Miner metadata can be registered with:
+There are two tracks for miners to participate in:
+1. Almanac Market 
+- Participate through trading on `almanac.market`.
+- Requires metadata registration and connecting UID/hotkey to Almanac Market account
+- 1% fee is collected from every buy trade and used towards the daily reward pool
+- Scoring mechanism largely favors sustained edge, substantial volume, and winning over the competition
 
-```bash
-pip install -r requirements-miner.txt
-python3 scripts/run_market_miner.py
-```
+2. Almanac Forecasting
+- Participate by creating an Almanac Portal account and funding credits on `portal.almnc.ai`
+- Build and submit forecasting agents through `miner/cli.py`.
+- Validators will execute agent's to forecast event predictions.
+- Scoring mechanism largely favors sustained accuracy, calibrated confidence, and beating the market
+- Miner onboarding and CLI flows are documented in `miner/README.md`.
 
 ### Validator
 
-- `scripts/run_validator.py` is the long-running validator entrypoint.
-- `scripts/run_forecast.py` is a developer harness for agent orchestration and trace generation (no chain interaction).
-- Traces are written to `data/traces/` as evidence-digest JSON artifacts.
+The validator's high-level, continuously looping execution:
+
+- Sync miner metadata and market activity.
+- Execute miner agents in locked down docker environment using Almanac's portal
+- Posts agent predictions and reasoning chain metadata to Almanac's portal
+- Score miners under multiple mechanisms.
+- Blend scores into final validator weights.
 
 ## Running a Validator
 
@@ -157,21 +143,20 @@ pm2 logs almanac-validator
 
 ## For Miners
 
-Miner documentation lives in `miner/README.md`, including:
+Two tracks:
 
-- prerequisites,
-- agent packaging/upload flows,
-- CLI command reference and troubleshooting.
+| Track | Install | Entrypoint | Docs |
+|---|---|---|---|
+| **Almanac Market** | `pip install -r requirements.txt` | `python3 scripts/run_market_miner.py` | [almanac.market](https://almanac.market), `miner/market/` |
+| **Almanac Forecasting** | `pip install -r requirements.txt` | `python3 miner/cli.py` | **`miner/README.md`** (numbered quick start) |
 
-## Developer and Test Docs
+Forecasting miners: 
+1. Get a gateway API key at [portal.almnc.ai](https://portal.almnc.ai)
+2. Put `GATEWAY_API_KEY` in `.env`
+3. Build an agent from `src/agent/examples/`
+4. Submit an agent using `submit-agent`. 
 
-Public docs are intentionally concise.  
-Detailed contributor guidance (tests, live-provider workflows, Docker sandboxing, signing/proxy behavior, and advanced local ops) is in `tests/README.md`.
-
-Additional references:
-
-- Pricing and provider usage notes: `docs/pricing_cards.md`
-- Pricing card sync helper: `python scripts/sync_pricing_cards.py --write`
+Full steps, sandbox allowlist, and belief-path contract are in `miner/README.md`.
 
 ## Repository Structure
 
