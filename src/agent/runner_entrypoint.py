@@ -45,6 +45,7 @@ import httpx
 from src.core import constants
 from src.agent.base import BaseAgent
 from src.agent.context import ForecastingContext
+from src.agent.loader import load_agent_class_from_code as _load_agent_class_from_code
 from src.agent.sandbox_gateway import SandboxGateway
 from src.core.events import Event
 from src.gateway.client import RemoteProvider
@@ -91,28 +92,6 @@ def _load_agent_class(module_name: str, class_name: str) -> type[BaseAgent]:
     if not isinstance(cls, type) or not issubclass(cls, BaseAgent):
         raise RuntimeError(f"{module_name}.{class_name} is not a BaseAgent subclass")
     return cls
-
-
-def _load_agent_class_from_code(code: str, class_name: str | None = None) -> type[BaseAgent]:
-    scope: dict[str, Any] = {}
-    exec(compile(code, "<orchestrator-agent>", "exec"), scope)  # noqa: S102
-    if class_name:
-        cls = scope.get(class_name)
-        if not isinstance(cls, type) or not issubclass(cls, BaseAgent):
-            raise RuntimeError(f"class '{class_name}' is not a BaseAgent subclass")
-        return cls
-    candidates = []
-    for obj in scope.values():
-        if isinstance(obj, type) and issubclass(obj, BaseAgent) and obj is not BaseAgent:
-            candidates.append(obj)
-    if not candidates:
-        raise RuntimeError("no BaseAgent subclass found in inline agent_code")
-    if len(candidates) > 1:
-        names = ", ".join(sorted(c.__name__ for c in candidates))
-        raise RuntimeError(
-            f"multiple BaseAgent subclasses found in inline agent_code ({names})"
-        )
-    return candidates[0]
 
 
 def _read_stdin_payload() -> dict[str, Any]:

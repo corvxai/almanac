@@ -1,10 +1,10 @@
-"""Gateway HTTP server — SIMULATED provider proxy service (local test double).
+"""Deprecated SIMULATED provider proxy service (local test double).
 
 This is **not** the production gateway service (that lives in its own repo). It
-is the local stand-in used so validators and miners can exercise the full
-validator → local proxy → gateway → provider path. Launched via
-``scripts/run_gateway.py``, which runs it mock-by-default (no keys, no network,
-no spend) unless ``--live`` is passed.
+remains for contributor and validator integration tests. Miners should test
+agent files with ``miner/cli.py test-agent``, which calls the production portal
+gateway. This server is launched via ``scripts/run_gateway.py``, which runs it
+mock-by-default (no keys, no network, no spend) unless ``--live`` is passed.
 
 Runs as a standalone process, registers provider adapters, and exposes a single
 endpoint for the validator to call through. The validator never touches external
