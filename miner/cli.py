@@ -36,6 +36,7 @@ MAX_AGENT_FILE_BYTES = 2 * 1024 * 1024  # 2MB
 # The API does not expose this endpoint yet; keep the command disabled below.
 LIST_AGENTS_ENDPOINT = "v1/agents/list-agents"
 UPLOAD_AGENT_ENDPOINT = "v1/agents/submit-agent"
+CREDITS_BALANCE_ENDPOINT = "v1/credits/balance"
 AUTH_DOMAIN = "sub41-agent-v1"
 
 
@@ -416,6 +417,27 @@ def _handle_list_agents(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_balance(args: argparse.Namespace) -> int:
+    gateway_api_key = _resolve_gateway_api_key(args)
+    if not gateway_api_key:
+        print("gateway API key is required; pass --gateway-api-key or set GATEWAY_API_KEY.")
+        return 2
+
+    response = _request(
+        method="GET",
+        endpoint=CREDITS_BALANCE_ENDPOINT,
+        args=args,
+        extra_headers={"Authorization": f"Bearer {gateway_api_key}"},
+    )
+    if response is None:
+        return 1
+    try:
+        _print_json(response.json())
+    except ValueError:
+        print(response.text)
+    return 0
+
+
 def _handle_buy_credits(args: argparse.Namespace) -> int:
     print("buy-credits: not implemented yet.")
     print("  credits flow and wallet-signature auth are deferred.")
@@ -447,7 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--gateway-api-key",
         default=None,
         help=(
-            "Portal gateway API key for agent testing and submit auth. "
+            "Portal gateway API key for balance, agent testing, and submit auth. "
             "Defaults to GATEWAY_API_KEY or FORECASTING_GATEWAY_API_KEY."
         ),
     )
@@ -527,6 +549,13 @@ def build_parser() -> argparse.ArgumentParser:
     # list_parser.add_argument("--limit", type=int, default=25, help="Max results to return.")
     # list_parser.add_argument("--offset", type=int, default=0, help="Pagination offset.")
     # list_parser.set_defaults(handler=_handle_list_agents)
+
+    balance_parser = subparsers.add_parser(
+        "balance",
+        parents=[common],
+        help="Show the portal credit balance for the configured gateway API key.",
+    )
+    balance_parser.set_defaults(handler=_handle_balance)
 
     credits_parser = subparsers.add_parser(
         "buy-credits",
