@@ -60,19 +60,34 @@ and [Calling providers](#calling-providers).
 
 ### 4. Test locally before submit
 
-There is no `test path/to/agent.py` CLI yet. Use the reference harness to learn
-the sandbox and provider path, then port the same patterns into your file.
+Run your agent against a random live event and the production portal gateway:
 
 ```bash
-# Fast in-process smoke test against a reference agent
-python3 scripts/run_forecast.py --agent basic --sandbox in_process --unsafe-no-signing
-
-# Closer to production: Docker sandbox (build once)
-docker compose build agent-runner
-python3 scripts/run_forecast.py --agent basic --sandbox docker_runc --unsafe-no-signing
+python3 miner/cli.py test-agent path/to/agent.py
 ```
 
-`--agent` choices: `llm_only`, `basic`, `search`, `orchestrated`, `all`.
+The command loads `GATEWAY_API_KEY` from the repo-root `.env`, fetches
+`GET /v1/events/random`, executes your agent in-process, and sends provider
+calls to the live `POST /v1/gateway/completions` endpoint. It validates the
+returned `AgentResult` and performs the same JSON round-trip used at the
+production sandbox boundary. No OpenRouter or Anthropic API key is needed.
+
+To repeat a test against the same portal event:
+
+```bash
+python3 miner/cli.py test-agent path/to/agent.py --event-id <portal-event-id>
+```
+
+The portal test endpoint currently exposes the provider IDs returned by
+`GET /v1/gateway/providers` (currently `openrouter`). For search, use an
+OpenRouter `:online` model or a `perplexity/*` model slug through the
+`openrouter` provider. The CLI reports a clear error if your agent requests a
+provider unavailable on the portal test path.
+
+Portal completions provide normalized assistant text, usage, and cost data.
+They do not currently expose provider-native citation/annotation fields, so an
+agent whose logic depends on those raw fields cannot fully exercise that logic
+through this test command.
 
 Before uploading your own file, check:
 
@@ -83,7 +98,7 @@ Before uploading your own file, check:
 
 Contributor-oriented gateway and sandbox details: `tests/README.md`.
 
-### 5. Submit and verify
+### 5. Submit
 
 With `GATEWAY_API_KEY` in `.env`:
 
@@ -91,8 +106,6 @@ With `GATEWAY_API_KEY` in `.env`:
 python3 miner/cli.py submit-agent path/to/agent.py \
   --wallet-name <wallet-name> \
   --wallet-hotkey-name <hotkey-name>
-
-python3 miner/cli.py list-agents   # confirm your upload appears
 ```
 
 Prefer `.env` for the API key over `--gateway-api-key` (shell history).
@@ -204,6 +217,10 @@ Common `provider_id` / `call_type` pairs:
 | `polymarket` | `get_market` | Market odds and metadata |
 | `web_search` | `search` | Web search results |
 
+Production validators support the provider IDs above. The miner `test-agent`
+route currently exposes only the IDs announced by the portal provider catalog;
+see [Test locally before submit](#4-test-locally-before-submit).
+
 Provider-specific params (`system`, `tools`, `grounding`, …) are also
 pass-through when the adapter supports them. See example agents and
 `src/gateway/providers/`.
@@ -239,8 +256,8 @@ Defaults target production. Override only when you intentionally need something 
 | Setting | Default | Override (optional) |
 |---|---|---|
 | Orchestrator base URL | production (`ORCHESTRATOR_API_URL` in `src/core/constants.py`) | `FORECASTING_ORCHESTRATOR_URL` or `--orchestrator-url` |
-| Gateway API key | — (required for submit) | `GATEWAY_API_KEY` (or `FORECASTING_GATEWAY_API_KEY` / `--gateway-api-key`) |
-| Timeout | `20.0` s | `FORECASTING_TIMEOUT_SECONDS` / `--timeout-seconds` |
+| Gateway API key | — (required for test and submit) | `GATEWAY_API_KEY` (or `FORECASTING_GATEWAY_API_KEY` / `--gateway-api-key`) |
+| Timeout | `20.0` s (`120.0` s for `test-agent`) | `FORECASTING_TIMEOUT_SECONDS` / `--timeout-seconds` |
 | Wallet path | `~/.bittensor/wallets` | `FORECASTING_WALLET_PATH` / `--wallet-path` |
 | Wallet name | `default` | `FORECASTING_WALLET_NAME` / `--wallet-name` |
 | Hotkey name | `default` | `FORECASTING_WALLET_HOTKEY` / `--wallet-hotkey-name` |
@@ -249,13 +266,18 @@ The CLI auto-loads repo-root `.env` (`python-dotenv`) before resolving env vars.
 
 ## Command reference
 
-### `list-agents`
+### `test-agent`
 
-`GET /v1/agents/list-agents`
+Fetch a live event, run one local agent file through the portal gateway, and
+validate its `AgentResult`:
 
 ```bash
-python3 miner/cli.py list-agents --limit 25 --offset 0
+python3 miner/cli.py test-agent path/to/agent.py
+python3 miner/cli.py test-agent path/to/agent.py --event-id <portal-event-id>
 ```
+
+This command incurs normal portal provider usage and reports per-call cost and
+the remaining portal balance.
 
 ### `submit-agent` (alias: `upload-agent`)
 
@@ -314,6 +336,8 @@ python3 miner/cli.py buy-credits 25
 - **Wallet load errors**: check wallet path / name / hotkey name and that hotkey
   files exist under `~/.bittensor/wallets`.
 - **Upload file errors**: path must exist and end in `.py`; size ≤ 2MB.
+- **Provider unavailable during `test-agent`**: use a provider returned by the
+  portal catalog. Search-capable models can be called through `openrouter`.
 - **Import / sandbox failures after submit**: remove disallowed deps; use only
   `ctx.call_provider` for network I/O (see [Allowed dependencies](#allowed-dependencies)).
 

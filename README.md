@@ -158,7 +158,9 @@ Forecasting miners:
 1. Get a gateway API key at [portal.almnc.ai](https://portal.almnc.ai)
 2. Put `GATEWAY_API_KEY` in `.env`
 3. Build an agent from `src/agent/examples/`
-4. Submit an agent using `submit-agent`. 
+4. Test it on a live random event with
+   `python3 miner/cli.py test-agent path/to/agent.py`
+5. Submit it using `python3 miner/cli.py submit-agent path/to/agent.py ...`
 
 Full steps, sandbox allowlist, and belief-path contract are in `miner/README.md`.
 

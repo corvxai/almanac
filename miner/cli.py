@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 from dotenv import load_dotenv
@@ -23,10 +24,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 load_dotenv(_PROJECT_ROOT / ".env")
 
 from src.core.constants import ORCHESTRATOR_API_URL
+from src.agent.context import ForecastingContext
+from src.agent.loader import load_agent_class_from_code
+from src.core.schemas import AgentResult
+from src.gateway.portal_client import PortalGateway, fetch_portal_event
 
 DEFAULT_ORCHESTRATOR_URL = ORCHESTRATOR_API_URL
 DEFAULT_TIMEOUT_SECONDS = 20.0
+DEFAULT_TEST_TIMEOUT_SECONDS = 120.0
 MAX_AGENT_FILE_BYTES = 2 * 1024 * 1024  # 2MB
+# The API does not expose this endpoint yet; keep the command disabled below.
 LIST_AGENTS_ENDPOINT = "v1/agents/list-agents"
 UPLOAD_AGENT_ENDPOINT = "v1/agents/submit-agent"
 AUTH_DOMAIN = "sub41-agent-v1"
@@ -298,6 +305,99 @@ def _handle_upload_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_test_agent(args: argparse.Namespace) -> int:
+    if not args.agent_file.exists() or not args.agent_file.is_file():
+        print(f"agent file does not exist or is not a file: {args.agent_file}")
+        return 2
+    if args.agent_file.suffix.lower() != ".py":
+        print(f"agent file must be a .py file: {args.agent_file}")
+        return 2
+    if args.agent_file.stat().st_size > MAX_AGENT_FILE_BYTES:
+        print(f"agent file exceeds max size of {MAX_AGENT_FILE_BYTES} bytes")
+        return 2
+
+    gateway_api_key = _resolve_gateway_api_key(args)
+    if not gateway_api_key:
+        print("gateway API key is required; pass --gateway-api-key or set GATEWAY_API_KEY.")
+        return 2
+
+    try:
+        source = args.agent_file.read_text(encoding="utf-8")
+        agent_class = load_agent_class_from_code(source, filename=str(args.agent_file))
+        _validate_agent_identity(agent_class)
+        agent = agent_class()
+    except Exception as exc:
+        print(f"failed to load agent: {exc}")
+        return 2
+
+    base_url = _resolve_orchestrator_url(args)
+    timeout = _resolve_test_timeout(args)
+    try:
+        event = fetch_portal_event(
+            base_url=base_url,
+            event_id=args.event_id,
+            timeout=timeout,
+        )
+        with PortalGateway(
+            base_url=base_url,
+            api_key=gateway_api_key,
+            timeout=timeout,
+        ) as gateway:
+            print(f"Event: {event.title}")
+            print(f"Available providers: {', '.join(gateway.available_providers)}")
+            started = time.monotonic()
+            raw_result = agent.predict(ForecastingContext(event, gateway))
+            duration_ms = int((time.monotonic() - started) * 1000)
+            result = AgentResult.model_validate(raw_result)
+            result = AgentResult.model_validate_json(result.model_dump_json())
+            _print_test_result(result, gateway, duration_ms)
+    except Exception as exc:
+        print(f"agent test failed: {exc}")
+        return 1
+    return 0
+
+
+def _resolve_test_timeout(args: argparse.Namespace) -> float:
+    if args.timeout_seconds is not None or os.getenv("FORECASTING_TIMEOUT_SECONDS") is not None:
+        return _resolve_timeout(args)
+    return DEFAULT_TEST_TIMEOUT_SECONDS
+
+
+def _validate_agent_identity(agent_class: type) -> None:
+    agent_id = agent_class.__dict__.get("agent_id")
+    if not isinstance(agent_id, UUID):
+        raise RuntimeError("agent class must declare a stable agent_id UUID")
+    agent_version = agent_class.__dict__.get("agent_version")
+    if not isinstance(agent_version, str) or not agent_version.strip():
+        raise RuntimeError("agent class must declare a non-empty agent_version")
+
+
+def _print_test_result(
+    result: AgentResult,
+    gateway: PortalGateway,
+    duration_ms: int,
+) -> None:
+    print()
+    print("Agent result validated successfully.")
+    print(f"Prediction: {result.prediction:.6f}")
+    print(f"Duration: {duration_ms}ms")
+    print(f"Belief path steps: {len(result.beliefPath)}")
+    print(f"Reasoning: {result.reasoning[:500]}")
+    print()
+    print(f"Provider calls: {len(gateway.call_log)}")
+    for index, call in enumerate(gateway.call_log):
+        model = f" model={call.model}" if call.model else ""
+        cost = f" costMicro={call.cost_micro}" if call.cost_micro is not None else ""
+        print(f"  [{index}] {call.provider}{model} {call.latency_ms}ms{cost}")
+    if gateway.call_log:
+        balance = gateway.call_log[-1].balance_after_micro
+        if balance is not None:
+            print(f"Portal balanceAfterMicro: {balance}")
+    print()
+    print("Validated AgentResult JSON:")
+    _print_json(result.model_dump(mode="json"))
+
+
 def _handle_list_agents(args: argparse.Namespace) -> int:
     response = _request(
         method="GET",
@@ -338,15 +438,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "HTTP timeout in seconds. Defaults to FORECASTING_TIMEOUT_SECONDS "
-            f"or {DEFAULT_TIMEOUT_SECONDS}."
+            "HTTP timeout in seconds. Defaults to FORECASTING_TIMEOUT_SECONDS, "
+            f"otherwise {DEFAULT_TIMEOUT_SECONDS} ({DEFAULT_TEST_TIMEOUT_SECONDS} "
+            "for test-agent)."
         ),
     )
     common.add_argument(
         "--gateway-api-key",
         default=None,
         help=(
-            "Gateway API key for submit auth. "
+            "Portal gateway API key for agent testing and submit auth. "
             "Defaults to GATEWAY_API_KEY or FORECASTING_GATEWAY_API_KEY."
         ),
     )
@@ -404,14 +505,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upload_parser.set_defaults(handler=_handle_upload_agent)
 
-    list_parser = subparsers.add_parser(
-        "list-agents",
+    test_parser = subparsers.add_parser(
+        "test-agent",
         parents=[common],
-        help="List published agents from the orchestrator.",
+        help="Run an agent locally against live portal events and providers.",
     )
-    list_parser.add_argument("--limit", type=int, default=25, help="Max results to return.")
-    list_parser.add_argument("--offset", type=int, default=0, help="Pagination offset.")
-    list_parser.set_defaults(handler=_handle_list_agents)
+    test_parser.add_argument("agent_file", type=Path, help="Path to the .py agent file.")
+    test_parser.add_argument(
+        "--event-id",
+        default=None,
+        help="Portal event id to test (defaults to a random live event).",
+    )
+    test_parser.set_defaults(handler=_handle_test_agent)
+
+    # Disabled until the gateway exposes LIST_AGENTS_ENDPOINT.
+    # list_parser = subparsers.add_parser(
+    #     "list-agents",
+    #     parents=[common],
+    #     help="List published agents from the orchestrator.",
+    # )
+    # list_parser.add_argument("--limit", type=int, default=25, help="Max results to return.")
+    # list_parser.add_argument("--offset", type=int, default=0, help="Pagination offset.")
+    # list_parser.set_defaults(handler=_handle_list_agents)
 
     credits_parser = subparsers.add_parser(
         "buy-credits",

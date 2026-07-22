@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""CLI entry point — pick an event, run an agent, store and display traces.
+"""Deprecated contributor harness for reference agents and local traces.
 
 Connects to the Provider Gateway HTTP service for all external data access.
 The gateway must be running first (see scripts/run_gateway.py).
+
+Miners testing their own agent file should use
+``python3 miner/cli.py test-agent path/to/agent.py`` instead.
 """
 
 from __future__ import annotations

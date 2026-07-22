@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Start the SIMULATED Provider Gateway — a local test double.
+"""Start the deprecated SIMULATED Provider Gateway — a local test double.
 
 This is NOT the production gateway service (that lives in its own repo). It
-exists so validators and miners can exercise the full validator → local proxy →
-gateway → provider path locally. It runs **mock-by-default**: deterministic,
-offline, keyless, no spend. Pass --live to load real provider API keys from
-.env and hit upstream APIs (only do this intentionally).
+remains for contributor tests that exercise the validator → local proxy →
+gateway path. Miners should use ``python3 miner/cli.py test-agent`` instead;
+that command uses the production portal gateway and does not require provider
+API keys. This server runs **mock-by-default**: deterministic, offline, keyless,
+no spend. Pass --live to load real provider API keys from .env and hit upstream
+APIs (only do this intentionally).
 
 Usage:
     python scripts/run_gateway.py [--port 8077] [--host 127.0.0.1] [--live]
