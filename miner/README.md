@@ -256,7 +256,7 @@ Defaults target production. Override only when you intentionally need something 
 | Setting | Default | Override (optional) |
 |---|---|---|
 | Orchestrator base URL | production (`ORCHESTRATOR_API_URL` in `src/core/constants.py`) | `FORECASTING_ORCHESTRATOR_URL` or `--orchestrator-url` |
-| Gateway API key | — (required for test and submit) | `GATEWAY_API_KEY` (or `FORECASTING_GATEWAY_API_KEY` / `--gateway-api-key`) |
+| Gateway API key | — (required for balance, test, and submit) | `GATEWAY_API_KEY` (or `FORECASTING_GATEWAY_API_KEY` / `--gateway-api-key`) |
 | Timeout | `20.0` s (`120.0` s for `test-agent`) | `FORECASTING_TIMEOUT_SECONDS` / `--timeout-seconds` |
 | Wallet path | `~/.bittensor/wallets` | `FORECASTING_WALLET_PATH` / `--wallet-path` |
 | Wallet name | `default` | `FORECASTING_WALLET_NAME` / `--wallet-name` |
@@ -265,6 +265,16 @@ Defaults target production. Override only when you intentionally need something 
 The CLI auto-loads repo-root `.env` (`python-dotenv`) before resolving env vars.
 
 ## Command reference
+
+### `balance`
+
+Show the portal credit balance associated with `GATEWAY_API_KEY`:
+
+```bash
+python3 miner/cli.py balance
+```
+
+This calls `GET /v1/credits/balance` and prints the returned balance payload.
 
 ### `test-agent`
 

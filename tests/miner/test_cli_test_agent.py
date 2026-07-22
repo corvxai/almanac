@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import Namespace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from miner import cli
 from src.core.events import Event
@@ -105,3 +106,40 @@ def test_test_agent_uses_120_second_default_timeout(monkeypatch) -> None:
     monkeypatch.delenv("FORECASTING_TIMEOUT_SECONDS", raising=False)
     args = Namespace(timeout_seconds=None)
     assert cli._resolve_test_timeout(args) == 120.0
+
+
+def test_balance_uses_gateway_key_and_prints_response(monkeypatch, capsys) -> None:
+    seen = {}
+
+    def fake_request(**kwargs):  # noqa: ANN003
+        seen.update(kwargs)
+        return SimpleNamespace(
+            json=lambda: {"balanceMicro": "420000"},
+            text="",
+        )
+
+    monkeypatch.setattr(cli, "_request", fake_request)
+    args = Namespace(
+        gateway_api_key="portal-key",
+        orchestrator_url=None,
+        timeout_seconds=None,
+    )
+
+    exit_code = cli._handle_balance(args)
+
+    assert exit_code == 0
+    assert seen["method"] == "GET"
+    assert seen["endpoint"] == "v1/credits/balance"
+    assert seen["extra_headers"]["Authorization"] == "Bearer portal-key"
+    assert '"balanceMicro": "420000"' in capsys.readouterr().out
+
+
+def test_balance_requires_gateway_key(monkeypatch, capsys) -> None:
+    monkeypatch.delenv("GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("FORECASTING_GATEWAY_API_KEY", raising=False)
+    args = Namespace(gateway_api_key=None)
+
+    exit_code = cli._handle_balance(args)
+
+    assert exit_code == 2
+    assert "gateway API key is required" in capsys.readouterr().out
