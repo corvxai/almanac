@@ -22,7 +22,7 @@ from typing import Optional
 
 from src.core.schemas import EvidenceDigest
 
-logger = logging.getLogger("almanac.forecasting.uid_map")
+logger = logging.getLogger("forecasting.uid_map")
 
 
 _seen_misses: set[tuple[str, str]] = set()

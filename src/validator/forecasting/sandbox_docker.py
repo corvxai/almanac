@@ -43,7 +43,7 @@ from src.agent.context import ForecastingContext
 from src.core.config import ValidatorConfig
 from src.core.schemas import AgentResult
 
-logger = logging.getLogger("almanac.forecasting.sandbox_docker")
+logger = logging.getLogger("forecasting.sandbox_docker")
 
 
 # Where the runner image expects the validator-local proxy's UDS to be

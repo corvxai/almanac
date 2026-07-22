@@ -69,7 +69,7 @@ from typing import Optional
 import numpy as np
 from tabulate import tabulate
 
-logger = logging.getLogger("almanac.forecasting.scoring")
+logger = logging.getLogger("forecasting.scoring")
 
 
 # Orchestrator fetch/cutoff window. This is a data-retrieval bound, not a

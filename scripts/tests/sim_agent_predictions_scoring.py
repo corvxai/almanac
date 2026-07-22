@@ -84,7 +84,7 @@ MOCK_SHARED_MARKET_RATE = 0.75
 MOCK_MARKET_NOISE_SIGMA = 0.18
 
 
-logger = logging.getLogger("almanac.forecasting.sim_scoring")
+logger = logging.getLogger("forecasting.sim_scoring")
 
 
 def _clamp_prob(value: float, *, low: float = 0.08, high: float = 0.92) -> float:
