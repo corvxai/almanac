@@ -22,7 +22,7 @@ SCORED_PREDICTIONS_ENDPOINT = "/v1/validators/scored-predictions"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 AUTH_DOMAIN = "sub41-gateway-v1"
 
-logger = logging.getLogger("almanac.forecasting.orchestrator_api")
+logger = logging.getLogger("forecasting.orchestrator")
 
 
 class AssignmentMiner(BaseModel):

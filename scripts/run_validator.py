@@ -277,19 +277,19 @@ def main() -> None:
         "--db_score_logging",
         dest="db_score_logging",
         action="store_true",
-        help="Enable Almanac postgres score logging for this run.",
+        help="Enable Almanac Market postgres score logging for this run.",
     )
     parser.add_argument(
         "--write_trading_history",
         dest="write_trading_history",
         action="store_true",
-        help="Write fetched Almanac trading history to <data-dir>/trading_history.json each scoring epoch.",
+        help="Write fetched Almanac Market trading history to <data-dir>/trading_history.json each scoring epoch.",
     )
     parser.add_argument(
         "--metadata_manager.off",
         dest="metadata_manager_off",
         action="store_true",
-        help="Disable Almanac metadata manager thread for this run.",
+        help="Disable Almanac Market metadata manager thread for this run.",
     )
     parser.add_argument(
         "--setweights.off",

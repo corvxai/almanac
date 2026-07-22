@@ -37,7 +37,7 @@ from src.validator.forecasting.polymarket_baseline import fetch_polymarket_basel
 from src.validator.forecasting.sandbox import execute_agent
 from src.validator.forecasting.trace_assembler import assemble_trace
 
-logger = logging.getLogger("almanac.forecasting.orchestrator")
+logger = logging.getLogger("forecasting.orchestrator")
 
 
 class Orchestrator:

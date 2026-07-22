@@ -83,19 +83,19 @@ def load_hotkey(cfg: BittensorConfig) -> Optional[LoadedKeypair]:
         return None
 
     try:
-        import bittensor as wallet_mod  # type: ignore
-    except ImportError:
-        # Fall back to the lightweight `bittensor_wallet` package, which exposes
-        # the same `Wallet` constructor and is sufficient for signing (mirrors
-        # the `_load_keypair_class` fallback below).
+        # Prefer the lightweight wallet package for signing: it does not mkdir
+        # ~/.bittensor on import (full `bittensor` does, which breaks when the
+        # wallet volume is mounted :ro unless READ_ONLY=1 is set).
         try:
             import bittensor_wallet as wallet_mod  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError(
-                "neither bittensor nor bittensor_wallet is installed but "
-                "signing_required=True. Install one (`pip install -r "
-                "requirements.txt`) or run with --unsafe-no-signing for local dev."
-            ) from exc
+        except ImportError:
+            import bittensor as wallet_mod  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "neither bittensor_wallet nor bittensor is installed but "
+            "signing_required=True. Install one (`pip install -r "
+            "requirements.txt`) or run with --unsafe-no-signing for local dev."
+        ) from exc
 
     wallet = wallet_mod.Wallet(
         name=cfg.wallet_name,

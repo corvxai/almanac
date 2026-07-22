@@ -626,6 +626,7 @@ class Validator:
             return None
 
         weights = combine_weights(weights_market, weights_forecasting, blend_cfg)
+        self._log_blended_weights(weights, weights_market, weights_forecasting, blend_cfg)
 
         if loop_cfg.set_weights_enabled:
             self._set_weights(weights)
@@ -636,6 +637,53 @@ class Validator:
                 len(weights),
             )
         return weights
+
+    def _log_blended_weights(
+        self,
+        weights: np.ndarray,
+        weights_market: Optional[np.ndarray],
+        weights_forecasting: Optional[np.ndarray],
+        blend_cfg: BlendConfig,
+    ) -> None:
+        """Log the post-blend weight vector (compute only; does not touch chain)."""
+        from src.validator.market.constants import BURN_UID
+
+        market_present = blend_cfg.market_enabled and weights_market is not None
+        forecasting_present = blend_cfg.forecasting_enabled and weights_forecasting is not None
+        market_sum = float(np.asarray(weights_market).sum()) if market_present else 0.0
+        forecasting_sum = float(np.asarray(weights_forecasting).sum()) if forecasting_present else 0.0
+
+        # Recompute effective shares the same way combine_weights does.
+        shares: list[tuple[str, float]] = []
+        if market_present:
+            shares.append(("market", max(blend_cfg.market_share, 0.0)))
+        if forecasting_present:
+            shares.append(("forecasting", max(blend_cfg.forecasting_share, 0.0)))
+        total_share = sum(s for _, s in shares) or 1.0
+        effective = {name: share / total_share for name, share in shares}
+
+        burn = float(weights[BURN_UID]) if BURN_UID < len(weights) else 0.0
+        nonzero = int(np.count_nonzero(weights > 0))
+
+        logger.info(
+            "Blended weight summary: market=%s (share=%.4f, raw_sum=%.4f, effective=%.4f) | "
+            "forecasting=%s (share=%.4f, raw_sum=%.4f, effective=%.4f) | "
+            "BURN_UID=%d weight=%.4f | non_zero_uids=%d | final_sum=%.6f",
+            "present" if market_present else "absent",
+            blend_cfg.market_share,
+            market_sum,
+            effective.get("market", 0.0),
+            "present" if forecasting_present else "absent",
+            blend_cfg.forecasting_share,
+            forecasting_sum,
+            effective.get("forecasting", 0.0),
+            BURN_UID,
+            burn,
+            nonzero,
+            float(weights.sum()),
+        )
+        logger.info("Blended weights: %s", weights.tolist())
+        logger.info("Blended weight sum: %.6f", float(weights.sum()))
 
     def _score_market(self) -> Optional[np.ndarray]:
         try:

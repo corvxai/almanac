@@ -70,6 +70,10 @@ The validator's high-level, continuously looping execution:
 - Python 3.10+
 - `pip`
 - Docker Engine + Docker Compose plugin
+```bash
+sudo apt update
+sudo apt install docker.io docker-compose-v2
+```
 - A registered Bittensor validator wallet/hotkey setup (via btcli)
 
 ### Production: Docker required
