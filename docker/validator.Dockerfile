@@ -14,7 +14,10 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    # Wallet dir is mounted read-only at runtime; skip bittensor's import-time
+    # mkdir of ~/.bittensor/{wallets,miners} (bittensor.core.settings).
+    READ_ONLY=1
 
 # System deps:
 # - docker.io: CLI + libraries for ``docker wait`` (subprocess) and the Python
