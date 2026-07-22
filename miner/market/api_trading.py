@@ -35,6 +35,7 @@ pip install requests dotenv eth-account bittensor tabulate py-clob-client-v2
 import os
 import json
 import math
+import sys
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
@@ -47,6 +48,11 @@ import secrets
 import bittensor as bt
 from datetime import datetime
 from tabulate import tabulate
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE
 
 MARKET_API_URL = "https://api.almanac.market/api"
@@ -59,7 +65,7 @@ EIP712_DOMAIN_NEGRISK_CONTRACT = "0xe2222d279d744050d28e00520010520000310F59"
 # EIP-712 domain contract for Polymarket CTF Exchange -- V1 (DEPRECATED)
 #EIP712_DOMAIN_CONTRACT = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 #EIP712_DOMAIN_NEGRISK_CONTRACT = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-ENV_PATH = Path("api_trading.env")
+ENV_PATH = Path(__file__).resolve().parent / "api_trading.env"
 
 # Default number of positions to fetch per page
 DEFAULT_POSITIONS_LIMIT = 25
