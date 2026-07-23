@@ -77,7 +77,7 @@ class ValidatorLoopDefaults:
     use_synthetic_trading_data: bool = False
     write_trading_history: bool = False
     db_score_logging: bool = False
-    wandb_enabled: bool = False
+    wandb_enabled: bool = True
     rolling_window_days: int = 30
     metadata_update_interval_seconds: int = 3600
     metadata_batch_size: int = 10
@@ -93,6 +93,8 @@ BITTENSOR = BittensorDefaults()
 STORAGE = StorageDefaults()
 GATEWAY = GatewayDefaults()
 VALIDATOR_LOOP = ValidatorLoopDefaults()
+WANDB_PROJECT = "almanac-vali-logs"
+WANDB_ENTITY = "corvx"
 ORCHESTRATOR_API_URL = "https://api.almnc.ai"
 GATEWAY_SERVICE_URL = "https://api.almnc.ai"
 LOG_LEVEL = "INFO"

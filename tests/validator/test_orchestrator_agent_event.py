@@ -205,6 +205,7 @@ def test_validator_polling_calls_assignment_handler(monkeypatch) -> None:
     cfg = AppConfig()
     cfg.loop.loop_enabled = False
     cfg.loop.forecasting_enabled = True
+    cfg.loop.wandb_enabled = False
 
     validator = Validator(config=cfg, store=None, bt_objects=_bt_objects(), metadata_manager=None)
     cfg.validator.orchestrator_api_url = ORCHESTRATOR_API_URL
@@ -258,6 +259,7 @@ def test_validator_polling_skips_during_assignment_execution_cooldown(monkeypatc
     cfg.loop.loop_enabled = False
     cfg.loop.forecasting_enabled = True
     cfg.loop.assignment_execution_cooldown_seconds = 180
+    cfg.loop.wandb_enabled = False
 
     now = datetime.datetime(2026, 6, 5, 15, 0, 0, tzinfo=datetime.timezone.utc)
     validator = Validator(
@@ -288,6 +290,7 @@ def test_validator_polling_runs_after_assignment_execution_cooldown(monkeypatch)
     cfg.loop.loop_enabled = False
     cfg.loop.forecasting_enabled = True
     cfg.loop.assignment_execution_cooldown_seconds = 180
+    cfg.loop.wandb_enabled = False
 
     now = datetime.datetime(2026, 6, 5, 15, 0, 0, tzinfo=datetime.timezone.utc)
     validator = Validator(

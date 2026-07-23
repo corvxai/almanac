@@ -98,6 +98,7 @@ def _config(*, market: bool, forecasting: bool, market_share=1.0, forecasting_sh
     cfg.loop.forecasting_enabled = forecasting
     cfg.loop.market_weight_share = market_share
     cfg.loop.forecasting_weight_share = forecasting_share
+    cfg.loop.wandb_enabled = False
     return cfg
 
 
