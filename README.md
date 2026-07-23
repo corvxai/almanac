@@ -118,7 +118,7 @@ docker compose run --rm validator \
 
 ```bash
 # Recommended
-pm2 start --name almanac-validator --interpreter bash -- -lc '
+pm2 start bash --name almanac-validator -- -lc '
 docker compose run --rm validator \
   python scripts/run_validator.py \
     --netuid 41 \
