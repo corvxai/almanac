@@ -23,6 +23,7 @@ def test_score_agent_predictions_fetches_from_orchestrator_no_trace_store(monkey
     cfg = AppConfig()
     cfg.validator.orchestrator_api_url = "https://orchestrator.example.com"
     cfg.loop.rolling_window_days = 7
+    cfg.loop.wandb_enabled = False
     v = Validator(config=cfg, store=None, bt_objects=_bt_objects(), metadata_manager=None)
     fake_loaded = SimpleNamespace(hotkey_ss58="5ValidatorHotkey", keypair=SimpleNamespace())
     monkeypatch.setattr("src.validator.validator.load_hotkey", lambda _cfg: fake_loaded)

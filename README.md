@@ -75,6 +75,7 @@ sudo apt update
 sudo apt install docker.io docker-compose-v2
 ```
 - A registered Bittensor validator wallet/hotkey setup (via btcli)
+- `WANDB_API_KEY` in `.env` for W&B logging (or use `--wandb.off`)
 
 ### Production: Docker required
 

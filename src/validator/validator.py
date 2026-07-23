@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 import numpy as np
 
+from src.core import constants
 from src.core.config import AppConfig
 from src.core.schemas import EvidenceDigest
 from src.validator.forecasting.proxy_socket import (
@@ -278,6 +279,9 @@ class Validator:
         self._validate_blend_shares()
 
         self._bt = bt_objects if bt_objects is not None else _build_bittensor_objects(config)
+        self._wandb_run = None
+        self._wandb_run_start: datetime.datetime | None = None
+        self._setup_wandb()
 
         if metadata_manager is Validator._AUTO:
             if (
@@ -312,6 +316,9 @@ class Validator:
 
     def stop(self) -> None:
         self._stopped = True
+        if self._wandb_run is not None:
+            self._wandb_run.finish()
+            self._wandb_run = None
         if self._metadata_manager is not None and self._metadata_owned:
             try:
                 self._metadata_manager.stop()
@@ -354,8 +361,10 @@ class Validator:
                     self._poll_orchestrator_assignment()
                 if self._should_score(current_time):
                     self.run_scoring_step()
-                elif current_time.minute % 10 == 0:
-                    self._log_metadata_stats()
+                else:
+                    self._rotate_wandb_run_if_needed(current_time)
+                    if current_time.minute % 10 == 0:
+                        self._log_metadata_stats()
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt; stopping validator.")
                 self.stop()
@@ -364,6 +373,59 @@ class Validator:
                 logger.error("Unhandled error in validator loop:\n%s", traceback.format_exc())
 
             self._sleep(60)
+
+    def _setup_wandb(self) -> None:
+        if not self._config.loop.wandb_enabled:
+            logger.warning(
+                "W&B logging is disabled. Running validators with W&B enabled is recommended."
+            )
+            return
+        if not os.getenv("WANDB_API_KEY"):
+            logger.warning(
+                "WANDB_API_KEY not found; disabling W&B. Set WANDB_API_KEY or use "
+                "--wandb.off to disable it explicitly."
+            )
+            self._config.loop.wandb_enabled = False
+            return
+        self._new_wandb_run()
+
+    def _new_wandb_run(self) -> None:
+        import wandb  # type: ignore[import-not-found]
+
+        now = self._clock()
+        self._wandb_run_start = now
+        run_id = now.strftime("%Y-%m-%d_%H-%M-%S")
+        hotkey = self._bt.wallet.hotkey.ss58_address
+        uid = self._bt.metagraph.hotkeys.index(hotkey)
+        name = f"validator-{uid}-{run_id}"
+        self._wandb_run = wandb.init(
+            name=name,
+            project=constants.WANDB_PROJECT,
+            entity=constants.WANDB_ENTITY,
+            config={
+                "uid": uid,
+                "hotkey": hotkey,
+                "run_name": run_id,
+                "type": "validator",
+                "netuid": self._config.bittensor.netuid,
+                "network": self._bt.network,
+            },
+            allow_val_change=True,
+            anonymous="allow",
+        )
+        logger.debug("Started W&B run: %s", name)
+
+    def _rotate_wandb_run_if_needed(self, current_time: datetime.datetime) -> None:
+        if (
+            self._wandb_run is None
+            or self._wandb_run_start is None
+            or current_time - self._wandb_run_start < datetime.timedelta(days=1)
+        ):
+            return
+        logger.info("Current W&B run is more than one day old; starting a new run.")
+        self._wandb_run.finish()
+        self._wandb_run = None
+        self._new_wandb_run()
 
     def _should_score(self, current_time: datetime.datetime) -> bool:
         if current_time.minute != self._scoring_minute:
