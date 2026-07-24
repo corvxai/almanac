@@ -11,6 +11,7 @@ from src.validator.forecasting.orchestrator_api import (
     AGENT_AND_EVENT_ENDPOINT,
     AgentAndEventResponse,
     OrchestratorAssignment,
+    OrchestratorRequestError,
     AssignmentAgent,
     AssignmentEvent,
     AssignmentMiner,
@@ -65,6 +66,34 @@ def test_build_assignment_auth_headers_matches_contract() -> None:
     assert headers["x-validator-signature"] == "0xaabb"
     assert headers["x-validator-nonce"] == "nonce123"
     assert headers["x-validator-timestamp"] == "1700000000"
+
+
+def test_fetch_agent_event_assignment_logs_error_message_on_403(caplog) -> None:
+    keypair = _FakeKeypair()
+    loaded_hotkey = SimpleNamespace(
+        keypair=keypair,
+        hotkey_ss58="5ValidatorHotkey",
+        coldkey_ss58=None,
+    )
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/validators/agent-and-event"
+        return httpx.Response(403, json={"message": "validator is banned"})
+
+    client = httpx.Client(transport=httpx.MockTransport(_handler))
+    with caplog.at_level("ERROR", logger="forecasting.orchestrator"):
+        try:
+            fetch_agent_event_assignment(
+                base_url=ORCHESTRATOR_API_URL,
+                loaded_hotkey=loaded_hotkey,  # type: ignore[arg-type]
+                http_client=client,
+            )
+            raise AssertionError("expected OrchestratorRequestError")
+        except OrchestratorRequestError as exc:
+            assert "403" in str(exc)
+            assert "validator is banned" in str(exc)
+    assert sum("validator is banned" in record.message for record in caplog.records) == 1
 
 
 def test_fetch_agent_event_assignment_handles_none_assignment() -> None:

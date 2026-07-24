@@ -25,6 +25,10 @@ AUTH_DOMAIN = "sub41-gateway-v1"
 logger = logging.getLogger("forecasting.orchestrator")
 
 
+class OrchestratorRequestError(RuntimeError):
+    """Orchestrator HTTP failure; details are already logged at the call site."""
+
+
 class AssignmentMiner(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
     minerHotkey: str = Field(validation_alias=AliasChoices("minerHotkey", "hotkey"))
@@ -200,7 +204,16 @@ def fetch_agent_event_assignment(
     else:
         with httpx.Client(timeout=timeout_seconds) as client:
             resp = client.get(target, headers=headers)
-    resp.raise_for_status()
+    if resp.is_error:
+        detail = _http_error_detail(resp)
+        logger.error(
+            "Orchestrator agent-and-event request failed (%s): %s",
+            resp.status_code,
+            detail,
+        )
+        raise OrchestratorRequestError(
+            f"orchestrator agent-and-event request failed ({resp.status_code}): {detail}"
+        )
 
     payload = resp.json()
     if not isinstance(payload, dict):
