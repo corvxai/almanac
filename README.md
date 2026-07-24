@@ -192,13 +192,18 @@ A **1% fee** is collected on every buy and goes toward the daily reward pool. Su
 4. Sign all required approvals
 5. Fund the safe wallet so you can trade
 
-#### 2. Link your Bittensor coldkey
+#### 2. Link your Bittensor coldkey (via web app or CLI)
 
-In Almanac Market settings:
+Through the web app in Almanac Market settings:
 
-1. Install the [Bittensor wallet browser extension](https://docs.learnbittensor.org/keys/wallets)
+1. Install the [Bittensor wallet browser extension](https://www.bittensor.com/wallet)
 2. Import the **coldkey** tied to your registered miner UID
 3. Link that wallet to your Almanac account
+
+Or through the repo CLI:
+
+1. Run `scripts/run_api_trading.py`
+2. Select `Link Bittensor UID to Almanac account` option and follow prompts
 
 You only need to do this once. After the account is linked, you can trade in the dApp without reconnecting the extension every session.
 
