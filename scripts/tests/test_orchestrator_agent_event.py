@@ -38,6 +38,7 @@ from src.validator.forecasting.assignment_pipeline import process_single_assignm
 from src.validator.forecasting.orchestrator import Orchestrator
 from src.validator.forecasting.orchestrator_api import (
     PREDICTION_ENDPOINT,
+    OrchestratorRequestError,
     fetch_agent_event_assignment,
 )
 from src.validator.validator import start_local_proxy
@@ -165,6 +166,9 @@ def main() -> int:
             loaded_hotkey=loaded_hotkey,
             timeout_seconds=args.timeout_seconds,
         )
+    except OrchestratorRequestError:
+        # Failure details already logged in fetch_agent_event_assignment.
+        return 1
     except Exception as exc:  # noqa: BLE001
         print(f"request failed: {exc}")
         return 1

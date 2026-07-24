@@ -59,6 +59,7 @@ from src.validator.forecasting.assignment_pipeline import (
 from src.validator.forecasting.orchestrator import Orchestrator
 from src.validator.forecasting.orchestrator_api import (
     OrchestratorAssignment,
+    OrchestratorRequestError,
     fetch_all_scored_predictions,
     fetch_agent_event_assignment,
     submit_validator_prediction,
@@ -499,6 +500,9 @@ class Validator:
                 base_url=base_url,
                 loaded_hotkey=self._orchestrator_hotkey,
             )
+        except OrchestratorRequestError:
+            # Failure details already logged in fetch_agent_event_assignment.
+            return
         except Exception:
             logger.exception("Failed to fetch /v1/validators/agent-and-event assignment.")
             return
