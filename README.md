@@ -45,7 +45,7 @@ Both incentive mechanisms generate scores and publish blended weights on-chain.
 
 There are two tracks for miners to participate in:
 1. Almanac Market 
-- Participate through trading on `almanac.market`.
+- Participate through trading on `beta.almanac.market`.
 - Requires metadata registration and connecting UID/hotkey to Almanac Market account
 - 1% fee is collected from every buy trade and used towards the daily reward pool
 - Scoring mechanism largely favors sustained edge, substantial volume, and winning over the competition
@@ -156,7 +156,7 @@ There are **two independent miner tracks**. Pick one (you can do both with the s
 
 | Track | What you do | How you earn | Entrypoint |
 |---|---|---|---|
-| **[Almanac Market](#almanac-market-miners)** | Trade prediction markets on [almanac.market](https://almanac.market) | ROI + qualified volume over a rolling window | `python3 scripts/run_market_miner.py` |
+| **[Almanac Market](#almanac-market-miners)** | Trade prediction markets on [almanac.market](https://beta.almanac.market) | ROI + qualified volume over a rolling window | `python3 scripts/run_market_miner.py` |
 | **[Almanac Forecasting](#almanac-forecasting-miners)** | Submit a forecasting agent via the portal | Sustained accuracy / calibrated forecasts | `python3 miner/cli.py` |
 
 ### Shared prerequisites
@@ -186,7 +186,7 @@ A **1% fee** is collected on every buy and goes toward the daily reward pool. Su
 
 #### 1. Create and fund an Almanac Market account
 
-1. Go to **[https://almanac.market](https://almanac.market)**
+1. Go to **[https://beta.almanac.market](https://beta.almanac.market)**
 2. Create an account
 3. Deploy your safe / proxy wallet
 4. Sign all required approvals
@@ -230,7 +230,7 @@ Use `--subtensor.network test` for testnet (netuid `172`).
 
 Once metadata is registered and the account is linked:
 
-1. Trade on **[https://almanac.market](https://almanac.market)**
+1. Trade on **[https://beta.almanac.market](https://beta.almanac.market)**
 2. Validators detect trades automatically, score them, and include you in weight setting
 
 No long-running miner process is required for dApp trading after metadata registration.
