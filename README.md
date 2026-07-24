@@ -21,8 +21,12 @@
   - [Validator](#validator)
 - [Running a Validator](#running-a-validator)
 - [For Miners](#for-miners)
+  - [Shared prerequisites](#shared-prerequisites)
+  - [Almanac Market miners](#almanac-market-miners)
+  - [Almanac Forecasting miners](#almanac-forecasting-miners)
 - [Repository Structure](#repository-structure)
-- [Status](#status)
+- [Environments](#environments)
+- [Community](#community)
 - [License](#license)
 
 ## Introduction
@@ -148,22 +152,154 @@ pm2 logs almanac-validator
 
 ## For Miners
 
-Two tracks:
+There are **two independent miner tracks**. Pick one (you can do both with the same UID, but setup is different):
 
-| Track | Install | Entrypoint | Docs |
+| Track | What you do | How you earn | Entrypoint |
 |---|---|---|---|
-| **Almanac Market** | `pip install -r requirements.txt` | `python3 scripts/run_market_miner.py` | [almanac.market](https://almanac.market), `miner/market/` |
-| **Almanac Forecasting** | `pip install -r requirements.txt` | `python3 miner/cli.py` | **`miner/README.md`** (numbered quick start) |
+| **[Almanac Market](#almanac-market-miners)** | Trade prediction markets on [almanac.market](https://almanac.market) | ROI + qualified volume over a rolling window | `python3 scripts/run_market_miner.py` |
+| **[Almanac Forecasting](#almanac-forecasting-miners)** | Submit a forecasting agent via the portal | Sustained accuracy / calibrated forecasts | `python3 miner/cli.py` |
 
-Forecasting miners: 
-1. Get a gateway API key at [portal.almnc.ai](https://portal.almnc.ai)
-2. Put `GATEWAY_API_KEY` in `.env`
-3. Build an agent from `src/agent/examples/`
-4. Test it on a live random event with
-   `python3 miner/cli.py test-agent path/to/agent.py`
-5. Submit it using `python3 miner/cli.py submit-agent path/to/agent.py ...`
+### Shared prerequisites
 
-Full steps, sandbox allowlist, and belief-path contract are in `miner/README.md`.
+Both tracks need:
+
+1. **Python 3.10+** and repo deps:
+
+```bash
+git clone https://github.com/corvxai/almanac.git
+cd almanac
+pip install -r requirements.txt
+```
+
+2. A **Bittensor wallet** with a **registered miner UID** on the subnet:
+   - Wallet guide: https://docs.learnbittensor.org/keys/wallets
+   - Miner registration: https://docs.learnbittensor.org/miners
+   - Mainnet netuid `41` / testnet netuid `172`
+
+---
+
+### Almanac Market miners
+
+Market miners generate scored signals by trading on Almanac. Orders route through your Polymarket proxy wallet; validators ingest trade history, score ROI / qualified volume, and set weights. Scoring is model-agnostic — manual, scripted, or automated strategies all compete the same way.
+
+A **1% fee** is collected on every buy and goes toward the daily reward pool. Sustained edge, meaningful volume, and beating the competition matter most.
+
+#### 1. Create and fund an Almanac Market account
+
+1. Go to **[https://almanac.market](https://almanac.market)**
+2. Create an account
+3. Deploy your safe / proxy wallet
+4. Sign all required approvals
+5. Fund the safe wallet so you can trade
+
+#### 2. Link your Bittensor coldkey
+
+In Almanac Market settings:
+
+1. Install the [Bittensor wallet browser extension](https://docs.learnbittensor.org/keys/wallets)
+2. Import the **coldkey** tied to your registered miner UID
+3. Link that wallet to your Almanac account
+
+You only need to do this once. After the account is linked, you can trade in the dApp without reconnecting the extension every session.
+
+#### 3. Register on-chain metadata (required)
+
+Validators map your UID to your Almanac / Polymarket EOA by reading a short on-chain commitment (first 5 characters of the address).
+
+**Interactive (recommended first time):**
+
+```bash
+python3 scripts/run_market_miner.py
+```
+
+The wizard prompts for wallet name, hotkey, network (`finney` or `test`), and your Almanac / Polymarket EOA (`0x…`), then submits metadata on-chain.
+
+**Non-interactive:**
+
+```bash
+python3 scripts/run_market_miner.py \
+  --wallet.name <coldkey-name> \
+  --wallet.hotkey <hotkey-name> \
+  --subtensor.network finney \
+  --polymarket.id 0xYourEOAAddressHere
+```
+
+Use `--subtensor.network test` for testnet (netuid `172`).
+
+#### 4. Trade via the Almanac dApp
+
+Once metadata is registered and the account is linked:
+
+1. Trade on **[https://almanac.market](https://almanac.market)**
+2. Validators detect trades automatically, score them, and include you in weight setting
+
+No long-running miner process is required for dApp trading after metadata registration.
+
+#### 5. Trade via API (optional)
+
+For programmatic / automated trading:
+
+1. Complete steps 1–3 above
+2. Copy the env template and fill credentials:
+
+```bash
+cp miner/market/api_trading.env.example miner/market/api_trading.env
+```
+
+Required fields in `miner/market/api_trading.env`:
+
+| Variable | Meaning |
+|---|---|
+| `EOA_WALLET_ADDRESS` | Your EOA address |
+| `EOA_WALLET_PK` | EOA private key (signing) |
+| `EOA_PROXY_FUNDER` | Polymarket proxy / funder address |
+| `POLYMARKET_API_KEY` / `SECRET` / `PASSPHRASE` | Optional; the client can generate these |
+
+Multiple wallets are supported with prefixes (`WALLET1_…`, `WALLET2_…`, etc.) — see the example file.
+
+3. Start the interactive API client:
+
+```bash
+python3 scripts/run_api_trading.py
+```
+
+The client can generate Polymarket API credentials, open Almanac trading sessions, search markets, place signed CLOB orders, and submit proxy-signed EIP-712 orders.
+
+Code lives under `miner/market/` (`miner.py`, `api_trading.py`).
+
+---
+
+### Almanac Forecasting miners
+
+Forecasting miners submit agents that validators run in a sandboxed Docker environment. You need portal credits and a gateway API key — not an Almanac Market trading account.
+
+**Deep dive (sandbox allowlist, belief-path contract, provider calls):** [`miner/README.md`](miner/README.md)
+
+#### Quick start
+
+1. **Portal account + API key** at [https://portal.almnc.ai](https://portal.almnc.ai)
+2. Put the key in a repo-root `.env`:
+
+```bash
+GATEWAY_API_KEY=your-gateway-api-key
+```
+
+3. **Build an agent** from `src/agent/examples/` (recommended starter: `src/agent/examples/v1_agent2_basic.py`). Subclass `BaseAgent`, implement `predict(ctx) -> AgentResult`, and include a valid `beliefPath`.
+4. **Test** against a live random event:
+
+```bash
+python3 miner/cli.py test-agent path/to/agent.py
+```
+
+5. **Submit** (signed with your miner hotkey):
+
+```bash
+python3 miner/cli.py submit-agent path/to/agent.py \
+  --wallet-name <wallet-name> \
+  --wallet-hotkey-name <hotkey-name>
+```
+
+The first successful `submit-agent` with an unused API key auto-links that key to your miner hotkey. If the key is already linked to another miner, request a fresh key.
 
 ## Repository Structure
 
@@ -192,6 +328,8 @@ miner/
 | Testnet     |    172 |
 
 ## Community
+
+Public validator runs: [wandb.ai/corvx/almanac-vali-logs](https://wandb.ai/corvx/almanac-vali-logs)
 
 Join the vibrant Bittensor community and find our channel `#פ • almanac • 41` on [Discord](https://discord.gg/bittensor).
 
