@@ -353,11 +353,18 @@ python3 miner/cli.py buy-credits 25
 
 # Almanac Market Miner Guide
 
-For **Almanac Market** (trading / on-chain metadata), use a different track:
+For **Almanac Market** (trading + on-chain metadata), use the top-level README:
+
+**[Almanac Market miners](../README.md#almanac-market-miners)**
+
+Quick entrypoints:
 
 ```bash
+# Register UID ↔ Almanac/Polymarket EOA metadata on-chain
 python3 scripts/run_market_miner.py
+
+# Programmatic trading client
+python3 scripts/run_api_trading.py
 ```
 
-See `miner/market/miner.py --help` and [almanac.market](https://almanac.market)
-for Market account setup. The rest of this guide is **Forecasting only**.
+Account setup and trading happen on [almanac.market](https://almanac.market). The rest of this file is **Forecasting only**.

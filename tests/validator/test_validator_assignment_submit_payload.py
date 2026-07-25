@@ -80,6 +80,9 @@ class _Digest:
             SimpleNamespace(provider_id="polymarket", model=None, call_index=0),
             SimpleNamespace(provider_id="anthropic", model="claude-sonnet-4-6", call_index=1),
         ]
+        # Non-empty stand-in so normalize_prediction_values sees steps; model_dump
+        # carries the full chain used by the submit payload builder.
+        self.reasoning_chain = [SimpleNamespace(step_index=0)]
 
     def model_dump(self, mode: str = "json"):
         assert mode == "json"
@@ -243,12 +246,26 @@ class _SparseDigest(_Digest):
     def __init__(self, probability: float, confidence: float | None = None) -> None:
         super().__init__(probability, confidence)
         self.provider_calls = []
+        self.reasoning_chain = []
 
     def model_dump(self, mode: str = "json"):
         payload = super().model_dump(mode=mode)
         payload["provider_calls"] = []
         payload["reasoning_chain"] = []
         payload["trace_integrity"]["usage_totals"] = None
+        return payload
+
+
+class _NoReasoningDigest(_Digest):
+    """Provider calls present, but no assembled reasoning steps."""
+
+    def __init__(self, probability: float, confidence: float | None = None) -> None:
+        super().__init__(probability, confidence)
+        self.reasoning_chain = []
+
+    def model_dump(self, mode: str = "json"):
+        payload = super().model_dump(mode=mode)
+        payload["reasoning_chain"] = []
         return payload
 
 
@@ -340,6 +357,48 @@ def test_build_prediction_submit_payload_handles_sparse_reasoning_chain() -> Non
     assert trace["providerCalls"] == []
     assert trace["steps"] == []
     assert payload["reasoningTrace"]["traceSummary"]["providerCallCount"] == 0
+    prediction = payload["prediction"]
+    assert prediction["executionMetadata"]["predictionIsInvalid"] is True
+    reason = prediction["executionMetadata"]["predictionInvalidReason"] or ""
+    assert "provider_calls_missing" in reason
+    assert "reasoning_steps_missing" in reason
+
+
+def test_build_prediction_submit_payload_marks_invalid_when_no_provider_calls() -> None:
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    # Well-formed probability/confidence, but zero validator-recorded provider calls.
+    payload = build_prediction_submit_payload(assignment, _SparseDigest(0.8, confidence=0.9))
+    prediction = payload["prediction"]
+    assert prediction["outcomeProbabilities"]["oid_yes"] == pytest.approx(0.8)
+    assert prediction["executionMetadata"]["predictionIsInvalid"] is True
+    assert prediction["executionMetadata"]["predictionValidation"]["isValid"] is False
+    assert "provider_calls_missing" in prediction["executionMetadata"]["predictionValidation"]["reasons"]
+    assert payload["reasoningTrace"]["traceSummary"]["providerCallCount"] == 0
+
+
+def test_build_prediction_submit_payload_marks_invalid_when_no_reasoning_steps() -> None:
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(
+        assignment, _NoReasoningDigest(0.8, confidence=0.9)
+    )
+    prediction = payload["prediction"]
+    assert prediction["executionMetadata"]["predictionIsInvalid"] is True
+    assert prediction["executionMetadata"]["predictionValidation"]["isValid"] is False
+    reasons = prediction["executionMetadata"]["predictionValidation"]["reasons"]
+    assert "reasoning_steps_missing" in reasons
+    assert "provider_calls_missing" not in reasons
+    assert payload["reasoningTrace"]["traceSummary"]["providerCallCount"] == 2
+    assert payload["reasoningTrace"]["traceSummary"]["reasoningStepCount"] == 0
 
 
 def test_build_sandbox_assignment_agent_sets_inline_code_attrs() -> None:
