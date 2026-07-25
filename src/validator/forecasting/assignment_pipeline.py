@@ -228,6 +228,16 @@ def normalize_prediction_values(
             fallback=INVALID_CONFIDENCE_SENTINEL,
         )
 
+    # Validator-recorded gateway log is authoritative. Agents that return a
+    # probability without any provider call are treated as invalid (no evidence).
+    if not digest.provider_calls:
+        reasons.append("provider_calls_missing")
+
+    # Assembled reasoning chain must be non-empty (belief path or synthesised
+    # steps). A zero-step trace means the agent produced no usable reasoning.
+    if not digest.reasoning_chain:
+        reasons.append("reasoning_steps_missing")
+
     return probability, confidence, len(reasons) == 0, reasons, raw_observed
 
 
