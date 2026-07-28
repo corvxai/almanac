@@ -195,9 +195,6 @@ def portal_event_to_event(payload: dict[str, Any]) -> Event:
     outcomes = payload.get("outcomes")
     if not isinstance(outcomes, list):
         outcomes = []
-    prices = payload.get("currentOutcomePrices")
-    if not isinstance(prices, dict):
-        prices = {}
     tags = payload.get("tagsAtAdmission")
     if not isinstance(tags, list):
         tags = []
@@ -217,10 +214,6 @@ def portal_event_to_event(payload: dict[str, Any]) -> Event:
             for row in outcomes
             if isinstance(row, dict)
         ],
-        current_outcome_prices={
-            str(key): float(value)
-            for key, value in prices.items()
-        },
     )
 
 
