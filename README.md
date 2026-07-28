@@ -78,8 +78,16 @@ The validator's high-level, continuously looping execution:
 sudo apt update
 sudo apt install docker.io docker-compose-v2
 ```
-- A registered Bittensor validator wallet/hotkey setup (via btcli)
+- A registered Bittensor validator wallet/hotkey setup (via `btcli`)
 - `WANDB_API_KEY` in `.env` for W&B logging (or use `--wandb.off`)
+
+`bittensor==11.0.1` in `requirements.txt` includes both the Python SDK and
+`btcli`; do not install the legacy separate `bittensor-cli` package. In v11,
+create keys with `btcli wallet create --wallet <coldkey-name> --wallet-hotkey
+<hotkey-name>` and register with `btcli subnets register --netuid 41 --wallet
+<coldkey-name> --wallet-hotkey <hotkey-name> --network finney`.
+The dotted flags in the validator examples below belong to Almanac's scripts,
+not to `btcli`.
 
 ### Production: Docker required
 
@@ -172,8 +180,8 @@ pip install -r requirements.txt
 ```
 
 2. A **Bittensor wallet** with a **registered miner UID** on the subnet:
-   - Wallet guide: https://docs.learnbittensor.org/keys/wallets
-   - Miner registration: https://docs.learnbittensor.org/miners
+   - Bittensor v11 docs: https://www.bittensor.com/docs
+   - Register with Bittensor v11: `btcli subnets register --netuid <netuid> --wallet <coldkey-name> --wallet-hotkey <hotkey-name> --network <finney|test>`
    - Mainnet netuid `41` / testnet netuid `172`
 
 ---

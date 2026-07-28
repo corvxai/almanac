@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -6,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import bittensor as bt
+
+logger = logging.getLogger(__name__)
 
 
 class MetadataManager:
@@ -46,7 +49,7 @@ class MetadataManager:
         # Load existing state
         self.metadata_state = self.load_state()
         
-        bt.logging.info(f"MetadataManager initialized for subnet {netuid} on {network}")
+        logger.info("MetadataManager initialized for subnet %s on %s", netuid, network)
     
     def load_state(self) -> Dict:
         """Load metadata state from JSON file."""
@@ -54,10 +57,10 @@ class MetadataManager:
             try:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
-                bt.logging.info(f"Loaded metadata state with {len(state.get('metadata', []))} entries")
+                logger.info("Loaded metadata state with %d entries", len(state.get("metadata", [])))
                 return state
             except Exception as e:
-                bt.logging.warning(f"Failed to load state file {self.state_file}: {e}")
+                logger.warning("Failed to load state file %s: %s", self.state_file, e)
         
         return {
             "metadata": [],
@@ -72,44 +75,34 @@ class MetadataManager:
                 with open(self.state_file, 'w') as f:
                     json.dump(self.metadata_state, f, indent=2)
         except Exception as e:
-            bt.logging.error(f"Failed to save state file {self.state_file}: {e}")
+            logger.error("Failed to save state file %s: %s", self.state_file, e)
     
     def sync_metagraph(self):
         """Sync metagraph to get current UIDs."""
         try:
-            self.metagraph = self.subtensor.metagraph(self.netuid)
-            bt.logging.debug(f"Synced metagraph: {len(self.metagraph.uids)} total UIDs")
+            self.metagraph = self.subtensor.subnets.metagraph(self.netuid)
+            if self.metagraph is None:
+                raise RuntimeError(f"Subnet {self.netuid} does not exist")
+            logger.debug("Synced metagraph: %d total UIDs", len(self.metagraph))
         except Exception as e:
-            bt.logging.error(f"Failed to sync metagraph: {e}")
+            logger.error("Failed to sync metagraph: %s", e)
     
     def get_uid_metadata(self, uid: int) -> Optional[str]:
         """Get metadata for a specific UID from blockchain."""
-        import logging
-        
-        # Temporarily suppress bittensor logging to avoid NoneType errors
-        bt_logger = logging.getLogger('bittensor')
-        subtensor_logger = logging.getLogger('bittensor.subtensor')
-        
-        original_bt_level = bt_logger.getEffectiveLevel()
-        original_subtensor_level = subtensor_logger.getEffectiveLevel()
-        
-        bt_logger.setLevel(logging.CRITICAL)  # Only show critical errors
-        subtensor_logger.setLevel(logging.CRITICAL)  # Suppress subtensor errors
-        
         try:
-            commitment = self.subtensor.get_commitment(netuid=self.netuid, uid=uid)
-            if commitment and commitment.strip():
-                return commitment
-            # Return None explicitly if no metadata (this is normal)
-            return None
-            
+            if self.metagraph is None:
+                return None
+            neuron = self.metagraph.neuron(uid)
+            commitment = self.subtensor.identity.commitment(
+                netuid=self.netuid,
+                hotkey_ss58=neuron.hotkey,
+            )
+            return self._normalize_commitment(
+                commitment.data if commitment is not None else None
+            )
         except Exception as e:
-            bt.logging.debug(f"Failed to get metadata for UID {uid}: {e}")
+            logger.debug("Failed to get metadata for UID %s: %s", uid, e)
             return None
-        finally:
-            # Restore original logging levels
-            bt_logger.setLevel(original_bt_level)
-            subtensor_logger.setLevel(original_subtensor_level)
     
     def get_uid_info(self, uid: int) -> Optional[Dict]:
         """Get existing metadata info for a UID from local state."""
@@ -148,7 +141,7 @@ class MetadataManager:
         uids_to_update = []
         
         # Get all non-validator UIDs
-        all_uids = set(self.metagraph.uids.tolist())
+        all_uids = {neuron.uid for neuron in self.metagraph}
         
         # Get validator UIDs by checking which UIDs have validator permits
         """
@@ -169,7 +162,7 @@ class MetadataManager:
                             validator_uids.add(uid)
                     
         except Exception as e:
-            bt.logging.warning(f"Could not query validator permits: {e}")
+            logger.warning(f"Could not query validator permits: {e}")
             # Fallback: assume no validators if we can't query
             validator_uids = set()
         """
@@ -207,7 +200,11 @@ class MetadataManager:
             if should_update:
                 uids_to_update.append(uid)
         
-        bt.logging.debug(f"Found {len(uids_to_update)} UIDs to update out of {len(all_uids)} total miners")
+        logger.debug(
+            "Found %d UIDs to update out of %d total miners",
+            len(uids_to_update),
+            len(all_uids),
+        )
         return uids_to_update
     
     def _normalize_commitment(self, commitment: Optional[str]) -> Optional[str]:
@@ -223,25 +220,30 @@ class MetadataManager:
         if self.metagraph is None:
             return None
         try:
-            commitments_by_hotkey = self.subtensor.get_all_commitments(netuid=self.netuid)
+            commitments_by_hotkey = self.subtensor.subnets.commitments(netuid=self.netuid)
             if not isinstance(commitments_by_hotkey, dict):
-                bt.logging.warning("Bulk commitment fetch returned unexpected payload; falling back to per-UID fetch.")
+                logger.warning(
+                    "Bulk commitment fetch returned unexpected payload; "
+                    "falling back to per-UID fetch."
+                )
                 return None
 
             uid_commitments: Dict[int, Optional[str]] = {}
-            hotkeys = list(self.metagraph.hotkeys)
-            for uid in self.metagraph.uids.tolist():
-                uid_int = int(uid)
-                if uid_int < 0 or uid_int >= len(hotkeys):
-                    uid_commitments[uid_int] = None
-                    continue
-                commitment = commitments_by_hotkey.get(hotkeys[uid_int])
-                uid_commitments[uid_int] = self._normalize_commitment(commitment)
+            for neuron in self.metagraph:
+                commitment = commitments_by_hotkey.get(neuron.hotkey)
+                uid_commitments[neuron.uid] = self._normalize_commitment(
+                    commitment.value if commitment is not None else None
+                )
 
-            bt.logging.debug(f"Fetched {len(commitments_by_hotkey)} commitments with bulk chain query.")
+            logger.debug(
+                "Fetched %d commitments with bulk chain query.",
+                len(commitments_by_hotkey),
+            )
             return uid_commitments
         except Exception as e:
-            bt.logging.warning(f"Bulk commitment fetch failed; falling back to per-UID fetch: {e}")
+            logger.warning(
+                "Bulk commitment fetch failed; falling back to per-UID fetch: %s", e
+            )
             return None
 
     def process_batch(
@@ -262,16 +264,16 @@ class MetadataManager:
                 self.update_uid_metadata(uid, metadata, current_block)
                 
                 if metadata:
-                    bt.logging.debug(f"Metadata found! Updated metadata for UID {uid}: [REDACTED]")
+                    logger.debug("Metadata found! Updated metadata for UID %s: [REDACTED]", uid)
                 else:
-                    bt.logging.debug(f"No metadata found for UID {uid} (stored as None)")
+                    logger.debug("No metadata found for UID %s (stored as None)", uid)
                 
                 if bulk_commitments is None and self.per_uid_delay > 0:
                     # Small delay only for per-UID chain queries to avoid burst load.
                     time.sleep(self.per_uid_delay)
                 
             except Exception as e:
-                bt.logging.warning(f"Error processing UID {uid}: {e}")
+                logger.warning("Error processing UID %s: %s", uid, e)
                 # Store None for failed queries too
                 self.update_uid_metadata(uid, None, current_block)
     
@@ -282,11 +284,11 @@ class MetadataManager:
             if not self.metagraph:
                 return
             
-            current_block = self.metagraph.block.item()
+            current_block = self.metagraph.block
             uids_to_update = self.get_uids_to_update()
             
             if not uids_to_update:
-                bt.logging.debug("No UIDs need metadata updates")
+                logger.debug("No UIDs need metadata updates")
                 return
 
             bulk_commitments = self._get_bulk_commitments() if self.use_bulk_commitments else None
@@ -294,7 +296,11 @@ class MetadataManager:
             # Process in batches
             for i in range(0, len(uids_to_update), self.batch_size):
                 batch = uids_to_update[i:i + self.batch_size]
-                bt.logging.info(f"Processing metadata batch {i//self.batch_size + 1}: UIDs {batch}")
+                logger.info(
+                    "Processing metadata batch %d: UIDs %s",
+                    i // self.batch_size + 1,
+                    batch,
+                )
                 
                 self.process_batch(batch, current_block, bulk_commitments=bulk_commitments)
                 
@@ -309,14 +315,14 @@ class MetadataManager:
             self.metadata_state["last_full_sync"] = datetime.now(timezone.utc).isoformat()
             self.save_state()
             
-            bt.logging.info(f"Completed metadata update for {len(uids_to_update)} UIDs")
+            logger.info("Completed metadata update for %d UIDs", len(uids_to_update))
             
         except Exception as e:
-            bt.logging.error(f"Error in metadata batch update: {e}")
+            logger.error("Error in metadata batch update: %s", e)
     
     def background_update_loop(self):
         """Background thread loop for periodic metadata updates."""
-        bt.logging.info("Starting metadata background update loop")
+        logger.info("Starting metadata background update loop")
         
         while self.running:
             try:
@@ -326,7 +332,7 @@ class MetadataManager:
                 time.sleep(self.update_interval)
                 
             except Exception as e:
-                bt.logging.error(f"Error in background update loop: {e}")
+                logger.error("Error in background update loop: %s", e)
                 time.sleep(60)  # Short sleep on error
     
     def start(self):
@@ -337,7 +343,7 @@ class MetadataManager:
         self.running = True
         self.thread = threading.Thread(target=self.background_update_loop, daemon=True)
         self.thread.start()
-        bt.logging.info("Metadata background thread started")
+        logger.info("Metadata background thread started")
     
     def stop(self):
         """Stop the background metadata update thread."""
@@ -347,7 +353,7 @@ class MetadataManager:
         self.running = False
         if self.thread:
             self.thread.join(timeout=5)
-        bt.logging.info("Metadata background thread stopped")
+        logger.info("Metadata background thread stopped")
     
     def get_miner_metadata(self, uid: int) -> Optional[str]:
         """Get metadata for a specific miner UID (thread-safe)."""

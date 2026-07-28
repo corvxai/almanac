@@ -12,11 +12,11 @@ pip install psycopg2-binary python-dotenv
 
 import os
 import contextlib
+import logging
 from typing import Optional
 import threading
 from pathlib import Path
 import numpy as np
-import bittensor as bt
 
 # Optional PostgreSQL imports - only load if available
 try:
@@ -37,6 +37,9 @@ except ImportError:
     load_dotenv = None
 
 from ..constants import MINER_WEIGHT_PERCENTAGE, GENERAL_POOL_WEIGHT_PERCENTAGE, ENABLE_STATIC_WEIGHTING
+
+
+logger = logging.getLogger(__name__)
 
 
 class PostgresValidatorStorage():
@@ -63,28 +66,28 @@ class PostgresValidatorStorage():
             self.connection_params = self._get_connection_params()
             self.env_loaded = True
         except Exception as e:
-            bt.logging.warning(f"Failed to load connection parameters: {e}")
+            logger.warning(f"Failed to load connection parameters: {e}")
             self.env_loaded = False
 
     def _load_env_file(self):
         """Load environment variables from storage.env file."""
         if not DOTENV_AVAILABLE:
-            bt.logging.warning("python-dotenv not available. Install with: pip install python-dotenv")
+            logger.warning("python-dotenv not available. Install with: pip install python-dotenv")
             return False
         
         # Look for storage.env in the same directory as this file
         env_file = Path(__file__).parent / "storage.env"
         
         if not env_file.exists():
-            bt.logging.error(f"Environment file not found: {env_file}")
+            logger.error(f"Environment file not found: {env_file}")
             return False
         
         try:
             load_dotenv(env_file)
-            bt.logging.info(f"Loaded environment variables from {env_file}")
+            logger.info(f"Loaded environment variables from {env_file}")
             return True
         except Exception as e:
-            bt.logging.error(f"Failed to load environment file {env_file}: {e}")
+            logger.error(f"Failed to load environment file {env_file}: {e}")
             return False
 
     def _get_connection_params(self):
@@ -102,7 +105,7 @@ class PostgresValidatorStorage():
         
         if missing_vars:
             error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
-            bt.logging.error(error_msg)
+            logger.error(error_msg)
             raise RuntimeError(error_msg)
         
         try:
@@ -115,7 +118,7 @@ class PostgresValidatorStorage():
             }
         except ValueError as e:
             error_msg = f"Invalid environment variable format: {e}"
-            bt.logging.error(error_msg)
+            logger.error(error_msg)
             raise RuntimeError(error_msg)
 
     def initialize(self):
@@ -269,9 +272,9 @@ class PostgresValidatorStorage():
                     """)
                     
                     connection.commit()
-                    bt.logging.info("Database tables initialized successfully")
+                    logger.info("Database tables initialized successfully")
         except Exception as e:
-            bt.logging.error(f"Failed to initialize database: {e}")
+            logger.error(f"Failed to initialize database: {e}")
             raise
 
     def _create_connection(self):
@@ -284,7 +287,7 @@ class PostgresValidatorStorage():
             connection.autocommit = False
             return connection
         except Exception as e:
-            bt.logging.error(f"Failed to create PostgreSQL connection: {e}")
+            logger.error(f"Failed to create PostgreSQL connection: {e}")
             raise
     
     def get_connection(self):
@@ -615,7 +618,7 @@ def log_scores_to_database(miner_history, general_pool_history, miners_scores, g
             if account_id is not None:
                 storage.insert_epoch_trader_scores(trader_data)
             else:
-                bt.logging.warning(f"No account ID found for miner trader: {trader_data}")
+                logger.warning(f"No account ID found for miner trader: {trader_data}")
                 continue
         
         # Insert trader-level data for general pools
@@ -659,11 +662,11 @@ def log_scores_to_database(miner_history, general_pool_history, miners_scores, g
             if account_id is not None:
                 storage.insert_epoch_trader_scores(trader_data)
             else:
-                bt.logging.warning(f"No account ID found for general pool trader: {trader_data}")
+                logger.warning(f"No account ID found for general pool trader: {trader_data}")
                 continue
         
-        bt.logging.info(f"Successfully logged scores to database for epoch {epoch_date}")
+        logger.info(f"Successfully logged scores to database for epoch {epoch_date}")
         
     except Exception as e:
-        bt.logging.error(f"Failed to log scores to database: {e}")
+        logger.error(f"Failed to log scores to database: {e}")
         raise

@@ -55,7 +55,7 @@ Coverage (research-trace quality) is not a scoring pillar. Invalid
 predictions are marked orchestrator-side via ``predictionIsInvalid`` and
 enforced by the invalid-rate gate.
 
-Returns a ``np.ndarray`` of per-miner scores aligned to ``metagraph.uids``.
+Returns a ``np.ndarray`` of per-miner scores aligned to the metagraph UIDs.
 """
 
 from __future__ import annotations
@@ -596,7 +596,7 @@ def _inactivity_multiplier(age_hours: Optional[float]) -> float:
 def _metagraph_uids(metagraph) -> list[int]:
     uids = getattr(metagraph, "uids", None)
     if uids is None:
-        return []
+        return [int(neuron.uid) for neuron in metagraph]
     try:
         return [int(u) for u in uids.tolist()]
     except AttributeError:

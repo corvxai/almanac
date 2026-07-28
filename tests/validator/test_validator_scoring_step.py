@@ -2,7 +2,7 @@
 
 These tests do not touch the chain. They inject a fake ``_BtObjects`` plus a
 stub ``MetadataManager`` and call ``Validator.run_scoring_step`` directly, then
-assert on what ``subtensor.set_weights`` received. Three cases:
+assert on what ``subtensor.execute`` received. Three cases:
 
 - Almanac Market only.
 - Almanac Forecasting only.
@@ -39,53 +39,52 @@ from src.validator import validator as validator_module
 from src.validator.validator import Validator
 
 
-class _StubUids:
-    def __init__(self, vals: list[int]) -> None:
-        self._vals = vals
-
-    def tolist(self) -> list[int]:
-        return list(self._vals)
-
-    def __iter__(self):
-        return iter(self._vals)
-
-    def __len__(self) -> int:
-        return len(self._vals)
-
-
 class _StubMetagraph:
     def __init__(self, uids: list[int]) -> None:
-        self.uids = _StubUids(uids)
+        self.neurons = [
+            SimpleNamespace(uid=uid, hotkey=f"hotkey_{uid}") for uid in uids
+        ]
         self.hotkeys = [f"hotkey_{u}" for u in uids]
         self.synced = 0
 
-    def sync(self) -> None:
-        self.synced += 1
+    def __iter__(self):
+        return iter(self.neurons)
+
+    def __len__(self) -> int:
+        return len(self.neurons)
 
 
 class _RecordingSubtensor:
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.metagraph = None
+        self.subnets = SimpleNamespace(metagraph=self._metagraph)
 
-    def set_weights(self, *, netuid, wallet, uids, weights, wait_for_inclusion):
+    def _metagraph(self, netuid):
+        del netuid
+        self.metagraph.synced += 1
+        return self.metagraph
+
+    def execute(self, intent, wallet, *, wait_for_inclusion):
+        del wallet
         self.calls.append(
             {
-                "netuid": netuid,
-                "uids": list(uids),
-                "weights": np.asarray(weights, dtype=float),
+                "netuid": intent.netuid,
+                "uids": list(intent.uids),
+                "weights": np.asarray(intent.weights, dtype=float),
                 "wait_for_inclusion": wait_for_inclusion,
             }
         )
-        return True
+        return SimpleNamespace(success=True, error=None, message="")
 
 
 def _bt_objects(uids: list[int]):
     metagraph = _StubMetagraph(uids)
     subtensor = _RecordingSubtensor()
+    subtensor.metagraph = metagraph
     return validator_module._BtObjects(  # noqa: SLF001 — test reaches into module
         wallet=SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hotkey_test")),
         subtensor=subtensor,
-        dendrite=SimpleNamespace(keypair=SimpleNamespace(ss58_address="hotkey_test")),
         metagraph=metagraph,
         network="finney",
     )
@@ -183,11 +182,16 @@ def test_score_market_forwards_budget_share(monkeypatch, store):
     assert seen["budget_share"] == pytest.approx(0.37)
 
 
-def test_forecasting_only_scoring_step_scores_resolved_traces(store):
+def test_forecasting_only_scoring_step_scores_resolved_traces(monkeypatch, store):
     bt = _bt_objects(uids=[0, 1])
     cfg = _config(market=False, forecasting=True)
 
     store.save_trace(_make_resolved_trace(miner_uid=1, prediction=1.0, outcome=True))
+    monkeypatch.setattr(
+        Validator,
+        "_score_agent_predictions",
+        lambda self: np.array([0.0, 1.0], dtype=float),
+    )
 
     v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
     weights = v.run_scoring_step()
@@ -208,6 +212,11 @@ def test_both_enabled_blends_score_vectors(monkeypatch, store):
     )
     # Almanac Forecasting: uid=1 had a perfect prediction.
     store.save_trace(_make_resolved_trace(miner_uid=1, prediction=1.0, outcome=True))
+    monkeypatch.setattr(
+        Validator,
+        "_score_agent_predictions",
+        lambda self: np.array([0.0, 1.0], dtype=float),
+    )
 
     v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
     weights = v.run_scoring_step()
@@ -247,6 +256,11 @@ def test_market_score_failure_returns_none_and_falls_back_to_forecasting(monkeyp
 
     monkeypatch.setattr("src.validator.market.score_market", _raises)
     store.save_trace(_make_resolved_trace(miner_uid=1, prediction=1.0, outcome=True))
+    monkeypatch.setattr(
+        Validator,
+        "_score_agent_predictions",
+        lambda self: np.array([0.0, 1.0], dtype=float),
+    )
 
     v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
     weights = v.run_scoring_step()
@@ -261,6 +275,22 @@ def test_validator_rejects_both_mechanisms_disabled() -> None:
 
     with pytest.raises(ValueError, match="both mechanisms disabled"):
         Validator(config=cfg, store=None, bt_objects=bt, metadata_manager=None)
+
+
+def test_all_zero_weights_skip_chain_submission(monkeypatch, store, caplog):
+    bt = _bt_objects(uids=[0, 1, 2])
+    cfg = _config(market=True, forecasting=False)
+    monkeypatch.setattr(
+        "src.validator.market.score_market",
+        lambda **kw: np.zeros(3, dtype=float),
+    )
+
+    v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
+    weights = v.run_scoring_step()
+
+    assert weights is None
+    assert not bt.subtensor.calls
+    assert "All blended weights are zero" in caplog.text
 
 
 def test_set_weights_disabled_skips_chain_submission(monkeypatch, store):

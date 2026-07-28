@@ -17,19 +17,13 @@ from src.gateway.validator_protocol import (
 
 def _import_keypair():
     try:
-        from bittensor_wallet.keypair import Keypair  # type: ignore
+        from bittensor.sp_core import Keypair  # type: ignore
 
         return Keypair
     except ImportError:
         pass
     try:
         from substrateinterface import Keypair  # type: ignore
-
-        return Keypair
-    except ImportError:
-        pass
-    try:
-        from bittensor import Keypair  # type: ignore
 
         return Keypair
     except ImportError:
@@ -45,7 +39,6 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def loaded():
-    # Omit crypto_type: older bittensor-wallet builds reject the kwarg, and
     # SR25519 is the default on every supported backend.
     kp = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     return LoadedKeypair(keypair=kp, hotkey_ss58=kp.ss58_address, coldkey_ss58=None)
