@@ -68,8 +68,9 @@ def test_assignment_to_event_maps_core_fields() -> None:
     assert event.event_id == uuid5(NAMESPACE_URL, "polymarket:2411919")
 
 
-def test_assignment_to_event_passes_market_snapshot_through() -> None:
-    event = assignment_to_event(_assignment())
+def test_assignment_to_event_passes_outcomes_but_strips_prices() -> None:
+    assignment = _assignment()
+    event = assignment_to_event(assignment)
 
     assert event.outcomes == [
         {
@@ -81,10 +82,9 @@ def test_assignment_to_event_passes_market_snapshot_through() -> None:
             "name": "No",
         },
     ]
-    assert event.current_outcome_prices == {
-        "44067735420073091208102132584206540755478475924816968380795164046445880451653": 0.26,
-        "50021132755437548153440115538135773388691694036974767046675729697249853152385": 0.74,
-    }
+    # Prices remain on the assignment for submit/scoring; agent Event is bare.
+    assert assignment.event.currentOutcomePrices
+    assert event.current_outcome_prices == {}
 
 
 def test_assignment_to_event_fallbacks_description_and_source_id() -> None:

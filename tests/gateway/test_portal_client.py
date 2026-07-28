@@ -118,7 +118,7 @@ def test_portal_event_mapping_matches_internal_event_shape() -> None:
     assert event.title == "Will the test pass?"
     assert event.source_id == "market-42"
     assert event.resolution_deadline.tzinfo == timezone.utc
-    assert event.current_outcome_prices == {"yes-id": 0.61, "no-id": 0.39}
+    assert event.current_outcome_prices == {}
     assert event.outcomes[0]["outcomeId"] == "yes-id"
     assert event.tags == ["testing"]
 

@@ -49,7 +49,6 @@ def assignment_to_event(
             for o in assignment.event.outcomes
             if isinstance(o, dict)
         ],
-        current_outcome_prices=dict(assignment.event.currentOutcomePrices),
     )
 
 
