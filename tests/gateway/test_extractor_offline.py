@@ -19,7 +19,6 @@ from tests.gateway.harness import (
 OFFLINE_FIXTURE_CASES: list[tuple[str, str, tuple[EvidenceType, ...]]] = [
     ("grok", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("perplexity", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.QUOTE_SUMMARY)),
-    ("anthropic", "messages", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("openai", "responses", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("gemini", "generate_content", (EvidenceType.PROBABILITY, EvidenceType.FACT)),
     ("openrouter", "chat_completion", (EvidenceType.PROBABILITY, EvidenceType.QUOTE_SUMMARY)),

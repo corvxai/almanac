@@ -28,8 +28,14 @@ GATEWAY_API_KEY=your-gateway-api-key
 You also need a registered Bittensor miner wallet/hotkey on the subnet (mainnet
 netuid `41`, testnet `172`). The CLI signs uploads with that hotkey.
 
-The CLI already talks to the production orchestrator by default — no URL config
-needed unless you are pointing at a non-prod environment.
+The pinned Bittensor v11 package installs both the SDK and `btcli`; do not
+install the legacy separate `bittensor-cli` package. If needed, create the
+wallet with `btcli wallet create --wallet <coldkey-name> --wallet-hotkey
+<hotkey-name>` and register it with `btcli subnets register --netuid <netuid>
+--wallet <coldkey-name> --wallet-hotkey <hotkey-name> --network <finney|test>`.
+
+The Almanac miner CLI already talks to the production orchestrator by default —
+no URL config needed unless you are pointing at a non-prod environment.
 
 **Key linking:** the first successful `submit-agent` with an unused API key
 auto-links that key to your miner hotkey/org. If the key is already linked to

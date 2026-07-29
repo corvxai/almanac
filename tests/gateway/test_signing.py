@@ -1,7 +1,7 @@
 """Unit tests for the validator-side signing module + gateway logging path.
 
-Skipped automatically when neither `bittensor_wallet`/`bittensor` nor
-`substrateinterface` is installed — those provide the sr25519 `Keypair`.
+Skipped automatically when neither `bittensor` nor `substrateinterface` is
+installed — those provide the sr25519 `Keypair`.
 The runner image deliberately omits all of them, so these tests only run
 on the validator/dev side.
 """
@@ -37,7 +37,7 @@ from src.gateway.signing import (
 # available. Skip the whole module if none are.
 def _import_keypair():
     try:
-        from bittensor_wallet.keypair import Keypair  # type: ignore
+        from bittensor.sp_core import Keypair  # type: ignore
 
         return Keypair
     except ImportError:
@@ -47,26 +47,19 @@ def _import_keypair():
 
         return Keypair
     except ImportError:
-        pass
-    try:
-        from bittensor import Keypair  # type: ignore
-
-        return Keypair
-    except ImportError:
         return None
 
 
 Keypair = _import_keypair()
 pytestmark = pytest.mark.skipif(
     Keypair is None,
-    reason="no sr25519 Keypair backend installed (bittensor / bittensor_wallet / substrate-interface)",
+    reason="no sr25519 Keypair backend installed (bittensor / substrate-interface)",
 )
 
 
 @pytest.fixture
 def keypair():
     """Throwaway sr25519 keypair for the test."""
-    # Omit crypto_type: older bittensor-wallet builds reject the kwarg, and
     # SR25519 is the default on every supported backend.
     return Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
 

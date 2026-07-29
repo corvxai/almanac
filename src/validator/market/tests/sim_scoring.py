@@ -18,6 +18,7 @@ import requests
 import numpy as np
 from tabulate import tabulate
 import argparse
+import logging
 
 # Add repo root so `src.validator.market.*` imports work when run as a script.
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -507,17 +508,18 @@ def fetch_tao_price():
 
 def main():
     """Main simulation function."""
-
-    """ Bittensor logging setup if needed
-    parser = argparse.ArgumentParser()
-    bt.logging.add_args(parser)
-    config = bt.config(parser)
-    # Set up logging directory.
-    config.full_path = 'sims/logs/'
-    # Ensure the logging directory exists (like validator.py does)
-    os.makedirs(config.full_path, exist_ok=True)
-    bt.logging(config=config, logging_dir=config.full_path)
-    """
+    parser = argparse.ArgumentParser(description="Simulate validator market scoring")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Python log level for simulation output.",
+    )
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    )
 
     print(f"Loading trading history from {_TRADING_HISTORY_PATH}...")
     if not _TRADING_HISTORY_PATH.exists():
@@ -554,11 +556,12 @@ def main():
     print("\nRunning scoring algorithm...")
     print("This may take a moment...\n")
 
-    metagraph = bt.Subtensor(network="finney").metagraph(41)
+    subtensor = bt.Subtensor(network="finney")
+    metagraph = subtensor.subnets.metagraph(41)
 
     # Fetch the $TAO price
     tao_price_usd = fetch_tao_price()
-    alpha_price_usd = metagraph.pool.moving_price * tao_price_usd
+    alpha_price_usd = metagraph.moving_price * tao_price_usd
     print(f"TAO price: {tao_price_usd:.2f} USD")
     print(f"Alpha price: {alpha_price_usd:.2f} USD")
 

@@ -42,11 +42,6 @@ services:
       # Central provider gateway / orchestrator targets
       GATEWAY_SERVICE_URL: ${GATEWAY_SERVICE_URL:-https://api.almnc.ai}
       ORCHESTRATOR_API_URL: ${ORCHESTRATOR_API_URL:-https://api.almnc.ai}
-      # bittensor's import path mkdir's ~/.bittensor/{wallets,miners}. Our
-      # wallet volume is mounted :ro, so without this the validator crashes
-      # before --wallet.* flags are used. READ_ONLY=1 is bittensor's official
-      # skip for that mkdir (see bittensor.core.settings).
-      READ_ONLY: "1"
       # Print agent-runner log tails after each normal exit (default is quiet).
       FORECASTING_SANDBOX_RUNNER_LOGS_VERBOSE: ${FORECASTING_SANDBOX_RUNNER_LOGS_VERBOSE:-}
       # Dump full provider raw responses (default is quiet short INFO only).

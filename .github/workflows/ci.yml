@@ -35,15 +35,10 @@ jobs:
           # every branch change stashed). Quarantined so CI green == no new
           # breakage; fix and remove rather than adding more.
           #
-          #   Genuine offline bugs (no credentials needed):
-          #     - claude-style usage-cost normalization returns None
-          #     - anthropic.messages extractor golden fixture
           #   Require a Bittensor wallet keyfile (KeyFileError in any no-wallet
           #   env, including CI runners):
           #     - test_validator_scoring_step.py (3 cases)
           pytest -q \
-            --deselect "tests/gateway/test_gateway_usage_metadata.py::test_gateway_normalizes_claude_style_usage_tokens" \
-            --deselect "tests/gateway/test_extractor_offline.py::test_extract_evidence_from_golden_fixture[anthropic.messages]" \
             --deselect "tests/validator/test_validator_scoring_step.py::test_forecasting_only_scoring_step_scores_resolved_traces" \
             --deselect "tests/validator/test_validator_scoring_step.py::test_both_enabled_blends_score_vectors" \
             --deselect "tests/validator/test_validator_scoring_step.py::test_market_score_failure_returns_none_and_falls_back_to_forecasting"

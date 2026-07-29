@@ -70,7 +70,7 @@ def test_score_market_applies_budget_share_to_epoch_budget(
     out = market_loop.score_market(
         network="finney",
         wallet=None,
-        dendrite=SimpleNamespace(),
+        keypair=SimpleNamespace(),
         metagraph=metagraph,
         metadata_manager=None,
         print_stats=False,

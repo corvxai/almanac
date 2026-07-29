@@ -212,18 +212,12 @@ def _safe_int(value: Any) -> int | None:
 
 def _load_keypair_class():
     try:
-        from bittensor_wallet.keypair import Keypair  # type: ignore
+        from bittensor.sp_core import Keypair  # type: ignore
 
         return Keypair
     except ImportError:
         pass
-    try:
-        from substrateinterface import Keypair  # type: ignore
-
-        return Keypair
-    except ImportError:
-        pass
-    from bittensor import Keypair  # type: ignore
+    from substrateinterface import Keypair  # type: ignore
 
     return Keypair
 

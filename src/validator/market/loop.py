@@ -4,7 +4,7 @@ Standalone functions for the Almanac incentive mechanism. (trade-history fetch,
 pagination, retry policy, profile validation, set_weights wrapper).
 
 Public entry point: ``score_market`` — returns a score/weight vector of
-length ``len(metagraph.uids)`` for the current epoch.
+length ``len(metagraph)`` for the current epoch.
 """
 
 from __future__ import annotations
@@ -83,17 +83,19 @@ def fetch_tao_price() -> float:
 def compute_epoch_budget(metagraph, tao_price_usd: float) -> float:
     """Per-epoch (24h) USD budget for the miner pool.
 
-    Uses ``metagraph.pool.moving_price`` to convert from TAO to alpha and
+    Uses ``metagraph.moving_price`` to convert from TAO to alpha and
     then multiplies by sn41's ``TOTAL_MINER_ALPHA_PER_DAY``. sn41-verbatim.
     """
-    alpha_price_usd = metagraph.pool.moving_price * tao_price_usd
+    if metagraph.moving_price is None:
+        raise ValueError("Metagraph does not include a moving alpha price")
+    alpha_price_usd = metagraph.moving_price * tao_price_usd
     return alpha_price_usd * TOTAL_MINER_ALPHA_PER_DAY
 
 
 def fetch_trading_history(
     *,
     network: str,
-    dendrite,
+    keypair,
     metagraph,
     endpoint: Optional[str] = None,
     days: int = ROLLING_HISTORY_IN_DAYS,
@@ -134,7 +136,6 @@ def fetch_trading_history(
         url = endpoint or default_trading_history_endpoint(network)
         logger.info("Fetching trading history from %s for %d days", url, days)
 
-        keypair = dendrite.keypair
         hotkey = keypair.ss58_address
         signature = f"0x{keypair.sign(hotkey).hex()}"
 
@@ -295,7 +296,7 @@ def score_market(
     *,
     network: str,
     wallet,  # unused in scoring, kept for symmetry with future signing paths
-    dendrite,
+    keypair,
     metagraph,
     metadata_manager: Optional[MetadataManager],
     use_synthetic_data: bool = False,
@@ -317,7 +318,7 @@ def score_market(
     try:
         trading_history = fetch_trading_history(
             network=network,
-            dendrite=dendrite,
+            keypair=keypair,
             metagraph=metagraph,
             use_synthetic_data=use_synthetic_data,
         )
@@ -352,7 +353,11 @@ def score_market(
     # don't have to install cvxpy / scipy / tabulate.
     from .scoring import calculate_weights, print_pool_stats, score_miners
 
-    all_uids = metagraph.uids.tolist()
+    try:
+        all_uids = [neuron.uid for neuron in metagraph]
+    except TypeError:
+        # Keep small duck-typed test fixtures compatible with the v11 shape.
+        all_uids = [int(uid) for uid in metagraph.uids.tolist()]
     all_hotkeys = metagraph.hotkeys
 
     (

@@ -3231,7 +3231,7 @@ def link_bittensor_uid():
         
         # Sign the hotkey address (the message being signed is the hotkey itself)
         message = hotkey_address
-        signature = wallet.hotkey.sign(message)
+        signature = wallet.hotkey.sign(message.encode("utf-8"))
         signature_hex = "0x" + signature.hex()
         
         print(f"✓ Hotkey signed successfully")

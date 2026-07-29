@@ -54,7 +54,7 @@ class LoadedKeypair:
     """Thin wrapper holding the underlying sr25519 keypair plus its ss58s.
 
     The `keypair` field is the substrate `Keypair` object (from
-    `bittensor`/`substrateinterface`). We don't type it strictly to keep this
+    `bittensor.sp_core`/`substrateinterface`). We don't type it strictly to keep this
     module importable on environments without bittensor installed.
     """
 
@@ -83,21 +83,15 @@ def load_hotkey(cfg: BittensorConfig) -> Optional[LoadedKeypair]:
         return None
 
     try:
-        # Prefer the lightweight wallet package for signing: it does not mkdir
-        # ~/.bittensor on import (full `bittensor` does, which breaks when the
-        # wallet volume is mounted :ro unless READ_ONLY=1 is set).
-        try:
-            import bittensor_wallet as wallet_mod  # type: ignore
-        except ImportError:
-            import bittensor as wallet_mod  # type: ignore
+        from bittensor.wallet import Wallet  # type: ignore
     except ImportError as exc:
         raise RuntimeError(
-            "neither bittensor_wallet nor bittensor is installed but "
-            "signing_required=True. Install one (`pip install -r "
+            "bittensor is not installed but signing_required=True. "
+            "Install it (`pip install -r "
             "requirements.txt`) or run with --unsafe-no-signing for local dev."
         ) from exc
 
-    wallet = wallet_mod.Wallet(
+    wallet = Wallet(
         name=cfg.wallet_name,
         hotkey=cfg.wallet_hotkey,
         path=str(cfg.wallet_path),
@@ -312,23 +306,17 @@ def _safe_int(value: Any) -> Optional[int]:
 def _load_keypair_class():
     """Return the substrate `Keypair` class.
 
-    Tries `bittensor` first (re-exports it), then `substrateinterface` directly.
+    Tries Bittensor v11's low-level API, then `substrateinterface` directly.
     Raises ImportError if neither is installed.
     """
     try:
-        from bittensor_wallet.keypair import Keypair  # type: ignore
+        from bittensor.sp_core import Keypair  # type: ignore
 
         return Keypair
     except ImportError:
         pass
     try:
         from substrateinterface import Keypair  # type: ignore
-
-        return Keypair
-    except ImportError:
-        pass
-    try:
-        from bittensor import Keypair  # type: ignore
 
         return Keypair
     except ImportError as exc:

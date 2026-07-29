@@ -22,7 +22,6 @@ def _bt_objects():
     return validator_module._BtObjects(  # noqa: SLF001 - tests use internal helper
         wallet=SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hotkey_test")),
         subtensor=SimpleNamespace(),
-        dendrite=SimpleNamespace(),
         metagraph=SimpleNamespace(hotkeys=["other_hotkey", "hotkey_test"]),
         network="finney",
     )

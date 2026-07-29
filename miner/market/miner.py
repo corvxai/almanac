@@ -1,10 +1,10 @@
-import os
 import time
 import argparse
-import traceback
-import json
+import logging
 import bittensor as bt
-from typing import Tuple
+
+
+logger = logging.getLogger(__name__)
 
 class Miner:
     def __init__(self, interactive_mode=True, wallet_name=None, hotkey_name=None, network=None, polymarket_id=None):
@@ -13,127 +13,6 @@ class Miner:
         self.hotkey_name = hotkey_name
         self.network = network
         self.polymarket_id = polymarket_id
-        
-        if not interactive_mode:
-            # Only initialize config and bittensor objects if not in interactive mode
-            self.config = self.get_config()
-            self.setup_logging()
-            self.setup_bittensor_objects()
-
-    def get_config(self):
-        # Set up the configuration parser
-        parser = argparse.ArgumentParser()
-        # TODO: Add your custom miner arguments to the parser.
-        parser.add_argument('--custom', default='my_custom_value', help='Adds a custom value to the parser.')
-        # Adds override arguments for network and netuid.
-        parser.add_argument('--netuid', type=int, default=1, help="The chain subnet uid.")
-        # Adds subtensor specific arguments.
-        bt.subtensor.add_args(parser)
-        # Adds logging specific arguments.
-        bt.logging.add_args(parser)
-        # Adds wallet specific arguments.
-        bt.wallet.add_args(parser)
-        # Adds axon specific arguments.
-        bt.axon.add_args(parser)
-        
-        # If wallet info provided during initialization, use it
-        if self.wallet_name:
-            parser.set_defaults(wallet__name=self.wallet_name)
-        if self.hotkey_name:
-            parser.set_defaults(wallet__hotkey=self.hotkey_name)
-            
-        # Parse the arguments.
-        config = bt.config(parser)
-        # Set up logging directory
-        config.full_path = os.path.expanduser(
-            "{}/{}/{}/netuid{}/{}".format(
-                config.logging.logging_dir,
-                config.wallet.name,
-                config.wallet.hotkey_str,
-                config.netuid,
-                'miner',
-            )
-        )
-        # Ensure the directory for logging exists.
-        os.makedirs(config.full_path, exist_ok=True)
-        return config
-
-    def setup_logging(self):
-        # Activate Bittensor's logging with the set configurations.
-        bt.logging(config=self.config, logging_dir=self.config.full_path)
-        bt.logging.info(f"Running miner for subnet: {self.config.netuid} on network: {self.config.subtensor.network} with config:")
-        bt.logging.info(self.config)
-
-    def setup_bittensor_objects(self):
-        # Initialize Bittensor miner objects
-        bt.logging.info("Setting up Bittensor objects.")
-
-        # Initialize wallet.
-        self.wallet = bt.Wallet(config=self.config)
-        bt.logging.info(f"Wallet: {self.wallet}")
-
-        # Initialize subtensor.
-        self.subtensor = bt.Subtensor(config=self.config)
-        bt.logging.info(f"Subtensor: {self.subtensor}")
-
-        # Initialize metagraph.
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        bt.logging.info(f"Metagraph: {self.metagraph}")
-
-        if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            bt.logging.error(f"\nYour miner: {self.wallet} is not registered to chain connection: {self.subtensor} \nRun 'btcli register' and try again.")
-            exit()
-        else:
-            # Each miner gets a unique identity (UID) in the network.
-            self.my_subnet_uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-            bt.logging.info(f"Running miner on uid: {self.my_subnet_uid}")
-
-    def setup_axon(self):
-        # Build and link miner functions to the axon.
-        self.axon = bt.axon(wallet=self.wallet, port=self.config.axon.port)
-
-        # Attach functions to the axon.
-        bt.logging.info(f"Attaching forward function to axon.")
-        self.axon.attach(
-            forward_fn=self.dummy,
-            blacklist_fn=self.blacklist_fn,
-        )
-
-        # Serve the axon.
-        bt.logging.info(f"Serving axon on network: {self.config.subtensor.network} with netuid: {self.config.netuid}")
-        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
-        bt.logging.info(f"Axon: {self.axon}")
-
-        # Start the axon server.
-        bt.logging.info(f"Starting axon server on port: {self.config.axon.port}")
-        self.axon.start()
-
-    def run(self):
-        self.setup_axon()
-
-        # Keep the miner alive.
-        bt.logging.info(f"Starting main loop")
-        step = 0
-        while True:
-            try:
-                # Periodically update our knowledge of the network graph.
-                if step % 60 == 0:
-                    self.metagraph.sync()
-                    log = (
-                        f'Block: {self.metagraph.block.item()} | '
-                        f'Incentive: {self.metagraph.I[self.my_subnet_uid]} | '
-                    )
-                    bt.logging.info(log)
-                step += 1
-                time.sleep(1)
-
-            except KeyboardInterrupt:
-                self.axon.stop()
-                bt.logging.success('Miner killed by keyboard interrupt.')
-                break
-            except Exception as e:
-                bt.logging.error(traceback.format_exc())
-                continue
 
     @staticmethod
     def submit_metadata_to_chain(
@@ -161,12 +40,9 @@ class Miner:
             bool: True if successful, False otherwise
         """
         
-        # Initialize wallet and subtensor
-        bt.logging.info(f"Initializing wallet: {wallet_name}/{hotkey_name}")
+        # Initialize wallet and chain client
+        logger.info("Initializing wallet: %s/%s", wallet_name, hotkey_name)
         wallet = bt.Wallet(name=wallet_name, hotkey=hotkey_name)
-        
-        bt.logging.info(f"Connecting to network: {network}")
-        subtensor = bt.Subtensor(network=network)
         
         # Extract polymarket ID and submit only first 5 characters
         polymarket_id = metadata_dict.get('polymarket_id', '')
@@ -175,54 +51,72 @@ class Miner:
         # This ensures we store just the beginning of the Polygon address on-chain
         metadata_to_submit = polymarket_id[:5]
         
-        bt.logging.info(f"Full polymarket ID: {polymarket_id}")
-        bt.logging.info(f"Submitting (first 5 chars of ID): {metadata_to_submit}")
-        
-        # Verify hotkey is registered
-        try:
-            metagraph = subtensor.metagraph(netuid)
-            if wallet.hotkey.ss58_address not in metagraph.hotkeys:
-                bt.logging.error(f"Hotkey {wallet.hotkey.ss58_address} is not registered on subnet {netuid}")
-                return False
-            bt.logging.success(f"Hotkey verified on subnet {netuid}")
-        except Exception as e:
-            bt.logging.error(f"Failed to verify registration: {e}")
-            return False
-        
-        # Submit metadata with retry loop
-        # The commit function is rate-limited to once every 100 blocks (~20 minutes)
-        attempt = 0
-        while attempt < max_retries:
-            attempt += 1
-            bt.logging.info(f"Attempt {attempt}/{max_retries} to commit metadata...")
-            
+        logger.info("Full polymarket ID: %s", polymarket_id)
+        logger.info("Submitting (first 5 chars of ID): %s", metadata_to_submit)
+
+        logger.info("Connecting to network: %s", network)
+        with bt.Subtensor(network) as subtensor:
+            # Verify hotkey is registered
             try:
-                # Use subtensor.commit() to submit metadata
-                # This function is rate-limited and requires the hotkey to be registered
-                success = subtensor.commit(
-                    wallet=wallet,
+                uid = subtensor.neurons.uid(
+                    hotkey_ss58=wallet.hotkey.ss58_address,
                     netuid=netuid,
-                    data=metadata_to_submit
                 )
-                
-                if success:
-                    bt.logging.success(f"Successfully committed metadata to chain: {metadata_to_submit}")
-                    bt.logging.info(f"Hotkey: {wallet.hotkey.ss58_address}")
-                    bt.logging.info(f"Subnet: {netuid}")
-                    return True
-                else:
-                    bt.logging.warning("Commit returned False, likely rate-limited")
-                    
-            except Exception as e:
-                bt.logging.error(f"Failed to commit metadata: {e}")
-                bt.logging.debug(traceback.format_exc())
-            
-            # Wait before retrying
-            if attempt < max_retries:
-                bt.logging.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-        
-        bt.logging.error(f"Failed to commit metadata after {max_retries} attempts")
+                if uid is None:
+                    logger.error(
+                        "Hotkey %s is not registered on subnet %s",
+                        wallet.hotkey.ss58_address,
+                        netuid,
+                    )
+                    return False
+                logger.info("Hotkey verified on subnet %s with UID %s", netuid, uid)
+            except Exception:
+                logger.exception("Failed to verify registration")
+                return False
+
+            # Submit metadata with retry loop
+            attempt = 0
+            while attempt < max_retries:
+                attempt += 1
+                logger.info("Attempt %s/%s to commit metadata...", attempt, max_retries)
+
+                try:
+                    call = bt.calls.Commitments.set_commitment(
+                        netuid=netuid,
+                        info={
+                            "fields": [
+                                {
+                                    f"Raw{len(metadata_to_submit)}": metadata_to_submit.encode(
+                                        "utf-8"
+                                    )
+                                }
+                            ]
+                        },
+                    )
+                    result = subtensor.submit_call(
+                        call,
+                        wallet,
+                        signer="hotkey",
+                    )
+
+                    if result.success:
+                        logger.info(
+                            "Successfully committed metadata to chain: %s",
+                            metadata_to_submit,
+                        )
+                        logger.info("Hotkey: %s", wallet.hotkey.ss58_address)
+                        logger.info("Subnet: %s", netuid)
+                        return True
+
+                    logger.warning("Commit failed: %s", result.message)
+                except Exception:
+                    logger.exception("Failed to commit metadata")
+
+                if attempt < max_retries:
+                    logger.info("Retrying in %s seconds...", retry_delay)
+                    time.sleep(retry_delay)
+
+        logger.error("Failed to commit metadata after %s attempts", max_retries)
         return False
 
 
@@ -243,29 +137,29 @@ class Miner:
         Returns:
             str: The committed data, or None if not found
         """
-        bt.logging.info(f"Retrieving metadata for hotkey: {hotkey_address}")
-        subtensor = bt.Subtensor(network=network)
-        
+        logger.info("Retrieving metadata for hotkey: %s", hotkey_address)
         try:
-            # Get the UID for this hotkey
-            metagraph = subtensor.metagraph(netuid)
-            
-            if hotkey_address not in metagraph.hotkeys:
-                bt.logging.error(f"Hotkey not found on subnet {netuid}")
+            with bt.Subtensor(network) as subtensor:
+                uid = subtensor.neurons.uid(
+                    hotkey_ss58=hotkey_address,
+                    netuid=netuid,
+                )
+                if uid is None:
+                    logger.error("Hotkey not found on subnet %s", netuid)
+                    return None
+
+                commitment = subtensor.identity.commitment(
+                    netuid=netuid,
+                    hotkey_ss58=hotkey_address,
+                )
+
+            if commitment is None:
                 return None
-            
-            # Find the UID
-            uid = metagraph.hotkeys.index(hotkey_address)
-            
-            # Retrieve the commitment
-            commitment = subtensor.get_commitment(netuid=netuid, uid=uid)
-            
-            bt.logging.success(f"Retrieved commitment: {commitment}")
-            return commitment
-            
-        except Exception as e:
-            bt.logging.error(f"Failed to retrieve metadata: {e}")
-            bt.logging.debug(traceback.format_exc())
+
+            logger.info("Retrieved commitment: %s", commitment.data)
+            return commitment.data
+        except Exception:
+            logger.exception("Failed to retrieve metadata")
             return None
 
     def validate_polygon_address(self, address: str) -> bool:
@@ -292,8 +186,8 @@ class Miner:
             # Try to access the hotkey to verify it exists
             _ = wallet.hotkey.ss58_address
             return True
-        except Exception as e:
-            bt.logging.error(f"Wallet validation failed: {e}")
+        except Exception:
+            logger.exception("Wallet validation failed")
             return False
 
     def validate_registration(self, wallet_name: str, hotkey_name: str, netuid: int, network: str) -> bool:
@@ -302,14 +196,14 @@ class Miner:
         """
         try:
             wallet = bt.Wallet(name=wallet_name, hotkey=hotkey_name)
-            subtensor = bt.Subtensor(network=network)
-            metagraph = subtensor.metagraph(netuid)
-            
-            if wallet.hotkey.ss58_address not in metagraph.hotkeys:
-                return False
-            return True
-        except Exception as e:
-            bt.logging.error(f"Registration validation failed: {e}")
+            with bt.Subtensor(network) as subtensor:
+                uid = subtensor.neurons.uid(
+                    hotkey_ss58=wallet.hotkey.ss58_address,
+                    netuid=netuid,
+                )
+            return uid is not None
+        except Exception:
+            logger.exception("Registration validation failed")
             return False
 
     def get_network_netuid(self, network: str) -> int:
@@ -412,8 +306,8 @@ class Miner:
         print("🔍 Checking wallet...")
         if not self.validate_wallet_exists(wallet_name, hotkey_name):
             print(f"❌ Wallet '{wallet_name}' with hotkey '{hotkey_name}' not found. Please make sure your wallet is properly set up.")
-            print("You can create a wallet using: btcli wallet new_coldkey --wallet.name <name>")
-            print("You can create a hotkey using: btcli wallet new_hotkey --wallet.name <name> --wallet.hotkey <hotkey_name>")
+            print("You can create a wallet using: btcli wallet new-coldkey --wallet <name>")
+            print("You can create a hotkey using: btcli wallet new-hotkey --wallet <name> --wallet-hotkey <hotkey_name>")
             return False
         
         print("✅ Wallet found!")
@@ -422,7 +316,7 @@ class Miner:
         print(f"🔍 Checking registration on subnet {netuid}...")
         if not self.validate_registration(wallet_name, hotkey_name, netuid, network):
             print(f"❌ Hotkey not registered on subnet {netuid} ({network} network).")
-            print(f"Please register using: btcli subnet register --netuid {netuid} --subtensor.network {network} --wallet.name {wallet_name} --wallet.hotkey {hotkey_name}")
+            print(f"Please register using: btcli subnets register --netuid {netuid} --network {network} --wallet {wallet_name} --wallet-hotkey {hotkey_name}")
             return False
         
         print("✅ Hotkey is registered on the subnet!")
@@ -535,9 +429,15 @@ def main():
     Main function that handles both interactive and CLI modes.
     """
     parser = argparse.ArgumentParser(description='SN41 Almanac Miner Setup')
-    parser.add_argument('--wallet.name', dest='wallet_name', help='Wallet name (coldkey)')
-    parser.add_argument('--wallet.hotkey', dest='hotkey_name', help='Hotkey name')
-    parser.add_argument('--subtensor.network', dest='network', help='Network (finney or test)')
+    parser.add_argument(
+        "--wallet", "-w", "--wallet.name", dest="wallet_name", help="Wallet name (coldkey)"
+    )
+    parser.add_argument(
+        "--wallet-hotkey", "-H", "--wallet.hotkey", dest="hotkey_name", help="Hotkey name"
+    )
+    parser.add_argument(
+        "--network", "-n", "--subtensor.network", dest="network", help="Network (finney or test)"
+    )
     parser.add_argument('--polymarket.id', dest='polymarket_id', help='Almanac/Polymarket ID (EOA address)')
     
     args = parser.parse_args()
@@ -637,7 +537,7 @@ def main():
             exit(1)
         except Exception as e:
             print(f"\n❌ Setup failed: {e}")
-            bt.logging.error(traceback.format_exc())
+            logger.exception("Setup failed")
             exit(1)
 
 # Run the miner.

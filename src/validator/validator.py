@@ -3,7 +3,7 @@
 This is the entrypoint of the validator container's main process.
 
 * :class:`Validator` — owns the bittensor objects (wallet, subtensor,
-  dendrite, metagraph), the Almanac Market ``MetadataManager`` thread (when the
+  metagraph), the Almanac Market ``MetadataManager`` thread (when the
   Almanac Market mechanism is enabled), and the per-epoch tick that scores each
   enabled mechanism, blends, and sets weights on chain.
 * :func:`combine_weights` + :class:`BlendConfig` — pure functions that
@@ -665,10 +665,16 @@ class Validator:
 
         Exposed as a public method so tests can drive a single tick
         without sleeping. Returns the final weight vector that was sent
-        to ``set_weights`` (or ``None`` if both mechanisms returned no
-        data this epoch and ``combine_weights`` was skipped).
+        to ``set_weights`` (or ``None`` when submission was skipped because
+        no mechanism produced a positive weight).
         """
-        self._bt.metagraph.sync()
+        self._bt.metagraph = self._bt.subtensor.subnets.metagraph(
+            self._config.bittensor.netuid
+        )
+        if self._bt.metagraph is None:
+            raise RuntimeError(
+                f"Subnet {self._config.bittensor.netuid} does not exist on {self._bt.network}."
+            )
 
         loop_cfg = self._config.loop
 
@@ -692,6 +698,11 @@ class Validator:
             return None
 
         weights = combine_weights(weights_market, weights_forecasting, blend_cfg)
+        if not np.any(weights > 0):
+            logger.warning(
+                "All blended weights are zero this epoch; skipping set_weights."
+            )
+            return None
         self._log_blended_weights(weights, weights_market, weights_forecasting, blend_cfg)
 
         if loop_cfg.set_weights_enabled:
@@ -763,7 +774,7 @@ class Validator:
             return score_market(
                 network=self._bt.network,
                 wallet=self._bt.wallet,
-                dendrite=self._bt.dendrite,
+                keypair=self._bt.wallet.hotkey,
                 metagraph=self._bt.metagraph,
                 metadata_manager=self._metadata_manager,
                 use_synthetic_data=loop_cfg.use_synthetic_trading_data,
@@ -809,19 +820,29 @@ class Validator:
             return None
 
     def _set_weights(self, weights: np.ndarray) -> None:
+        import bittensor as bt
+
         netuid = self._config.bittensor.netuid
         logger.info("Submitting weights to subnet %d (size=%d)...", netuid, len(weights))
-        result = self._bt.subtensor.set_weights(
-            netuid=netuid,
-            wallet=self._bt.wallet,
-            uids=self._bt.metagraph.uids,
-            weights=weights,
+        result = self._bt.subtensor.execute(
+            bt.SetWeights(
+                netuid=netuid,
+                uids=[neuron.uid for neuron in self._bt.metagraph],
+                weights=weights.tolist(),
+            ),
+            self._bt.wallet,
             wait_for_inclusion=True,
         )
-        if result:
+        if result.success:
             logger.info("Successfully set weights on subnet %d.", netuid)
         else:
-            logger.error("Failed to set weights on subnet %d.", netuid)
+            error = result.error
+            logger.error(
+                "Failed to set weights on subnet %d: code=%s remediation=%s",
+                netuid,
+                error.code if error else "unknown",
+                error.remediation if error else result.message,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -835,29 +856,32 @@ class _BtObjects:
 
     wallet: object
     subtensor: object
-    dendrite: object
     metagraph: object
     network: str
 
 
 def _build_bittensor_objects(config: AppConfig) -> _BtObjects:
-    """Construct wallet/subtensor/dendrite/metagraph from ``config.bittensor``.
+    """Construct wallet/subtensor/metagraph from ``config.bittensor``.
 
     Imported lazily so the bittensor SDK (and its substrate deps) only
     load when the validator actually wires the chain. Tests inject a
     pre-built ``bt_objects=`` and never hit this path.
     """
     import bittensor as bt
+    from bittensor.wallet import Wallet
 
     bt_cfg = config.bittensor
-    wallet = bt.Wallet(
+    wallet = Wallet(
         name=bt_cfg.wallet_name,
         hotkey=bt_cfg.wallet_hotkey,
         path=str(bt_cfg.wallet_path),
     )
     subtensor = bt.Subtensor(network=bt_cfg.subtensor_network)
-    dendrite = bt.Dendrite(wallet=wallet)
-    metagraph = subtensor.metagraph(bt_cfg.netuid)
+    metagraph = subtensor.subnets.metagraph(bt_cfg.netuid)
+    if metagraph is None:
+        raise RuntimeError(
+            f"Subnet {bt_cfg.netuid} does not exist on {bt_cfg.subtensor_network}."
+        )
 
     hotkey_ss58 = wallet.hotkey.ss58_address
     if hotkey_ss58 not in metagraph.hotkeys:
@@ -869,7 +893,6 @@ def _build_bittensor_objects(config: AppConfig) -> _BtObjects:
     return _BtObjects(
         wallet=wallet,
         subtensor=subtensor,
-        dendrite=dendrite,
         metagraph=metagraph,
         network=bt_cfg.subtensor_network,
     )

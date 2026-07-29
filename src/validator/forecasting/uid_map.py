@@ -74,7 +74,7 @@ def resolve(trace: EvidenceDigest, metagraph) -> Optional[int]:
 def _uid_in_metagraph(uid: int, metagraph) -> bool:
     uids = getattr(metagraph, "uids", None)
     if uids is None:
-        return False
+        return any(int(neuron.uid) == uid for neuron in metagraph)
     try:
         uid_list = uids.tolist()
     except AttributeError:
