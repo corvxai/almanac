@@ -1,609 +1,460 @@
 """
-Simulation script to test scoring.py with trading history data.
+Simulation script to test scoring_v2.py against real trading history.
 
-This script:
 1. Loads data/trading_history.json
-2. Extracts unique miner_ids and hotkeys
-3. Calls score_miners() to compute scores
-4. Prints results and diagnostics
+2. Extracts miner UIDs / hotkeys
+3. Runs the current epoch through score_miners()
+4. Replays every historical epoch to produce a payout timeline
+5. Prints per-pool tables, mechanism diagnostics, and the on-chain weight vector
+
+Differences vs the v1 simulator, all downstream of the mechanism change:
+  - no kappa columns (no price to report)
+  - no Phase 1 / Phase 2 status, T*, or dual diagnostics (no solver)
+  - no dust-gate x1->x2 tracking (dust is now an explicit reserve, not a
+    constraint that Phase 2 can quietly drop)
+  + tier accounting (active / dust / gated), edge distribution, cap binding,
+    and distributed-vs-burned budget, which are the things that can actually
+    go wrong now
 """
 
-import os
-import json
-import sys
-import time
-from pathlib import Path
-from datetime import datetime
-import requests
-import numpy as np
-from tabulate import tabulate
 import argparse
+import json
 import logging
+import os
+import sys
+from pathlib import Path
 
-# Add repo root so `src.validator.market.*` imports work when run as a script.
+import numpy as np
+import requests
+from tabulate import tabulate
+
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-import bittensor as bt
+from src.validator.market.scoring import (  # noqa: E402
+    score_miners,
+    calculate_weights,
+    compute_edge,
+    pool_epoch_fees,
+    ROLLING_HISTORY_IN_DAYS,
+    PARETO_ALPHA,
+    EDGE_DECAY,
+    EDGE_SHRINKAGE_VOLUME,
+    EDGE_CAP,
+    CONCENTRATION_CAP,
+    CAP_RELAX_FACTOR,
+    FEE_FLOOR_MULTIPLIER,
+    DUST_RESERVE_SHARE,
+    DUST_MIN_RATIO,
+    INACTIVITY_EPOCHS,
+    MIN_EPOCHS_FOR_ELIGIBILITY,
+    MIN_TRADES_FOR_ELIGIBILITY,
+    MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
+    U16_QUANT_FLOOR,
+    BURN_UID,
+)
 
-from src.validator.market.scoring import score_miners, calculate_weights, print_pool_stats, print_dust_gate_diagnostics, compute_joint_kappa_from_history
-from src.validator.market.constants import MINER_WEIGHT_PERCENTAGE, GENERAL_POOL_WEIGHT_PERCENTAGE, ROLLING_HISTORY_IN_DAYS, KAPPA_NEXT, TOTAL_MINER_ALPHA_PER_DAY, EXCESS_MINER_WEIGHT_UID, BURN_UID, DUST_GATE
+TOTAL_MINER_ALPHA_PER_DAY = 2952
+EXCESS_MINER_WEIGHT_UID = None
+FALLBACK_ALPHA_PRICE_USD = 5.0  # used with --offline
 
 _TRADING_HISTORY_PATH = _REPO_ROOT / "data" / "trading_history.json"
 
 
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+
 def extract_miner_info(trading_history):
-    """
-    Extract unique miner UIDs and hotkeys from trading history.
-    
-    Returns:
-        all_uids: List[int] - list of unique miner IDs
-        all_hotkeys: List[str] - list where all_hotkeys[uid] gives the hotkey for that UID
-                                (matches validator format: metagraph.hotkeys)
-    """
-    miner_map = {}  # miner_id -> hotkey
-    
+    """Return (all_uids, all_hotkeys) where all_hotkeys[uid] is that UID's hotkey."""
+    miner_map = {}
     for trade in trading_history:
-        # Skip general pool trades
         if trade.get("is_general_pool", False):
             continue
-            
         miner_id = trade.get("miner_id")
-        miner_hotkey = trade.get("miner_hotkey")
-        
-        # Skip if missing miner info
-        if miner_id is None or miner_hotkey is None:
+        hotkey = trade.get("miner_hotkey")
+        if miner_id is None or hotkey is None:
             continue
-            
-        # Store the mapping
         if miner_id not in miner_map:
-            miner_map[miner_id] = miner_hotkey
-        else:
-            # Verify consistency (same miner_id should always have same hotkey)
-            if miner_map[miner_id] != miner_hotkey:
-                print(f"WARNING: Inconsistent hotkey for miner_id {miner_id}")
-    
-    all_uids = sorted(list(miner_map.keys()))
-    
-    # Convert dict to list format to match validator (metagraph.hotkeys)
-    # The list needs to be large enough to handle the maximum UID
-    # all_hotkeys[uid] should give the hotkey for that UID
-    if all_uids:
-        max_uid = max(all_uids)
-        all_hotkeys = [""] * (max_uid + 1)  # Create list large enough for max UID
-        for uid, hotkey in miner_map.items():
-            all_hotkeys[uid] = hotkey
-    else:
-        all_hotkeys = []
-    
+            miner_map[miner_id] = hotkey
+        elif miner_map[miner_id] != hotkey:
+            print(f"WARNING: inconsistent hotkey for miner_id {miner_id}")
+
+    all_uids = sorted(miner_map)
+    if not all_uids:
+        return [], []
+    all_hotkeys = [""] * (max(all_uids) + 1)
+    for uid, hk in miner_map.items():
+        all_hotkeys[uid] = hk
     return all_uids, all_hotkeys
 
 
-def calculate_historical_payouts(miner_history, general_pool_history, all_uids, all_hotkeys, trading_history, debug=False):
-    """Calculate payouts for each historical epoch and return as arrays."""
-    n_epochs = miner_history['n_epochs']
-    epoch_dates = miner_history['epoch_dates']
-    
-    # Initialize payout arrays
-    mp_payouts = np.zeros(n_epochs)
-    gp_payouts = np.zeros(n_epochs)
-    
-    print("Calculating historical payouts for each epoch...")
-    
-    # Store previous allocations for sequential simulation
-    prev_mp_allocations = None
-    prev_gp_allocations = None
-    
+def resolve_epoch_budget(offline: bool):
+    """Subnet emission budget in USD for the epoch."""
+    if offline:
+        print(f"[offline] assuming alpha price ${FALLBACK_ALPHA_PRICE_USD:.2f}")
+        return FALLBACK_ALPHA_PRICE_USD * TOTAL_MINER_ALPHA_PER_DAY
+
+    import bittensor as bt
+
+    subtensor = bt.Subtensor(network="finney")
+    metagraph = subtensor.subnets.metagraph(41)
+    tao_price = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price"
+        "?ids=bittensor&vs_currencies=usd",
+        timeout=15,
+    ).json()["bittensor"]["usd"]
+    alpha_price = metagraph.moving_price * tao_price
+    print(f"TAO price:   ${tao_price:,.2f}")
+    print(f"Alpha price: ${alpha_price:,.4f}")
+    return alpha_price * TOTAL_MINER_ALPHA_PER_DAY
+
+
+# ---------------------------------------------------------------------------
+# Historical replay
+# ---------------------------------------------------------------------------
+
+def _trade_date(trade):
+    raw = trade.get("completed_at")
+    if not raw:
+        return None
+    raw = str(raw)
+    return raw.split("T")[0] if "T" in raw else raw
+
+
+def calculate_historical_payouts(miner_history, all_uids, all_hotkeys, trading_history, debug=False):
+    """
+    Replay each epoch as it would have scored on the day, returning per-epoch
+    payout and diagnostic arrays.
+
+    Much cheaper than the v1 replay: there is no solver in the loop, so this is
+    O(epochs x traders) rather than 30 sequential convex programs.
+    """
+    n_epochs = miner_history["n_epochs"]
+    epoch_dates = miner_history["epoch_dates"]
+
+    out = {
+        k: np.zeros(n_epochs)
+        for k in ("mp_payout", "gp_payout", "mp_budget", "gp_budget",
+                  "mp_active", "mp_dust", "mp_undist")
+    }
+
+    print(f"Replaying {n_epochs} epochs...")
     for epoch_idx in range(n_epochs):
+        epoch_date = epoch_dates[epoch_idx]
+        epoch_trades = [
+            t for t in trading_history
+            if t.get("is_completed") and (_trade_date(t) or "9999") <= epoch_date
+        ]
+        if not epoch_trades:
+            continue
+
         try:
-            # For historical simulation, we need to simulate what the scoring would have been
-            # as of that epoch date, using all historical data up to that point
-            epoch_date = epoch_dates[epoch_idx]
-            
-            # Filter to include all trades settled up to and including this epoch date
-            # This simulates what data would have been available for scoring on that day
-            epoch_trades = []
-            for trade in trading_history:
-                if trade.get("is_completed", False):
-                    trade_date_str = trade.get("completed_at")
-                    if trade_date_str:
-                        # Parse the completed_at timestamp to extract just the date
-                        # It may be in ISO format (e.g., "2025-11-29T16:35:34.634Z") or just a date string
-                        try:
-                            if isinstance(trade_date_str, str):
-                                # Handle ISO format with timezone
-                                if 'T' in trade_date_str:
-                                    # Extract date part from ISO timestamp
-                                    trade_date_only = trade_date_str.split('T')[0]
-                                else:
-                                    # Already just a date string
-                                    trade_date_only = trade_date_str
-                            else:
-                                trade_date_only = str(trade_date_str)
-                            
-                            # Compare date strings (format: "YYYY-MM-DD")
-                            if trade_date_only <= epoch_date:
-                                epoch_trades.append(trade)
-                        except Exception as e:
-                            if debug:
-                                print(f"  -> Warning: Could not parse date '{trade_date_str}': {e}")
-                            continue
-            
-            if debug:
-                print(f"Epoch {epoch_idx} ({epoch_date}): {len(epoch_trades)} trades")
-            
-            if epoch_trades:
-                # Calculate the subnet epoch budget. Could be dynamic based on the date if we keep that info
-                # For now, we are using a static budget of $20,000
-                current_epoch_budget = 20000 # $20,000
+            _, _, m_scores, g_scores, m_budget, g_budget = score_miners(
+                all_uids=all_uids,
+                all_hotkeys=all_hotkeys,
+                trading_history=epoch_trades,
+                verbose=False,
+                target_epoch_idx=epoch_idx,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Warning: epoch {epoch_idx} ({epoch_date}) failed: {exc}")
+            continue
 
-                # Run scoring for this specific epoch (silently)
-                # This simulates what the scoring would have been on that day
-                epoch_miner_history, epoch_gp_history, epoch_miners_scores, epoch_gp_scores, epoch_mp_budget, epoch_gp_budget = score_miners(
-                    all_uids=all_uids,
-                    all_hotkeys=all_hotkeys,
-                    trading_history=epoch_trades,
-                    current_epoch_budget=current_epoch_budget,
-                    verbose=False,
-                    target_epoch_idx=epoch_idx
-                )
-                
-                # Debug budget info
-                if debug:
-                    print(f"  -> MP budget: ${epoch_mp_budget:.2f}, GP budget: ${epoch_gp_budget:.2f}")
-                
-                mp_payout = np.sum(epoch_miners_scores['tokens']) if 'tokens' in epoch_miners_scores else 0.0
-                gp_payout = np.sum(epoch_gp_scores['tokens']) if 'tokens' in epoch_gp_scores else 0.0
-                
-                # Debug info
-                if debug:
-                    print(f"  -> MP entities: {epoch_miner_history['n_entities']}, GP entities: {epoch_gp_history['n_entities']}")
-                    print(f"  -> MP eligible: {epoch_miners_scores['sol1']['num_eligible'] if epoch_miners_scores['sol1'] else 0}, GP eligible: {epoch_gp_scores['sol1']['num_eligible'] if epoch_gp_scores['sol1'] else 0}")
-                
-                # More detailed debugging for optimization results
-                if debug:
-                    if epoch_miners_scores['sol1']:
-                        print(f"  -> MP Phase 1 status: {epoch_miners_scores['sol1']['status']}, T*: ${epoch_miners_scores['sol1']['T_star']:.2f}")
-                    if epoch_gp_scores['sol1']:
-                        print(f"  -> GP Phase 1 status: {epoch_gp_scores['sol1']['status']}, T*: ${epoch_gp_scores['sol1']['T_star']:.2f}")
-                
-                # Debug eligibility details for a few entities
-                if epoch_miner_history['n_entities'] > 0:
-                    total_vol = np.sum(epoch_miner_history['qualified_prev'], axis=0)
-                    if debug:
-                        print(f"  -> MP total volume range: ${np.min(total_vol):.2f} - ${np.max(total_vol):.2f}")
-                        print(f"  -> MP entities with vol>0: {np.sum(total_vol > 0)}")
-                
-                # Debug ramp constraint
-                if epoch_miners_scores['sol1'] and epoch_miners_scores['sol1']['x_star'] is not None:
-                    x_star = epoch_miners_scores['sol1']['x_star']
-                    if debug:
-                        print(f"  -> MP max x_star: {np.max(x_star):.4f}, entities with x>0: {np.sum(x_star > 1e-6)}")
-                    
-                    # Debug budget per eligible entity
-                    eligible_count = epoch_miners_scores['sol1']['num_eligible']
-                    if eligible_count > 0:
-                        budget_per_eligible = epoch_mp_budget / eligible_count
-                        if debug:
-                            print(f"  -> MP budget per eligible: ${budget_per_eligible:.2f}")
-                        
-                        # Debug ROI for comparison between epochs
-                        if epoch_idx in [25, 28, 29]:  # Compare a few epochs
-                            if epoch_miner_history['n_entities'] > 0:
-                                # Calculate ROI from the data we have
-                                total_vol = np.sum(epoch_miner_history['qualified_prev'], axis=0)
-                                total_profit = np.sum(epoch_miner_history['profit_prev'], axis=0)
-                                roi_trailing = np.divide(total_profit, np.maximum(total_vol, 1e-12))
-                                
-                                funded_mask = x_star > 1e-6
-                                if np.any(funded_mask):
-                                    funded_rois = roi_trailing[funded_mask]
-                                    if debug:
-                                        print(f"  -> EPOCH {epoch_idx}: ROI range for funded entities: {np.min(funded_rois):.4f} to {np.max(funded_rois):.4f}")
-                                        print(f"  -> EPOCH {epoch_idx}: Entities with ROI > 0: {np.sum(funded_rois > 0)}")
-                                        print(f"  -> EPOCH {epoch_idx}: Entities with ROI <= 0: {np.sum(funded_rois <= 0)}")
-                                else:
-                                    if debug:
-                                        print(f"  -> EPOCH {epoch_idx}: No entities funded, but ROI range for all: {np.min(roi_trailing):.4f} to {np.max(roi_trailing):.4f}")
-                                        print(f"  -> EPOCH {epoch_idx}: All entities with ROI > 0: {np.sum(roi_trailing > 0)}")
-                                
-                                # Debug constraint analysis
-                                if epoch_miners_scores['sol1']:
-                                    T_star = epoch_miners_scores['sol1']['T_star']
-                                    if debug:
-                                        print(f"  -> EPOCH {epoch_idx}: T* = ${T_star:.2f}, Budget = ${epoch_mp_budget:.2f}")
-                                        if T_star > 0:
-                                            print(f"  -> EPOCH {epoch_idx}: Budget utilization: {T_star/epoch_mp_budget*100:.1f}%")
-                                        else:
-                                            print(f"  -> EPOCH {epoch_idx}: Why is T* = 0 when ROI > 0 and budget exists?")
-                                        
-                                    # Debug kappa constraint
-                                    if debug:
-                                        if epoch_miner_history['n_epochs'] < 5:
-                                            print(f"  -> EPOCH {epoch_idx}: Using bootstrap kappa = 0.05 (n_epochs = {epoch_miner_history['n_epochs']})")
-                                        else:
-                                            print(f"  -> EPOCH {epoch_idx}: Using calculated kappa (n_epochs = {epoch_miner_history['n_epochs']})")
-                                    
-                                    # Check if ROI violates kappa constraint
-                                    max_roi = np.max(roi_trailing)
-                                    if debug:
-                                        print(f"  -> EPOCH {epoch_idx}: Max ROI = {max_roi:.4f} ({max_roi*100:.1f}%)")
-                                    
-                                    # The constraint violation message is misleading - let's see actual kappa
-                                    # We need to get the actual calculated kappa value
-                                    if debug:
-                                        print(f"  -> EPOCH {epoch_idx}: Need to check actual calculated kappa value")
-                
-                if debug:
-                    print(f"  -> MP payout: ${mp_payout:.2f}, GP payout: ${gp_payout:.2f}")
-                mp_payouts[epoch_idx] = mp_payout
-                gp_payouts[epoch_idx] = gp_payout
-            else:
-                if debug:
-                    print(f"  -> No trades found")
-                mp_payouts[epoch_idx] = 0.0
-                gp_payouts[epoch_idx] = 0.0
-                
-        except Exception as e:
-            # If scoring fails for this epoch, set to $0
-            print(f"Warning: Could not calculate payouts for epoch {epoch_idx}: {e}")
-            mp_payouts[epoch_idx] = 0.0
-            gp_payouts[epoch_idx] = 0.0
-    
-    return mp_payouts, gp_payouts
+        out["mp_payout"][epoch_idx] = float(np.sum(m_scores["tokens"]))
+        out["gp_payout"][epoch_idx] = float(np.sum(g_scores["tokens"]))
+        out["mp_budget"][epoch_idx] = m_budget
+        out["gp_budget"][epoch_idx] = g_budget
+        out["mp_active"][epoch_idx] = int(np.sum(m_scores["active"]))
+        out["mp_dust"][epoch_idx] = int(np.sum(m_scores["dormant"]))
+        out["mp_undist"][epoch_idx] = m_scores["undistributed"]
+
+        if debug:
+            print(
+                f"  epoch {epoch_idx:>2} {epoch_date}: {len(epoch_trades):>6} trades  "
+                f"budget ${m_budget:>10,.2f}  paid ${out['mp_payout'][epoch_idx]:>10,.2f}  "
+                f"active {int(out['mp_active'][epoch_idx]):>3}  dust {int(out['mp_dust'][epoch_idx]):>3}"
+            )
+
+    return out
 
 
-def create_daily_stats_table(miner_history, general_pool_history, miners_scores=None, general_pool_scores=None, 
-                            historical_mp_payouts=None, historical_gp_payouts=None):
-    """Create a table of daily stats showing epoch, date, volume, budget, and payouts."""
-    n_epochs = miner_history['n_epochs']
-    epoch_dates = miner_history['epoch_dates']
-    
-    table_data = []
-    for epoch_idx in range(n_epochs):
-        # Calculate miner pool raw volume (qualified + unqualified) and budget for this epoch
-        miner_qualified_volume = np.sum(miner_history['qualified_prev'][epoch_idx]) if miner_history['n_entities'] > 0 else 0.0
-        miner_unqualified_volume = np.sum(miner_history['unqualified_prev'][epoch_idx]) if miner_history['n_entities'] > 0 else 0.0
-        miner_volume = miner_qualified_volume + miner_unqualified_volume
-        raw_miner_budget = np.sum(miner_history['fees_prev'][epoch_idx]) if miner_history['n_entities'] > 0 else 0.0
-        
-        # Calculate general pool raw volume (qualified + unqualified) and budget for this epoch
-        gp_qualified_volume = np.sum(general_pool_history['qualified_prev'][epoch_idx]) if general_pool_history['n_entities'] > 0 else 0.0
-        gp_unqualified_volume = np.sum(general_pool_history['unqualified_prev'][epoch_idx]) if general_pool_history['n_entities'] > 0 else 0.0
-        gp_volume = gp_qualified_volume + gp_unqualified_volume
-        raw_gp_budget = np.sum(general_pool_history['fees_prev'][epoch_idx]) if general_pool_history['n_entities'] > 0 else 0.0
-        
-        # Calculate totals
-        total_volume = miner_volume + gp_volume
-        total_budget = raw_miner_budget + raw_gp_budget
-        mp_budget = total_budget * MINER_WEIGHT_PERCENTAGE
-        gp_budget = total_budget * GENERAL_POOL_WEIGHT_PERCENTAGE
-        total_budget = mp_budget + gp_budget
-        
-        # Get payouts for this epoch
-        if epoch_idx == n_epochs - 1:
-            mp_payouts = 0.0
-            gp_payouts = 0.0
-            # Current epoch (most recent) - use provided payouts
-            if miners_scores is not None and general_pool_scores is not None:
-                if 'tokens' in miners_scores:
-                    mp_payouts = np.sum(miners_scores['tokens'])
-                if 'tokens' in general_pool_scores:
-                    gp_payouts = np.sum(general_pool_scores['tokens'])
+def print_daily_stats(miner_history, general_pool_history, hist, miners_scores, general_pool_scores):
+    """Per-epoch volume, budget, payout and tier counts."""
+    n_epochs = miner_history["n_epochs"]
+    dates = miner_history["epoch_dates"]
+    rows = []
+
+    for i in range(n_epochs):
+        def _vol(h):
+            if h["n_entities"] == 0:
+                return 0.0
+            return float(np.sum(h["qualified_prev"][i]) + np.sum(h["unqualified_prev"][i]))
+
+        mp_vol, gp_vol = _vol(miner_history), _vol(general_pool_history)
+        mp_budget, gp_budget = hist["mp_budget"][i], hist["gp_budget"][i]
+
+        if i == n_epochs - 1:
+            mp_pay = float(np.sum(miners_scores["tokens"]))
+            gp_pay = float(np.sum(general_pool_scores["tokens"]))
+            active = int(np.sum(miners_scores["active"]))
+            dust = int(np.sum(miners_scores["dormant"]))
+            undist = miners_scores["undistributed"]
         else:
-            # Historical epochs - use pre-calculated payouts
-            if historical_mp_payouts is not None and historical_gp_payouts is not None:
-                mp_payouts = historical_mp_payouts[epoch_idx]
-                gp_payouts = historical_gp_payouts[epoch_idx]
-            else:
-                mp_payouts = 0.0
-                gp_payouts = 0.0
-        
-        total_payouts = mp_payouts + gp_payouts
-        
-        # Calculate payout percentage (payout / budget)
-        payout_percentage = (total_payouts / total_budget * 100) if total_budget > 0 else 0.0
-        
-        # Calculate joint_kappa for both pools for this epoch
-        # We need to simulate what the kappa would have been as of this epoch
-        # by using only the data up to and including this epoch
-        mp_kappa = calculate_historical_kappa(miner_history, general_pool_history, epoch_idx, pool_type="miner")
-        gp_kappa = calculate_historical_kappa(miner_history, general_pool_history, epoch_idx, pool_type="general")
+            mp_pay, gp_pay = hist["mp_payout"][i], hist["gp_payout"][i]
+            active, dust = int(hist["mp_active"][i]), int(hist["mp_dust"][i])
+            undist = hist["mp_undist"][i]
 
-        table_data.append([
-            epoch_idx,
-            epoch_dates[epoch_idx],
-            f"${miner_volume:,.0f}",
-            f"${gp_volume:,.0f}",
-            f"${total_volume:,.0f}",
-            f"${raw_miner_budget:,.0f}",
-            f"${raw_gp_budget:,.0f}",
-            f"${mp_budget:,.0f}",
-            f"${gp_budget:,.0f}",
-            f"${total_budget:,.0f}",
-            f"{mp_kappa:.6f}",
-            f"{gp_kappa:.6f}",
-            f"${mp_payouts:,.0f}",
-            f"${gp_payouts:,.0f}",
-            f"${total_payouts:,.0f}",
-            f"{payout_percentage:.1f}%"
+        total_budget = mp_budget + gp_budget
+        total_pay = mp_pay + gp_pay
+        rows.append([
+            i, dates[i],
+            f"${mp_vol:,.0f}", f"${gp_vol:,.0f}",
+            f"${mp_budget:,.0f}", f"${gp_budget:,.0f}",
+            active, dust,
+            f"${mp_pay:,.0f}", f"${gp_pay:,.0f}",
+            f"${undist:,.0f}",
+            f"{(total_pay / total_budget * 100) if total_budget > 0 else 0:.1f}%",
         ])
-    
-    print(f"Completed daily stats table with {len(table_data)} rows")
-    return table_data
+
+    headers = ["Ep", "Date", "MP Vol", "GP Vol", "MP Budget", "GP Budget",
+               "Active", "Dust", "MP Payout", "GP Payout", "MP Burned", "Used %"]
+    print(tabulate(rows, headers=headers, tablefmt="grid", stralign="right"))
 
 
-def calculate_historical_kappa(miner_history, general_pool_history, epoch_idx, pool_type="miner"):
-    """
-    Calculate joint_kappa for a specific historical epoch and pool type.
-    This simulates what the kappa would have been as of that epoch.
-    
-    Args:
-        pool_type: "miner" or "general" to specify which pool's kappa to calculate
-    """
-    # Create a subset of the history up to and including the target epoch
-    if pool_type == "miner":
-        subset_history = {
-            "qualified_prev": miner_history["qualified_prev"][:epoch_idx+1],
-            "profit_prev": miner_history["profit_prev"][:epoch_idx+1],
-            "n_epochs": epoch_idx + 1
-        }
-    else:  # general pool
-        subset_history = {
-            "qualified_prev": general_pool_history["qualified_prev"][:epoch_idx+1],
-            "profit_prev": general_pool_history["profit_prev"][:epoch_idx+1],
-            "n_epochs": epoch_idx + 1
-        }
-    
-    # Calculate kappa for the specified pool
-    try:
-        # Check if we have enough data for kappa calculation
-        if subset_history["n_epochs"] < 5:
-            return KAPPA_NEXT
-        
-        kappa = compute_joint_kappa_from_history(subset_history)
-        return kappa
-    except Exception as e:
-        # Fallback to default kappa if calculation fails
-        print(f"Kappa calculation failed for {pool_type} pool at epoch {epoch_idx}: {e}")
-        return KAPPA_NEXT
+# ---------------------------------------------------------------------------
+# Pool tables
+# ---------------------------------------------------------------------------
 
-def print_results(miner_history, general_pool_history, miners_scores, general_pool_scores, 
-                  miner_budget, gp_budget, historical_mp_payouts, historical_gp_payouts):
-    """Print formatted results from scoring."""
-    
-    print("\n" + "="*80)
-    print("SCORING SIMULATION RESULTS")
-    print("="*80)
-    
-    # Daily stats table
-    print(f"\n--- DAILY STATS (Last {ROLLING_HISTORY_IN_DAYS} Epochs) ---")
-    daily_stats = create_daily_stats_table(
-        miner_history, 
-        general_pool_history, 
-        miners_scores, 
-        general_pool_scores,
-        historical_mp_payouts,
-        historical_gp_payouts
+def print_pool_table(history, scores, budget, label, top_n=None):
+    """Per-trader breakdown: history, edge, epoch activity, payout."""
+    n = history["n_entities"]
+    if n == 0:
+        print(f"\n--- {label} --- (no entities)")
+        return
+
+    cur = history["n_epochs"] - 1
+    vol_m, pnl_m, fee_m, trd_m = (
+        history["volume_prev"], history["profit_prev"],
+        history["fees_prev"], history["trade_counts"],
     )
-    headers = ["Epoch", "Date", "MP Vol", "GP Vol", "Volume", "Raw MP Fees", "Raw GP Fees", "MP Fees", "GP Fees", "Fees", "MP Kappa", "GP Kappa", "MP Payout", "GP Payout", "Payout", "Payout %"]
-    print(tabulate(daily_stats, headers=headers, tablefmt="grid", stralign="right"))
-    
-    # Budget information
-    print("\n--- BUDGET ALLOCATION ---")
-    print(f"Miner Pool Budget:        ${miner_budget:,.2f}")
-    print(f"General Pool Budget:      ${gp_budget:,.2f}")
-    print(f"Total Budget:             ${miner_budget + gp_budget:,.2f}")
-    
-    # Miner pool results
-    print("\n--- MINER POOL RESULTS ---")
-    print(f"Number of miners:         {miner_history['n_entities']}")
-    print(f"Eligible miners:          {miners_scores['sol1']['num_eligible'] if miners_scores['sol1'] else 0}")
-    print(f"Funded miners:            {miners_scores['sol1']['num_funded'] if miners_scores['sol1'] else 0}")
-    
-    if miners_scores['sol1']:
-        print(f"Phase 1 Status:           {miners_scores['sol1']['status']}")
-        print(f"Phase 1 T*:               ${miners_scores['sol1']['T_star']:,.2f}")
-        print(f"Phase 1 Payout:           ${miners_scores['sol1']['payout']:,.2f}")
-    
-    if miners_scores['sol2']:
-        print(f"Phase 2 Status:           {miners_scores['sol2']['status']}")
-        print(f"Phase 2 Payout:           ${miners_scores['sol2']['payout']:,.2f}")
+    edge = scores["edge"]
+    tokens = scores["tokens"]
 
-    print("\n--- DUST GATE DIAGNOSTICS ---")
-    print(f"Dust gate constant: {DUST_GATE}")
-    print_dust_gate_diagnostics(
-        miners_scores.get('sol1'),
-        miners_scores.get('sol2'),
-        dust_gate=DUST_GATE,
-        verbose=True,
+    rows = []
+    for j, eid in enumerate(history["entity_ids"]):
+        tv = float(vol_m[:, j].sum())
+        tp = float(pnl_m[:, j].sum())
+        ev, ep, ef = float(vol_m[cur, j]), float(pnl_m[cur, j]), float(fee_m[cur, j])
+        et = int(trd_m[cur, j])
+        tier = "active" if scores["active"][j] else ("dust" if scores["dormant"][j] else "gated")
+        rows.append([
+            str(eid), tier,
+            int(np.sum(trd_m[:, j] > 0)), int(trd_m[:, j].sum()),
+            f"${tv:,.0f}", f"${tp:,.2f}",
+            f"{(tp / tv * 100) if tv else 0:.2f}%",
+            f"{edge[j] * 100:.2f}%",
+            et, f"${ev:,.0f}", f"${ep:,.2f}",
+            f"{(ep / ev * 100) if ev else 0:.2f}%",
+            f"${ef:,.2f}",
+            f"{tokens[j]:,.2f}",
+            f"{(tokens[j] / budget * 100) if budget > 0 else 0:.2f}%",
+            f"{tokens[j] / ef:.2f}x" if ef > 0 else "-",
+        ])
+
+    rows.sort(key=lambda r: -float(r[13].replace(",", "")))
+    if top_n:
+        rows = rows[:top_n]
+
+    print(f"\n--- {label} (budget ${budget:,.2f}) ---")
+    print(tabulate(rows, headers=[
+        "ID", "Tier", "Eps", "Preds", "30d Vol", "30d PnL", "30d ROI",
+        "Edge", "Ep Preds", "Ep Vol", "Ep PnL", "Ep ROI", "Ep Fees",
+        "Earnings", "Share", "vs Fees",
+    ], tablefmt="grid", stralign="right"))
+
+
+# ---------------------------------------------------------------------------
+# Mechanism diagnostics
+# ---------------------------------------------------------------------------
+
+def print_mechanism_diagnostics(miner_history, miners_scores, miner_budget):
+    print("\n--- MECHANISM DIAGNOSTICS ---")
+    print(
+        f"alpha={PARETO_ALPHA}  edge_decay={EDGE_DECAY}  shrinkage=${EDGE_SHRINKAGE_VOLUME:,.0f}  "
+        f"edge_cap={EDGE_CAP:.0%}\ncap={CONCENTRATION_CAP:.0%} (relax {CAP_RELAX_FACTOR}x)  "
+        f"fee_floor={FEE_FLOOR_MULTIPLIER:.0%}  dust_reserve={DUST_RESERVE_SHARE:.0%}  "
+        f"inactivity={INACTIVITY_EPOCHS} epochs"
     )
-    if miners_scores.get('sol1') and miners_scores.get('sol2') and miners_scores['sol1'].get('x_star') is not None and miners_scores['sol2'].get('x_star') is not None:
-        x1 = miners_scores['sol1']['x_star']
-        x2 = miners_scores['sol2']['x_star']
-        tokens = miners_scores['tokens']
-        entity_ids = miners_scores['entity_ids']
-        at_dust = x2 >= DUST_GATE - 1e-9
-        with_tokens = tokens >= 0.01
-        print(f"Miners at dust gate after Phase 2: {int(np.sum(at_dust))}")
-        print(f"Miners with tokens >= $0.01: {int(np.sum(with_tokens))}")
-        lost = (x1 >= DUST_GATE - 1e-9) & (x2 < DUST_GATE - 1e-9)
-        if np.any(lost):
-            print("Miners who lost dust gate in Phase 2:")
-            for idx in np.where(lost)[0]:
-                print(f"  PID {entity_ids[idx]}: x1={x1[idx]:.4f} -> x2={x2[idx]:.6f}")
-    
-    # Top miners
-    if len(miners_scores['scores']) > 0:
-        print("\n--- TOP 10 MINERS BY SCORE ---")
-        scores = miners_scores['scores']
-        entity_ids = miners_scores['entity_ids']
-        
-        # Sort by score
-        sorted_indices = np.argsort(scores)[::-1]
-        
-        print(f"{'Rank':<6} {'Miner ID':<10} {'Score':<15} {'Tokens':<10} {'ROI':<10}")
-        print("-" * 60)
-        for i, idx in enumerate(sorted_indices[:50]):
-            if scores[idx] > 1e-9:  # Only show non-zero scores
-                miner_id = entity_ids[idx]
-                score = scores[idx]
-                tokens = miners_scores['tokens'][idx]
-                roi = miners_scores['roi_trailing'][idx]
-                print(f"{i+1:<6} {miner_id:<10} {score:<14.4f} ${tokens:<10.2f} {roi:<10.4f}")
-    
-    # General pool results
-    print("\n--- GENERAL POOL RESULTS ---")
-    print(f"Number of users:          {general_pool_history['n_entities']}")
-    print(f"Eligible users:           {general_pool_scores['sol1']['num_eligible'] if general_pool_scores['sol1'] else 0}")
-    print(f"Funded users:             {general_pool_scores['sol1']['num_funded'] if general_pool_scores['sol1'] else 0}")
-    
-    if general_pool_scores['sol1']:
-        print(f"Phase 1 Status:           {general_pool_scores['sol1']['status']}")
-        print(f"Phase 1 T*:               ${general_pool_scores['sol1']['T_star']:,.2f}")
-        print(f"Phase 1 Payout:           ${general_pool_scores['sol1']['payout']:,.2f}")
-    
-    if general_pool_scores['sol2']:
-        print(f"Phase 2 Status:           {general_pool_scores['sol2']['status']}")
-        print(f"Phase 2 Payout:           ${general_pool_scores['sol2']['payout']:,.2f}")
-    
-    # Top general pool users
-    if len(general_pool_scores['scores']) > 0:
-        print("\n--- TOP 10 GENERAL POOL USERS BY SCORE ---")
-        scores = general_pool_scores['scores']
-        entity_ids = general_pool_scores['entity_ids']
-        
-        # Sort by score
-        sorted_indices = np.argsort(scores)[::-1]
-        
-        print(f"{'Rank':<6} {'Profile ID':<20} {'Score':<15} {'Tokens':<10} {'ROI':<10}")
-        print("-" * 70)
-        for i, idx in enumerate(sorted_indices[:10]):
-            if scores[idx] > 1e-9:  # Only show non-zero scores
-                profile_id = entity_ids[idx]
-                score = scores[idx]
-                tokens = general_pool_scores['tokens'][idx]
-                roi = general_pool_scores['roi_trailing'][idx]
-                print(f"{i+1:<6} {profile_id:<20} {score:<14.4f} ${tokens:<10.2f} {roi:<10.4f}")
-    
-    # Summary statistics
-    print("\n--- SUMMARY STATISTICS ---")
-    total_miner_payout = np.sum(miners_scores['tokens']) if 'tokens' in miners_scores else 0.0
-    total_gp_payout = np.sum(general_pool_scores['tokens']) if 'tokens' in general_pool_scores else 0.0
-    print(f"Total Miner Payouts:      ${total_miner_payout:,.2f}")
-    print(f"Total GP Payouts:         ${total_gp_payout:,.2f}")
-    print(f"Total Payouts:            ${total_miner_payout + total_gp_payout:,.2f}")
-    print(f"Miner Budget Utilization: {(total_miner_payout/miner_budget*100) if miner_budget > 0 else 0:.1f}%")
-    print(f"GP Budget Utilization:    {(total_gp_payout/gp_budget*100) if gp_budget > 0 else 0:.1f}%")
-    
-    print("\n" + "="*80 + "\n")
 
-def fetch_tao_price():
-    """Fetch the $TAO price from the API."""
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
-    response = requests.get(url)
-    response.raise_for_status()
-    return response.json()['bittensor']['usd']
+    tokens, active, dormant = miners_scores["tokens"], miners_scores["active"], miners_scores["dormant"]
+    n = miner_history["n_entities"]
+    gated = n - int(active.sum()) - int(dormant.sum())
+    print(
+        f"\nTiers: active={int(active.sum())}  dust={int(dormant.sum())}  "
+        f"gated/inactive={gated}  total={n}"
+    )
+    print(f"Paid (tokens > 0): {int(np.sum(tokens > 0))}")
+
+    # --- budget accounting ---
+    dist = miners_scores["distributed"]
+    print(
+        f"\nBudget: ${miner_budget:,.2f}  distributed ${dist:,.2f} "
+        f"({(dist / miner_budget * 100) if miner_budget else 0:.1f}%)  "
+        f"burned ${miners_scores['undistributed']:,.2f}"
+    )
+    assert dist <= miner_budget + 1e-6, "BUDGET VIOLATION"
+    print("Budget constraint: OK")
+
+    # --- concentration ---
+    n_scoring = max(int(np.sum(miners_scores["scores"] > 0)), 1)
+    cap_eff = max(CONCENTRATION_CAP, CAP_RELAX_FACTOR / n_scoring)
+    if miner_budget > 0:
+        top = tokens.max() / miner_budget
+        n_at_cap = int(np.sum(tokens / miner_budget >= cap_eff - 1e-6))
+        print(
+            f"Concentration: top share {top:.2%}, effective cap {cap_eff:.2%} "
+            f"({n_scoring} scoring), {n_at_cap} at cap"
+        )
+        if n_at_cap >= max(3, n_scoring // 2):
+            print(
+                "  NOTE: cap is binding for most payees — payouts are flattening. "
+                "Raise CAP_RELAX_FACTOR or lower CONCENTRATION_CAP deliberately."
+            )
+
+    # --- edge distribution ---
+    edge = miners_scores["edge"]
+    live = edge[active | dormant]
+    if live.size:
+        print(
+            f"Edge: zero={int(np.sum(live <= 0))}  at cap={int(np.sum(live >= EDGE_CAP - 1e-9))}  "
+            f"median={np.median(live[live > 0]) * 100 if np.any(live > 0) else 0:.2f}%"
+        )
+
+    # --- dust ranking ---
+    if dormant.any():
+        d = np.sort(tokens[dormant])[::-1]
+        print(
+            f"Dust: {d.size} miners, total ${d.sum():,.2f}, "
+            f"range ${d.min():,.4f}-${d.max():,.4f} "
+            f"(ratio {d.min() / d.max():.2f}, target {DUST_MIN_RATIO})"
+        )
+        assert np.all(d > 0), "DUST FAILURE: dormant miner scored zero"
+        print("Dust floor: OK (no dormant miner at zero)")
+
+    # --- fee floor ---
+    cur = miner_history["n_epochs"] - 1
+    fees = miner_history["fees_prev"][cur]
+    floored = active & (miners_scores["edge"] > 0) & (fees > 0)
+    if floored.any():
+        ratio = tokens[floored] / fees[floored]
+        print(
+            f"Fee return (active, positive edge): min {ratio.min():.2f}x  "
+            f"median {np.median(ratio):.2f}x  max {ratio.max():.2f}x"
+        )
+
+    # --- build-up gate cost ---
+    trd = miner_history["trade_counts"]
+    blocked = (
+        (np.sum(trd > 0, axis=0) < MIN_EPOCHS_FOR_ELIGIBILITY)
+        | (np.sum(trd, axis=0) < MIN_TRADES_FOR_ELIGIBILITY)
+    ) & (miner_history["volume_prev"][cur] > 0)
+    if blocked.any():
+        print(
+            f"Build-up gate: {int(blocked.sum())} miners traded this epoch but are "
+            f"still in build-up (paid ${fees[blocked].sum():,.2f} in fees, earned nothing)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    """Main simulation function."""
-    parser = argparse.ArgumentParser(description="Simulate validator market scoring")
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Python log level for simulation output.",
-    )
+    parser = argparse.ArgumentParser(description="Simulate scoring_v2 against trading history")
+    parser.add_argument("--log-level", default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--offline", action="store_true",
+                        help="Skip subtensor/coingecko; use a fixed alpha price")
+    parser.add_argument("--no-replay", action="store_true",
+                        help="Score the current epoch only, skip the historical replay")
+    parser.add_argument("--top", type=int, default=None,
+                        help="Limit pool tables to the top N by payout")
+    parser.add_argument("--history", type=Path, default=_TRADING_HISTORY_PATH)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     )
 
-    print(f"Loading trading history from {_TRADING_HISTORY_PATH}...")
-    if not _TRADING_HISTORY_PATH.exists():
-        raise FileNotFoundError(f"Trading history not found: {_TRADING_HISTORY_PATH}")
-    with open(_TRADING_HISTORY_PATH, 'r') as f:
+    print(f"Loading trading history from {args.history}...")
+    if not args.history.exists():
+        raise FileNotFoundError(f"Trading history not found: {args.history}")
+    with open(args.history) as f:
         trading_history = json.load(f)
-        
+    if isinstance(trading_history, dict):
+        trading_history = trading_history.get("data", trading_history)
     print(f"Loaded {len(trading_history)} trades")
-    
-    # Extract miner information
-    print("\nExtracting miner information...")
+
     all_uids, all_hotkeys = extract_miner_info(trading_history)
-    
-    # Ensure all_hotkeys list is large enough to handle BURN_UID and any other UIDs
-    # BURN_UID is 210, so we need at least 211 elements (0-indexed)
-    max_uid_from_trades = max(all_uids) if all_uids else 0
-    max_uid_needed = max(BURN_UID, max_uid_from_trades)
+    print(f"Found {len(all_uids)} unique miners")
+
+    # Pad hotkeys / UID list for the special UIDs.
+    max_uid = max([BURN_UID] + all_uids + ([EXCESS_MINER_WEIGHT_UID] if EXCESS_MINER_WEIGHT_UID else []))
+    if len(all_hotkeys) <= max_uid:
+        all_hotkeys.extend([""] * (max_uid + 1 - len(all_hotkeys)))
+    weight_uids = list(all_uids)
     if EXCESS_MINER_WEIGHT_UID is not None:
-        max_uid_needed = max(max_uid_needed, EXCESS_MINER_WEIGHT_UID)
-    
-    if len(all_hotkeys) <= max_uid_needed:
-        all_hotkeys.extend([""] * (max_uid_needed + 1 - len(all_hotkeys)))
-    
-    # Add EXCESS_MINER_WEIGHT_UID and BURN_UID to the list of UIDs
-    if EXCESS_MINER_WEIGHT_UID is not None:
-        all_uids.insert(0, EXCESS_MINER_WEIGHT_UID)
-    all_uids.append(BURN_UID)
-    
-    miner_count = len([uid for uid in all_uids if uid not in [EXCESS_MINER_WEIGHT_UID, BURN_UID]])
-    print(f"Found {miner_count} unique miners from trading history")
-    print(f"All UIDs (including special UIDs): {all_uids}")
-    
-    # Run the scoring function
-    print("\nRunning scoring algorithm...")
-    print("This may take a moment...\n")
+        weight_uids.insert(0, EXCESS_MINER_WEIGHT_UID)
+    weight_uids.append(BURN_UID)
 
-    subtensor = bt.Subtensor(network="finney")
-    metagraph = subtensor.subnets.metagraph(41)
+    current_epoch_budget = resolve_epoch_budget(args.offline)
+    print(f"Subnet epoch (24h) emission budget: ${current_epoch_budget:,.2f}\n")
 
-    # Fetch the $TAO price
-    tao_price_usd = fetch_tao_price()
-    alpha_price_usd = metagraph.moving_price * tao_price_usd
-    print(f"TAO price: {tao_price_usd:.2f} USD")
-    print(f"Alpha price: {alpha_price_usd:.2f} USD")
+    print("Scoring current epoch...")
+    (miner_history, general_pool_history, miners_scores,
+     general_pool_scores, miner_budget, gp_budget) = score_miners(
+        all_uids=all_uids,
+        all_hotkeys=all_hotkeys,
+        trading_history=trading_history,
+        current_epoch_budget=current_epoch_budget,
+        verbose=True,
+    )
 
-    current_epoch_budget = alpha_price_usd * TOTAL_MINER_ALPHA_PER_DAY
-    print(f"Current epoch (24h) budget: {current_epoch_budget:.2f} USD")
-    print()
-    
-    miner_history, general_pool_history, miners_scores, general_pool_scores, \
-        miner_budget, gp_budget = score_miners(
-            all_uids=all_uids,
-            all_hotkeys=all_hotkeys,
-            trading_history=trading_history,
-            current_epoch_budget=current_epoch_budget,
-            verbose=True,
+    if args.no_replay:
+        n = miner_history["n_epochs"]
+        hist = {k: np.zeros(n) for k in
+                ("mp_payout", "gp_payout", "mp_budget", "gp_budget",
+                 "mp_active", "mp_dust", "mp_undist")}
+        hist["mp_budget"][-1] = miner_budget
+        hist["gp_budget"][-1] = gp_budget
+    else:
+        hist = calculate_historical_payouts(
+            miner_history, all_uids, all_hotkeys, trading_history, debug=args.debug
         )
-    
-    # Calculate historical payouts for all epochs
-    historical_mp_payouts, historical_gp_payouts = calculate_historical_payouts(
-        miner_history, general_pool_history, all_uids, all_hotkeys, trading_history, debug=False
-    )
 
-    # Print scoring results
-    print_results(
-        miner_history, 
-        general_pool_history, 
-        miners_scores, 
-        general_pool_scores,
-        miner_budget,
-        gp_budget,
-        historical_mp_payouts,
-        historical_gp_payouts
-    )
-    
-    # Print historical pool statistics first
-    print("\n############################## OVERALL POOL STATS ##############################")
-    print_pool_stats(miner_history, general_pool_history)
-    print("##################################################################################\n")
-    print("\n########################## CURRENT EPOCH POOL STATS ############################")
-    print_pool_stats(miner_history, general_pool_history, include_current_epoch=True, miner_scores=miners_scores, general_pool_scores=general_pool_scores)
-    print("##################################################################################\n")
+    print("\n" + "=" * 80)
+    print("SCORING v2 SIMULATION RESULTS")
+    print("=" * 80)
 
-    # Calculate the weights for the miners and general pool
+    print(f"\n--- DAILY STATS (last {ROLLING_HISTORY_IN_DAYS} epochs) ---")
+    print_daily_stats(miner_history, general_pool_history, hist, miners_scores, general_pool_scores)
+
+    print("\n--- BUDGET ---")
+    print(f"Miner pool (fees):   ${miner_budget:,.2f}")
+    print(f"General pool (fees): ${gp_budget:,.2f}")
+    print(f"Total distributable: ${miner_budget + gp_budget:,.2f}")
+    print(f"Subnet emission:     ${current_epoch_budget:,.2f}")
+
+    print_pool_table(miner_history, miners_scores, miner_budget, "MINER POOL", args.top)
+    print_pool_table(general_pool_history, general_pool_scores, gp_budget, "GENERAL POOL", args.top)
+
+    print_mechanism_diagnostics(miner_history, miners_scores, miner_budget)
+
+    print("\n--- WEIGHTS ---")
     weights = calculate_weights(
         miners_scores,
         general_pool_scores,
@@ -611,30 +462,30 @@ def main():
         miner_budget,
         gp_budget,
         [],
-        all_uids
+        weight_uids,
+        verbose=True,
     )
-    # Pretty print the weights
-    # The weights array is aligned with all_uids: weights[i] corresponds to all_uids[i]
-    print("\n--- WEIGHTS ---")
+    print(f"Miner pool weight boost: {MINER_POOL_WEIGHT_BOOST_PERCENTAGE:.0%}")
     print(f"Total weight sum: {sum(weights):.6f}")
-    print("-" * 80)
-    for i, weight in enumerate(weights):
-        if i < len(all_uids):
-            uid = all_uids[i]
-            # Print all weights (non-zero and special UIDs)
-            # This shows which miners received weights
-            if weight > 1e-9 or uid in [EXCESS_MINER_WEIGHT_UID, BURN_UID]:
-                uid_str = str(uid) if uid is not None else "None"
-                print(f"{uid_str:<6} {weight:.6f}")
-    print("-" * 80)
+    print("-" * 40)
+    for uid, w in zip(weight_uids, weights):
+        if w > 1e-9 or uid in (BURN_UID, EXCESS_MINER_WEIGHT_UID):
+            tag = " (burn)" if uid == BURN_UID else ""
+            print(f"{str(uid):<6} {w:.8f}{tag}")
+    print("-" * 40)
+
+    nz = [w for w in weights if w > 0]
+    if nz and min(nz) / max(nz) < U16_QUANT_FLOOR:
+        print(
+            f"\nWARNING: smallest weight is {min(nz) / max(nz):.2e} of the largest, "
+            f"below the u16 quantisation floor ({U16_QUANT_FLOOR:.2e}). "
+            "Dustings will round to zero on chain."
+        )
 
 
 if __name__ == "__main__":
     main()
-    print("Simulation complete. Exiting...")
-    # os._exit bypasses normal shutdown (needed: bittensor leaves threads that
-    # would otherwise hang), but it also skips flushing stdout. When output is
-    # redirected to a file, the buffer is block-sized and the tail is lost.
+    print("\nSimulation complete.")
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
