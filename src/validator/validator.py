@@ -829,6 +829,7 @@ class Validator:
                 netuid=netuid,
                 uids=[neuron.uid for neuron in self._bt.metagraph],
                 weights=weights.tolist(),
+                version_key=self._config.bittensor.weights_version_key,
             ),
             self._bt.wallet,
             wait_for_inclusion=True,
