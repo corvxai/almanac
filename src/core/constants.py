@@ -43,6 +43,10 @@ class BittensorDefaults:
     netuid: int = 0
     subtensor_network: str = "finney"
     signing_required: bool = True
+    # Must be >= on-chain WeightsVersionKey for the subnet (netuid 41 is currently 1).
+    # bt.SetWeights defaults to 0; on commit-reveal that fails only at reveal time,
+    # so commits succeed while the applied weight row never updates.
+    weights_version_key: int = 1
 
 
 @dataclass(frozen=True)

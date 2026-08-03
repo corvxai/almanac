@@ -62,6 +62,7 @@ class BittensorConfig(BaseModel):
     netuid: int = constants.BITTENSOR.netuid
     subtensor_network: str = constants.BITTENSOR.subtensor_network
     signing_required: bool = constants.BITTENSOR.signing_required
+    weights_version_key: int = constants.BITTENSOR.weights_version_key
 
 
 class StorageConfig(BaseModel):
