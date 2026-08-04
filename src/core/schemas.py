@@ -167,7 +167,7 @@ class EventSnapshot(BaseModel):
     event_title: str
     event_category: EventCategory
     event_subcategory: Optional[str] = None
-    resolution_criteria: str
+    resolution_criteria: Optional[str] = None
     resolution_deadline: datetime
     event_created_at: datetime
 

@@ -25,6 +25,8 @@ def assignment_to_event(
         raise ValueError("assignment.event.source is required")
 
     source_id = (assignment.event.sourceMarketId or "").strip() or assignment.event.marketId
+    # Description is agent-only; do not mirror it (or the question) into
+    # resolution_criteria — that field is included in sealed EventSnapshot traces.
     description = (assignment.event.description or "").strip() or title
 
     resolution_deadline = _ensure_aware_utc(assignment.event.endDate)
@@ -37,7 +39,7 @@ def assignment_to_event(
         description=description,
         category=EventCategory.OTHER,
         subcategory=None,
-        resolution_criteria=description,
+        resolution_criteria=None,
         resolution_deadline=resolution_deadline,
         created_at=created_at,
         source=source,

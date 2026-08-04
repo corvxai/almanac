@@ -19,7 +19,9 @@ class Event(BaseModel):
     description: str
     category: EventCategory
     subcategory: Optional[str] = None
-    resolution_criteria: str
+    # Optional; orchestrator assignments leave this unset so market description
+    # is agent-only and does not land in sealed EventSnapshot traces.
+    resolution_criteria: Optional[str] = None
     resolution_deadline: datetime
     created_at: datetime = Field(default_factory=lambda: datetime.utcnow())
     source: Optional[str] = None
