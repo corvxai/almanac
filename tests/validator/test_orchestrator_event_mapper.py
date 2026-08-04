@@ -59,7 +59,7 @@ def test_assignment_to_event_maps_core_fields() -> None:
 
     assert event.title == assignment.event.question
     assert event.description == "Binary event"
-    assert event.resolution_criteria == "Binary event"
+    assert event.resolution_criteria is None
     assert event.resolution_deadline == datetime(2026, 6, 6, 16, 0, tzinfo=timezone.utc)
     assert event.created_at == fixed_now
     assert event.category == EventCategory.OTHER
@@ -92,7 +92,7 @@ def test_assignment_to_event_fallbacks_description_and_source_id() -> None:
     event = assignment_to_event(assignment)
 
     assert event.description == assignment.event.question
-    assert event.resolution_criteria == assignment.event.question
+    assert event.resolution_criteria is None
     assert event.source_id == assignment.event.marketId
     assert event.event_id == uuid5(
         NAMESPACE_URL, f"{assignment.event.source}:{assignment.event.marketId}"
