@@ -173,6 +173,7 @@ def request_json(
     *,
     max_retries: int = 1,
     max_tokens: int = 900,
+    provider_id: str = "openrouter",
 ) -> Forecast:
     """Run a chat that must return a ``Forecast`` JSON object. Retries once with
     the failure appended (Instructor-style self-correction). Raises ``ValueError``
@@ -182,7 +183,10 @@ def request_json(
     messages = list(messages)
     last = ""
     for _ in range(max_retries + 1):
-        text = chat(ctx, model, messages, max_tokens=max_tokens, temperature=0.2)
+        text = chat(
+            ctx, model, messages,
+            max_tokens=max_tokens, temperature=0.2, provider_id=provider_id,
+        )
         forecast = parse_forecast(text)
         if forecast is not None:
             return forecast
@@ -211,13 +215,17 @@ def request_forecast(
     *,
     max_retries: int = 1,
     max_tokens: int = 900,
+    provider_id: str = "openrouter",
 ) -> Forecast:
     """Standard forecast: ask ``model`` for a validated ``Forecast`` on the event."""
     messages = [
         {"role": "system", "content": JSON_SYSTEM_PROMPT},
         {"role": "user", "content": build_json_prompt(title, description, context)},
     ]
-    return request_json(ctx, model, messages, max_retries=max_retries, max_tokens=max_tokens)
+    return request_json(
+        ctx, model, messages,
+        max_retries=max_retries, max_tokens=max_tokens, provider_id=provider_id,
+    )
 
 
 # --- belief-path builders ----------------------------------------------------
@@ -291,14 +299,14 @@ def extract_text(raw: dict) -> str:
 
 
 def chat(ctx, model: str, messages: list[dict], *, max_tokens: int = 1024,
-         temperature: float = 0.2) -> str:
+         temperature: float = 0.2, provider_id: str = "openrouter") -> str:
     """One chat_completion call through the gateway → assistant text.
 
     Returns "" on failure so callers can degrade gracefully rather than crash
     the whole run.
     """
     try:
-        raw = ctx.call_provider("openrouter", "chat_completion", {
+        raw = ctx.call_provider(provider_id, "chat_completion", {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
