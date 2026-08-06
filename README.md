@@ -80,6 +80,21 @@ sudo apt install docker.io docker-compose-v2
 ```
 - A registered Bittensor validator wallet/hotkey setup (via `btcli`)
 - `WANDB_API_KEY` in `.env` for W&B logging (or use `--wandb.off`)
+- Linux **amd64** host for production (agent-runner siblings must match host arch)
+
+#### Hardware
+
+No GPU is required — LLM inference is remote via the central gateway. Peak load
+comes from Docker agent sandboxes (defaults: up to 8 concurrent × 1 GB RAM /
+1 CPU each; see `src/core/constants.py`).
+
+| Resource | Minimum | Recommended |
+|---|---|---|
+| **CPU** | 4 vCPU | 8–16 vCPU |
+| **RAM** | 8 GB | 16–32 GB |
+| **Disk** | 50 GB SSD | 100 GB SSD |
+| **Network** | Stable outbound HTTPS (~100 Mbps) | 1 Gbps, low latency to chain + `api.almnc.ai` |
+| **GPU** | None | None |
 
 `bittensor==11.0.1` in `requirements.txt` includes both the Python SDK and
 `btcli`; do not install the legacy separate `bittensor-cli` package. In v11,
