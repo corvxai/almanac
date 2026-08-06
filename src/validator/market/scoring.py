@@ -13,13 +13,22 @@ constraint just to stay feasible and non-cliffy.
 
 This version keeps the frontier and drops the machinery.
 
-    score_i  =  volume_share_i ** ALPHA  *  edge_share_i ** (1 - ALPHA)
+    score_i  =  volume_share_i ** ALPHA  *  pnl_share_i ** (1 - ALPHA)
 
 A weighted geometric mean of two normalised objectives is a Cobb-Douglas
 utility: maximising it over the allocation simplex lands on the Pareto frontier
-of (routed volume, edge), and ALPHA slides along that frontier. ALPHA = 1 is a
-pure pro-rata fee rebate, ALPHA = 0 is pure edge, ALPHA = 0.65 leans to volume
-while still paying small sharp traders. No solver, no price, no cliff.
+of (routed volume, PnL), and ALPHA slides along that frontier. ALPHA = 1 is a
+pure pro-rata fee rebate, ALPHA = 0 is pure skill. No solver, no price, no
+cliff.
+
+Both axes are ADDITIVE (epoch volume, decayed positive PnL). That makes the
+score invariant to splitting one book across k identities: the exponents sum
+to 1, so k entities holding (v/k, p/k) score exactly what one entity holding
+(v, p) does. An earlier draft used a shrunk ROI estimate ("edge") as the skill
+axis; the per-entity shrinkage constant made splitting strictly profitable
+(sum of P/(V/k + S) grows with k), so it was replaced with raw PnL share. The
+residual benefit of splitting is escaping the per-entity concentration cap,
+which is bounded at plain pro-rata and priced by UID registration.
 
 BUDGET
 ------
@@ -39,8 +48,9 @@ TIERS
               trailing edge                      -> ranked dust
     INACTIVE  nothing in INACTIVITY_EPOCHS       -> zero
 
-The general pool has no dust tier (no UIDs to deregister) and requires epoch
-activity. That is the only structural difference between the two pipelines.
+The general pool is a separate track that is being retired: its history is
+still built for fee accounting and reporting, but scoring is disabled
+(ENABLE_GENERAL_POOL_SCORING) and it earns zero tokens.
 
 build_epoch_history() from the current codebase is unchanged and still upstream
 of everything here; this module consumes the same dict.
@@ -65,21 +75,13 @@ ROLLING_HISTORY_IN_DAYS = 30
 VOLUME_FEE = 0.01
 
 # --- the Pareto knob -------------------------------------------------------
-# 1.0 = pay volume only, 0.0 = pay edge only. Everything between is on the
+# 1.0 = pay volume only, 0.0 = pay PnL only. Everything between is on the
 # frontier. This is the single most important number in the file.
 PARETO_ALPHA = 0.65
 
-# --- edge estimation -------------------------------------------------------
+# --- skill estimation ------------------------------------------------------
 # One decay, applied once, to both PnL and volume. Half-life ~9.5 days at 0.93.
 EDGE_DECAY = 0.93
-# Shrinkage pseudo-volume: roughly "the decayed volume below which you are not
-# yet credible". A trader with $200 of settled volume and a 300% ROI gets shrunk
-# toward zero; a trader with $200k is barely touched. This replaces the
-# credibility weights, the min-trades gate and the ROI cliff. Tune to the pool's
-# volume distribution — a sensible start is the median trader's decayed volume.
-EDGE_SHRINKAGE_VOLUME = 10_000.0
-# Hard ceiling on estimated edge so one longshot cannot own the edge component.
-EDGE_CAP = 0.40
 
 # --- concentration ---------------------------------------------------------
 # Max share of the epoch pool any single trader can take.
@@ -92,9 +94,16 @@ CONCENTRATION_CAP = 0.06
 CAP_RELAX_FACTOR = 2.5
 
 # --- fee-return floor ------------------------------------------------------
-# Active traders with positive trailing edge get back at least this much of the
-# fees they paid this epoch, even on a losing day.
-FEE_FLOOR_MULTIPLIER = 0.70
+# Active traders with real trailing edge get back at least this much of the
+# fees they paid this epoch, even on a losing day. Must stay <= 1 / (1 + boost)
+# so the boosted floor never exceeds 1.0x fees — otherwise PnL-neutral wash
+# volume becomes a guaranteed money pump (validated at import time below).
+FEE_FLOOR_MULTIPLIER = 0.57
+# Floor eligibility: decayed PnL / decayed volume must clear this. `> 0` is not
+# enough — a single old win plus PnL-neutral churn keeps decayed PnL positive
+# forever. The trader's own volume grows the denominator, so holding the gate
+# while churning requires maintaining real, proportional wins.
+FEE_FLOOR_MIN_ROI = 0.005
 # Floors may never consume more than this share of the active pool.
 FEE_FLOOR_MAX_POOL_SHARE = 0.40
 
@@ -119,6 +128,18 @@ INACTIVITY_EPOCHS = 10
 MINER_POOL_WEIGHT_BOOST_PERCENTAGE = 0.75
 BURN_UID = 210
 
+# General pool is a separate track and is being retired: its history is still
+# built (fees, reporting) but it earns zero tokens.
+ENABLE_GENERAL_POOL_SCORING = False
+
+# Fail fast: if the boosted floor exceeds 1.0x fees, wash trading turns +EV.
+if FEE_FLOOR_MULTIPLIER * (1 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE) > 1.0:
+    raise ValueError(
+        f"FEE_FLOOR_MULTIPLIER ({FEE_FLOOR_MULTIPLIER}) x boost "
+        f"(1 + {MINER_POOL_WEIGHT_BOOST_PERCENTAGE}) exceeds 1.0x fees; "
+        "this makes fee-churning profitable. Lower one of them."
+    )
+
 
 # ---------------------------------------------------------------------------
 # Core primitives
@@ -133,30 +154,38 @@ def _decayed(matrix: np.ndarray, decay: float) -> np.ndarray:
     return weights @ matrix
 
 
+def compute_pnl(history: Dict[str, Any]) -> np.ndarray:
+    """
+    Decayed, non-negative PnL per entity — the skill mass in the score.
+
+    PnL is additive, so pnl_share (unlike a per-entity ROI estimate) cannot be
+    inflated by splitting one book across identities. Negative-PnL traders get
+    exactly zero, which zeroes their whole score — but it arrives as a limit
+    rather than a cliff, so no entropy smoothing is needed.
+    """
+    return np.maximum(_decayed(history["profit_prev"], EDGE_DECAY), 0.0)
+
+
 def compute_edge(history: Dict[str, Any]) -> np.ndarray:
     """
-    Shrunk, decayed, non-negative ROI estimate per entity.
-
-        edge = max(0, decayed_pnl) / (decayed_volume + SHRINKAGE)
-
-    Negative-PnL traders get exactly zero, which is the ROI_MIN gate — but it
-    arrives as a limit rather than a cliff, so no entropy smoothing is needed.
+    Decayed PnL / decayed volume per entity. Used for the fee-floor gate and
+    diagnostics only — never inside the score, where a ratio would reintroduce
+    small-sample ROI outliers.
     """
     pnl = _decayed(history["profit_prev"], EDGE_DECAY)
     vol = _decayed(history["volume_prev"], EDGE_DECAY)
-    edge = np.maximum(pnl, 0.0) / (vol + EDGE_SHRINKAGE_VOLUME)
-    return np.minimum(edge, EDGE_CAP)
+    return np.maximum(pnl, 0.0) / np.maximum(vol, 1.0)
 
 
-def pareto_score(volume: np.ndarray, edge: np.ndarray, alpha: float | None = None) -> np.ndarray:
-    """Cobb-Douglas blend of normalised volume share and normalised edge share."""
+def pareto_score(volume: np.ndarray, pnl: np.ndarray, alpha: float | None = None) -> np.ndarray:
+    """Cobb-Douglas blend of normalised volume share and normalised PnL share."""
     alpha = PARETO_ALPHA if alpha is None else alpha
-    v_tot, e_tot = volume.sum(), edge.sum()
-    if v_tot <= 0 or e_tot <= 0:
+    v_tot, p_tot = volume.sum(), pnl.sum()
+    if v_tot <= 0 or p_tot <= 0:
         return np.zeros_like(volume)
     v_share = volume / v_tot
-    e_share = edge / e_tot
-    return (v_share ** alpha) * (e_share ** (1.0 - alpha))
+    p_share = pnl / p_tot
+    return (v_share ** alpha) * (p_share ** (1.0 - alpha))
 
 
 def _project_to_budget(
@@ -248,7 +277,7 @@ def classify_entities(history: Dict[str, Any], edge: np.ndarray, allow_dust: boo
     return active, dormant
 
 
-def dust_allocations(history: Dict[str, Any], dormant: np.ndarray, edge: np.ndarray, reserve: float) -> np.ndarray:
+def dust_allocations(history: Dict[str, Any], dormant: np.ndarray, pnl: np.ndarray, reserve: float) -> np.ndarray:
     """
     Rank dormant miners by their trailing quality and pay a linear ramp of dust
     from DUST_MIN_RATIO (worst) to 1.0 (best). Ranked rather than value-scaled
@@ -261,7 +290,7 @@ def dust_allocations(history: Dict[str, Any], dormant: np.ndarray, edge: np.ndar
         return out
 
     v_mem = _decayed(history["volume_prev"], EDGE_DECAY)
-    quality = pareto_score(v_mem[idx], edge[idx])
+    quality = pareto_score(v_mem[idx], pnl[idx])
     if quality.sum() <= 0:
         quality = np.ones(idx.size)
 
@@ -297,21 +326,22 @@ def score_pool(history: Dict[str, Any], budget: float, allow_dust: bool, verbose
     epoch_fees = history["fees_prev"][cur]
 
     edge = compute_edge(history)
+    pnl = compute_pnl(history)
     active, dormant = classify_entities(history, edge, allow_dust)
 
     # --- dust reserve off the top ------------------------------------------
     reserve = DUST_RESERVE_SHARE * budget if dormant.any() else 0.0
-    dust = dust_allocations(history, dormant, edge, reserve)
+    dust = dust_allocations(history, dormant, pnl, reserve)
     active_pool = budget - dust.sum()
 
     # --- Pareto score over active traders ----------------------------------
     scores = np.zeros(n)
     if active.any():
-        scores[active] = pareto_score(epoch_volume[active], edge[active])
+        scores[active] = pareto_score(epoch_volume[active], pnl[active])
 
     # --- fee-return floors --------------------------------------------------
     floors = np.zeros(n)
-    eligible_floor = active & (edge > 0)
+    eligible_floor = active & (edge >= FEE_FLOOR_MIN_ROI)
     floors[eligible_floor] = FEE_FLOOR_MULTIPLIER * epoch_fees[eligible_floor]
     max_floor = FEE_FLOOR_MAX_POOL_SHARE * active_pool
     if floors.sum() > max_floor > 0:
@@ -350,10 +380,11 @@ def build_epoch_history(
     """
     Bucket settled trades into (epoch, entity) matrices.
 
-    Carried over unchanged from the v1 mechanism apart from defensive .get()
-    lookups — the data-hygiene rules here (fee underpayment, off-Almanac
-    position top-ups, hotkey/UID match) are orthogonal to how scoring works and
-    are still exactly what you want.
+    Carried over from the v1 mechanism with two changes: defensive .get()
+    lookups, and trades flagged by the local hygiene rules (fee underpayment,
+    off-Almanac position top-ups) now count their losses against profit_prev
+    even though their volume is excluded — see the comment at the flagged
+    branch below.
     """
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     start_date = today - timedelta(days=ROLLING_HISTORY_IN_DAYS)
@@ -439,13 +470,16 @@ def build_epoch_history(
             is_correct = bool(trade.get("is_correct"))
             eligible = bool(trade.get("is_reward_eligible"))
 
+            hygiene_flagged = False
             # Position was topped up outside Almanac ($5 rounding buffer).
             if eligible and volume > expected_volume and abs(volume - expected_volume) > 5:
                 eligible = False
+                hygiene_flagged = True
             # Underpaid fees (10% buffer).
             if eligible and expected_fees > 0 and actual_fees < expected_fees:
                 if (actual_fees / expected_fees) < 0.9:
                     eligible = False
+                    hygiene_flagged = True
 
             # Fees are always collected — they fund the pool regardless.
             fees_prev[epoch_idx, j] += actual_fees
@@ -459,6 +493,14 @@ def build_epoch_history(
                     unqualified_prev[epoch_idx, j] += volume
                 profit_prev[epoch_idx, j] += pnl
                 trade_counts[epoch_idx, j] += 1
+            elif hygiene_flagged:
+                # Trades the trader made ineligible post-hoc (external top-up,
+                # underpaid fees) still count their LOSSES against PnL —
+                # otherwise flipping a losing trade ineligible censors the loss
+                # out of the skill signal. Wins stay uncounted; volume and
+                # trade counts stay excluded. Trades that arrive ineligible
+                # from the API are untouched.
+                profit_prev[epoch_idx, j] += min(pnl, 0.0)
 
     return {
         "volume_prev": volume_prev,
@@ -527,9 +569,14 @@ def score_miners(
         print("Miner pool:")
     miners_scores = score_pool(miner_history, miner_budget, allow_dust=True, verbose=verbose)
     if verbose:
-        print("General pool:")
+        print("General pool:" + ("" if ENABLE_GENERAL_POOL_SCORING else " (scoring disabled)"))
+    # Passing a zero budget yields a correctly-shaped all-zero result, so the
+    # return contract and downstream reporting are unchanged when disabled.
     general_pool_scores = score_pool(
-        general_pool_history, gp_budget, allow_dust=False, verbose=verbose
+        general_pool_history,
+        gp_budget if ENABLE_GENERAL_POOL_SCORING else 0.0,
+        allow_dust=False,
+        verbose=verbose,
     )
 
     return (
@@ -540,6 +587,52 @@ def score_miners(
         miner_budget,
         gp_budget,
     )
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+def _print_pool(label: str, history: Dict[str, Any], scores: Dict[str, Any] | None, include_current_epoch: bool) -> None:
+    n = history["n_entities"]
+    print(f"--- {label} ---")
+    if n == 0:
+        print("(no entities)")
+        return
+
+    cur = history["n_epochs"] - 1
+    vol, pnl, fees = history["volume_prev"], history["profit_prev"], history["fees_prev"]
+    tokens = scores["tokens"] if scores is not None else np.zeros(n)
+
+    order = np.argsort(-tokens) if scores is not None else np.argsort(-pnl.sum(axis=0))
+    header = f"{'ID':>12} {'30d Vol':>12} {'30d PnL':>12}"
+    if include_current_epoch:
+        header += f" {'Ep Vol':>10} {'Ep PnL':>10} {'Ep Fees':>9} {'Tokens':>10}"
+    print(header)
+    for j in order:
+        line = (
+            f"{str(history['entity_ids'][j]):>12} "
+            f"{vol[:, j].sum():>12,.0f} {pnl[:, j].sum():>12,.2f}"
+        )
+        if include_current_epoch:
+            line += (
+                f" {vol[cur, j]:>10,.0f} {pnl[cur, j]:>10,.2f}"
+                f" {fees[cur, j]:>9,.2f} {tokens[j]:>10,.2f}"
+            )
+        print(line)
+
+
+def print_pool_stats(
+    miner_history: Dict[str, Any],
+    general_pool_history: Dict[str, Any],
+    include_current_epoch: bool = False,
+    miner_scores: Dict[str, Any] = None,
+    general_pool_scores: Dict[str, Any] = None,
+) -> None:
+    """Plain-text pool summaries. Same call surface the v1 module exposed."""
+    _print_pool("MINER POOL", miner_history, miner_scores, include_current_epoch)
+    gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
+    _print_pool(gp_label, general_pool_history, general_pool_scores, include_current_epoch)
 
 
 # ---------------------------------------------------------------------------

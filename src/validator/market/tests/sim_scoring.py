@@ -40,11 +40,11 @@ from src.validator.market.scoring import (  # noqa: E402
     ROLLING_HISTORY_IN_DAYS,
     PARETO_ALPHA,
     EDGE_DECAY,
-    EDGE_SHRINKAGE_VOLUME,
-    EDGE_CAP,
     CONCENTRATION_CAP,
     CAP_RELAX_FACTOR,
     FEE_FLOOR_MULTIPLIER,
+    FEE_FLOOR_MIN_ROI,
+    ENABLE_GENERAL_POOL_SCORING,
     DUST_RESERVE_SHARE,
     DUST_MIN_RATIO,
     INACTIVITY_EPOCHS,
@@ -282,9 +282,10 @@ def print_pool_table(history, scores, budget, label, top_n=None):
 def print_mechanism_diagnostics(miner_history, miners_scores, miner_budget):
     print("\n--- MECHANISM DIAGNOSTICS ---")
     print(
-        f"alpha={PARETO_ALPHA}  edge_decay={EDGE_DECAY}  shrinkage=${EDGE_SHRINKAGE_VOLUME:,.0f}  "
-        f"edge_cap={EDGE_CAP:.0%}\ncap={CONCENTRATION_CAP:.0%} (relax {CAP_RELAX_FACTOR}x)  "
-        f"fee_floor={FEE_FLOOR_MULTIPLIER:.0%}  dust_reserve={DUST_RESERVE_SHARE:.0%}  "
+        f"alpha={PARETO_ALPHA}  pnl_decay={EDGE_DECAY}  "
+        f"cap={CONCENTRATION_CAP:.0%} (relax {CAP_RELAX_FACTOR}x)\n"
+        f"fee_floor={FEE_FLOOR_MULTIPLIER:.0%} (gate roi>={FEE_FLOOR_MIN_ROI:.2%})  "
+        f"dust_reserve={DUST_RESERVE_SHARE:.0%}  "
         f"inactivity={INACTIVITY_EPOCHS} epochs"
     )
 
@@ -328,8 +329,10 @@ def print_mechanism_diagnostics(miner_history, miners_scores, miner_budget):
     live = edge[active | dormant]
     if live.size:
         print(
-            f"Edge: zero={int(np.sum(live <= 0))}  at cap={int(np.sum(live >= EDGE_CAP - 1e-9))}  "
-            f"median={np.median(live[live > 0]) * 100 if np.any(live > 0) else 0:.2f}%"
+            f"Edge (decayed ROI): zero={int(np.sum(live <= 0))}  "
+            f"below floor gate={int(np.sum((live > 0) & (live < FEE_FLOOR_MIN_ROI)))}  "
+            f"median={np.median(live[live > 0]) * 100 if np.any(live > 0) else 0:.2f}%  "
+            f"max={live.max() * 100:.2f}%"
         )
 
     # --- dust ranking ---
@@ -346,7 +349,7 @@ def print_mechanism_diagnostics(miner_history, miners_scores, miner_budget):
     # --- fee floor ---
     cur = miner_history["n_epochs"] - 1
     fees = miner_history["fees_prev"][cur]
-    floored = active & (miners_scores["edge"] > 0) & (fees > 0)
+    floored = active & (miners_scores["edge"] >= FEE_FLOOR_MIN_ROI) & (fees > 0)
     if floored.any():
         ratio = tokens[floored] / fees[floored]
         print(
@@ -450,7 +453,8 @@ def main():
     print(f"Subnet emission:     ${current_epoch_budget:,.2f}")
 
     print_pool_table(miner_history, miners_scores, miner_budget, "MINER POOL", args.top)
-    print_pool_table(general_pool_history, general_pool_scores, gp_budget, "GENERAL POOL", args.top)
+    gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
+    print_pool_table(general_pool_history, general_pool_scores, gp_budget, gp_label, args.top)
 
     print_mechanism_diagnostics(miner_history, miners_scores, miner_budget)
 
