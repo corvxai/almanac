@@ -8,7 +8,18 @@ It allows you to:
 - Initiate trading sessions and place orders
 - Fetch positions summary
 - Check and claim Polymarket proceeds (Almanac redeem + Polymarket relayer; batch losing cleanup)
-- Funds: proxy wallet balance (API), deposit to proxy (USDC.e or Polymarket bridge native USDC/POL), withdraw pUSD via relayer
+- Funds: trading wallet balance (API), deposit (USDC.e or Polymarket bridge native USDC/POL), withdraw pUSD via relayer
+
+Wallet kinds (Safe → deposit-wallet cutover):
+The session reports walletKind/signatureType. Legacy Gnosis Safe wallets sign
+orders with signatureType 2; migrated **deposit wallets** (ERC-1967, ERC-1271
+validation) sign with signatureType 3 where maker = signer = deposit address —
+the EOA key still signs everything. Relayer batches route automatically:
+Safe multicall for Safe sessions, execute_deposit_wallet_batch for deposit
+sessions. Per-side builder codes are read from GET /v1/trading/config at
+runtime (BUY = fee profile, SELL = zero-fee profile). Migration itself is a
+one-time action in the web app (https://almanac.market) — there is no headless
+migration API; afterwards refresh the trading session here.
 - Link/unlink Bittensor UID to Almanac account
 - Manage multiple credential sets (wallet accounts)
 
@@ -56,7 +67,7 @@ from tabulate import tabulate
 from web3 import Web3
 from requests.compat import json as requests_json
 from py_builder_relayer_client.client import RelayClient
-from py_builder_relayer_client.models import OperationType, SafeTransaction
+from py_builder_relayer_client.models import DepositWalletCall, OperationType, SafeTransaction
 from py_builder_relayer_client.exceptions import RelayerClientException
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -202,6 +213,97 @@ CURRENT_SESSION = None
 SELECTED_MARKET = None
 SELECTED_CREDENTIAL_SET = None  # Stores the name of the selected credential set (None = default)
 CREDENTIAL_SETS = {}  # Dictionary of available credential sets
+
+ZERO_BYTES32 = "0x" + "0" * 64
+# Deposit-wallet relayer batches carry an EIP-712 deadline (frontend uses 1h).
+DEPOSIT_BATCH_DEADLINE_SECONDS = 3600
+# GET /v1/trading/config is public and server-cached for 60s; mirror that here.
+TRADING_CONFIG_TTL_SECONDS = 60
+_TRADING_CONFIG_CACHE: dict = {"data": None, "fetched_at": 0.0}
+
+
+def _is_valid_bytes32(value: str) -> bool:
+    value = str(value or "").strip()
+    if not (value.startswith("0x") and len(value) == 66):
+        return False
+    try:
+        int(value[2:], 16)
+        return True
+    except ValueError:
+        return False
+
+
+def fetch_trading_config(force: bool = False) -> dict | None:
+    """
+    GET /v1/trading/config — runtime trading config: per-side builder codes,
+    signature types, and the Safe→deposit migration schedule. Returns the
+    `data` dict, or None on backends that don't expose the endpoint yet
+    (pre-cutover). Last good response is kept as a fallback.
+    """
+    now = time.time()
+    cached = _TRADING_CONFIG_CACHE["data"]
+    if not force and cached is not None and now - _TRADING_CONFIG_CACHE["fetched_at"] < TRADING_CONFIG_TTL_SECONDS:
+        return cached
+    try:
+        r = requests.get(f"{MARKET_API_URL}/v1/trading/config", timeout=15)
+        if r.status_code == 200:
+            payload = r.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(data, dict):
+                _TRADING_CONFIG_CACHE["data"] = data
+                _TRADING_CONFIG_CACHE["fetched_at"] = now
+                return data
+    except Exception:
+        pass
+    return cached
+
+
+def _session_data() -> dict:
+    global CURRENT_SESSION
+    if not CURRENT_SESSION:
+        return {}
+    return CURRENT_SESSION.get("data") or {}
+
+
+def _session_wallet_kind() -> str:
+    """Wallet kind for the active session: 'deposit', 'gnosis_safe', or 'unknown'."""
+    data = _session_data()
+    kind = str(data.get("walletKind") or "").strip().lower()
+    if kind:
+        return kind
+    sig = data.get("signatureType")
+    if sig == 3:
+        return "deposit"
+    if sig == 2:
+        return "gnosis_safe"
+    return "unknown"
+
+
+def _is_deposit_session() -> bool:
+    return _session_wallet_kind() == "deposit"
+
+
+def _print_session_wallet_summary(session: dict | None) -> None:
+    """Show which trading wallet the session resolved to + migration status."""
+    data = (session or {}).get("data") or {}
+    kind = data.get("walletKind")
+    proxy = data.get("proxyWallet")
+    sig = data.get("signatureType")
+    if proxy:
+        label = {"deposit": "Deposit wallet", "gnosis_safe": "Safe wallet (legacy)"}.get(kind, "Trading wallet")
+        sig_note = f" (signatureType {sig})" if sig is not None else ""
+        print(f"{label}: {proxy}{sig_note}")
+    migration = data.get("migration") or {}
+    if migration.get("required"):
+        cutoff = migration.get("cutoffDate") or "a date to be announced"
+        if migration.get("tradingBlocked"):
+            print("⚠️  This Safe wallet can no longer place orders (MIGRATION_REQUIRED).")
+            print("   Migrate once in the web app at https://almanac.market — cancel/withdraw/claim still work.")
+        else:
+            print(f"⚠️  Safe → deposit-wallet migration required before {cutoff}.")
+            print("   Migrate once in the web app at https://almanac.market. The web login ends this")
+            print("   CLI session — use 'Refresh Trading Session' afterwards to pick up the deposit wallet.")
+
 
 def _detect_credential_sets():
     """
@@ -1551,7 +1653,13 @@ def _post_almanac_redeem_prepare(redemptions: list) -> tuple[bool, str | None, d
 def _relay_submit_redeem_transactions(
     txs_raw: list, redeem_payload: dict | None = None
 ) -> tuple[bool, str | None]:
-    """Submit redeem calldata from Almanac through Polymarket relayer (same path as withdraw)."""
+    """
+    Submit redeem calldata from Almanac through the Polymarket relayer (same
+    path as withdraw). Safe sessions use the Safe multicall; deposit sessions
+    use one deposit-wallet batch. Deposit claims are routed server-side through
+    the CtfCollateralAdapter (redeem + wrap + pUSD in one call), so
+    selectedCollateral is pUSD and the USDC.e auto-wrap self-disables.
+    """
     global CURRENT_SESSION
     load_dotenv(dotenv_path=str(ENV_PATH), override=True)
     client = _make_relay_client()
@@ -1622,7 +1730,7 @@ def _relay_submit_redeem_transactions(
         )
     try:
         print("\nSubmitting redemption transaction(s)...")
-        resp = client.execute(relay_txs, "Redeem Polymarket proceeds")
+        resp = _execute_relay_batch(client, relay_txs, "Redeem Polymarket proceeds")
         result = resp.wait()
         if result is not None:
             if isinstance(result, dict):
@@ -1669,7 +1777,8 @@ def _relay_submit_redeem_transactions(
 def request_redeem_transactions(redemptions: list) -> tuple[bool, str | None]:
     """
     Prepare redemptions via Almanac POST /v1/redeem, then execute returned calldata
-    through the Polymarket relayer (EOA-signed Safe txs). Returns (True, None) only after
+    through the Polymarket relayer (EOA-signed; Safe multicall or deposit-wallet
+    batch depending on the session's wallet kind). Returns (True, None) only after
     relayer success; Almanac alone only returns prepared transactions, not mined redeems.
     """
     ok, err, payload = _post_almanac_redeem_prepare(redemptions)
@@ -1692,7 +1801,7 @@ def request_redeem_transactions(redemptions: list) -> tuple[bool, str | None]:
 def claim_proceeds_menu():
     """
     On entry: fetch claimable proceeds from Polymarket data-api; POST Almanac /v1/redeem then
-    execute returned txs via Polymarket relayer (EOA-signed Safe).
+    execute returned txs via Polymarket relayer (EOA-signed; Safe or deposit-wallet batch).
     """
     global CURRENT_SESSION
     if not CURRENT_SESSION:
@@ -1898,6 +2007,14 @@ def _payload_has_usdce_redemptions(payload: dict | None) -> bool:
 def _auto_wrap_usdce_proceeds(
     client: RelayClient, w3: Web3, proxy_addr: str, onramp_addr: str, amount_wei: int
 ) -> tuple[bool, str | None]:
+    """
+    Convert claimed USDC.e into pUSD via the collateral onramp as ONE combined
+    [approve?, wrap] batch. Deposit-wallet claims normally never reach here —
+    the backend routes them through the CtfCollateralAdapter which pays pUSD
+    directly — but if residue exists, the combined batch is the only reliable
+    shape (a wrap-only follow-up batch dies at the relayer for deposit wallets).
+    """
+    txs: list[SafeTransaction] = []
     try:
         allowance = _read_erc20_allowance_wei(
             w3, USDC_E_POLYGON, proxy_addr, onramp_addr
@@ -1906,35 +2023,36 @@ def _auto_wrap_usdce_proceeds(
         return False, f"Could not read USDC.e allowance: {exc}"
 
     if allowance < amount_wei:
-        try:
-            print("Approving USDC.e for collateral onramp...")
-            approve_data = _encode_erc20_approve(
-                w3, USDC_E_POLYGON, onramp_addr, UINT256_MAX
-            )
-            approve_tx = SafeTransaction(
+        approve_data = _encode_erc20_approve(
+            w3, USDC_E_POLYGON, onramp_addr, UINT256_MAX
+        )
+        txs.append(
+            SafeTransaction(
                 to=Web3.to_checksum_address(USDC_E_POLYGON),
                 operation=OperationType.Call,
                 data=approve_data,
                 value="0",
             )
-            ar = client.execute([approve_tx], "Approve USDC.e for auto-wrap")
-            if ar.wait() is None:
-                return False, "Approval transaction timed out or failed."
-        except Exception as exc:
-            return False, f"USDC.e approval failed: {exc}"
+        )
 
     try:
-        print(f"Wrapping {amount_wei / (10**USDC_E_DECIMALS):.6f} USDC.e into {PROXY_TOKEN_SYMBOL}...")
         wrap_data = _encode_onramp_wrap(
             w3, onramp_addr, USDC_E_POLYGON, proxy_addr, amount_wei
         )
-        wrap_tx = SafeTransaction(
-            to=Web3.to_checksum_address(onramp_addr),
-            operation=OperationType.Call,
-            data=wrap_data,
-            value="0",
+        txs.append(
+            SafeTransaction(
+                to=Web3.to_checksum_address(onramp_addr),
+                operation=OperationType.Call,
+                data=wrap_data,
+                value="0",
+            )
         )
-        wr = client.execute([wrap_tx], f"Auto-wrap USDC.e to {PROXY_TOKEN_SYMBOL}")
+        batch_desc = "approve + wrap" if len(txs) == 2 else "wrap"
+        print(
+            f"Wrapping {amount_wei / (10**USDC_E_DECIMALS):.6f} USDC.e into "
+            f"{PROXY_TOKEN_SYMBOL} ({batch_desc}, one batch)..."
+        )
+        wr = _execute_relay_batch(client, txs, f"Auto-wrap USDC.e to {PROXY_TOKEN_SYMBOL}")
         if wr.wait() is None:
             return False, "Wrap transaction timed out or failed."
         return True, None
@@ -2304,8 +2422,9 @@ def funds_deposit_to_proxy() -> None:
     if account.address.lower() != (eoa or "").lower():
         print("Warning: private key does not match session / EOA_WALLET_ADDRESS.")
 
-    print("\nDeposit to proxy (Polygon)")
-    print(f"  Proxy (EVM): {safe}")
+    kind_label = {"deposit": "deposit wallet", "gnosis_safe": "Safe"}.get(_session_wallet_kind(), "trading wallet")
+    print(f"\nDeposit to {kind_label} (Polygon)")
+    print(f"  {kind_label.capitalize()} (EVM): {safe}")
     print("  Use your Polygon EVM private key / wallet; balances below are on chain ID 137.")
 
     w3 = get_polygon_web3()
@@ -2543,8 +2662,50 @@ def _make_relay_client() -> RelayClient | None:
         return None
 
 
+def _execute_relay_batch(client: RelayClient, txs: list, description: str):
+    """
+    Kind-aware relayer execution. Safe sessions keep the legacy Safe multicall
+    path (client.execute). Deposit sessions submit ONE
+    execute_deposit_wallet_batch — a single EOA signature over the whole batch;
+    never split a deposit batch into sequential submissions (split approve→wrap
+    batches are the documented deposit-wallet failure mode: the follow-up batch
+    dies at the relayer without broadcasting).
+    Returns the relayer response (has .wait()); raises on build/submit errors.
+    """
+    if not _is_deposit_session():
+        return client.execute(txs, description)
+
+    wallet_address = _session_data().get("proxyWallet") or _get_credential("EOA_PROXY_FUNDER")
+    if not wallet_address:
+        raise ValueError("Deposit-wallet session has no proxyWallet address.")
+    calls: list[DepositWalletCall] = []
+    for t in txs:
+        if getattr(t, "operation", OperationType.Call) == OperationType.DelegateCall:
+            raise ValueError("Deposit-wallet batches cannot contain delegatecall operations.")
+        calls.append(
+            DepositWalletCall(
+                target=Web3.to_checksum_address(t.to),
+                value=str(t.value or "0"),
+                data=t.data,
+            )
+        )
+    signer_address = client.signer.address()
+    nonce_payload = client.get_nonce(signer_address, "WALLET") or {}
+    nonce = nonce_payload.get("nonce")
+    if nonce is None:
+        raise ValueError(f"Relayer did not return a WALLET nonce for {signer_address}.")
+    deadline = str(int(time.time()) + DEPOSIT_BATCH_DEADLINE_SECONDS)
+    print(f"  (deposit-wallet batch: {len(calls)} call(s), one EOA signature)")
+    return client.execute_deposit_wallet_batch(
+        calls,
+        Web3.to_checksum_address(wallet_address),
+        str(nonce),
+        deadline,
+    )
+
+
 def funds_withdraw_usdc_e() -> None:
-    """Withdraw proxy token from proxy/Safe via Polymarket relayer (gasless)."""
+    """Withdraw the proxy token from the trading wallet (Safe or deposit) via Polymarket relayer (gasless)."""
     global CURRENT_SESSION
     if not CURRENT_SESSION:
         print("No active trading session.")
@@ -2557,9 +2718,11 @@ def funds_withdraw_usdc_e() -> None:
         or _get_credential("EOA_WALLET_ADDRESS")
     )
 
-    print(f"\nWithdraw {PROXY_TOKEN_SYMBOL} from proxy")
+    wallet_kind = _session_wallet_kind()
+    kind_label = {"deposit": "deposit wallet", "gnosis_safe": "Safe"}.get(wallet_kind, "trading wallet")
+    print(f"\nWithdraw {PROXY_TOKEN_SYMBOL} from {kind_label}")
     if session_proxy:
-        print(f"  Proxy: {session_proxy}")
+        print(f"  {kind_label.capitalize()}: {session_proxy}")
     raw_bal = fetch_auth_balances_raw()
     if raw_bal:
         fb = _extract_proxy_token_formatted(raw_bal)
@@ -2573,20 +2736,28 @@ def funds_withdraw_usdc_e() -> None:
     client = _make_relay_client()
     if not client:
         return
-    try:
-        derived_safe = client.get_expected_safe()
-    except Exception as exc:
-        print(f"Could not derive Safe: {exc}")
+    if wallet_kind != "deposit":
+        # Safe path keeps the legacy derivation cross-check. Deposit wallets are
+        # server-derived (session proxyWallet is authoritative) and executed via
+        # the deposit batch, so no client-side Safe derivation applies.
+        try:
+            derived_safe = client.get_expected_safe()
+        except Exception as exc:
+            print(f"Could not derive Safe: {exc}")
+            input("\nPress Enter to continue...")
+            return
+        if (
+            session_proxy
+            and derived_safe
+            and session_proxy.lower() != derived_safe.lower()
+        ):
+            print(
+                f"Note: session proxy {session_proxy} != relayer derived Safe {derived_safe}; using relayer derivation."
+            )
+    elif not session_proxy:
+        print("Deposit-wallet session has no proxyWallet address; refresh the trading session.")
         input("\nPress Enter to continue...")
         return
-    if (
-        session_proxy
-        and derived_safe
-        and session_proxy.lower() != derived_safe.lower()
-    ):
-        print(
-            f"Note: session proxy {session_proxy} != relayer derived Safe {derived_safe}; using relayer derivation."
-        )
 
     dest = input(f"\nDestination address [{default_dest}]: ").strip() or default_dest
     try:
@@ -2631,7 +2802,7 @@ def funds_withdraw_usdc_e() -> None:
         input("\nPress Enter to continue...")
         return
     try:
-        resp = client.execute([txn], f"Withdraw {PROXY_TOKEN_SYMBOL}")
+        resp = _execute_relay_batch(client, [txn], f"Withdraw {PROXY_TOKEN_SYMBOL}")
         result = resp.wait()
         if result is not None:
             print("Withdraw succeeded.")
@@ -2654,9 +2825,9 @@ def funds_withdraw_usdc_e() -> None:
 def funds_menu() -> None:
     while True:
         print("\nFunds (balance / deposit / withdraw):")
-        print("  1) Proxy wallet balance")
-        print("  2) Deposit to proxy")
-        print(f"  3) Withdraw {PROXY_TOKEN_SYMBOL} from proxy/safe")
+        print("  1) Trading wallet balance")
+        print("  2) Deposit to trading wallet")
+        print(f"  3) Withdraw {PROXY_TOKEN_SYMBOL} from trading wallet (Safe or deposit)")
         print("  4) Back to Trading Menu")
         c = input("\nEnter choice: ").strip()
         if c == "1":
@@ -3819,6 +3990,7 @@ def start_trading_flow():
             if session:
                 print("Trading session created successfully.")
                 CURRENT_SESSION = session
+                _print_session_wallet_summary(session)
             else:
                 print("Failed to create trading session. Please check your configuration.")
                 return
@@ -3853,6 +4025,7 @@ def start_trading_flow():
                 if session:
                     print("\nTrading session refreshed.")
                     CURRENT_SESSION = session
+                    _print_session_wallet_summary(session)
                 else:
                     print("Trading session could not be refreshed.")
             except Exception as exc:
@@ -3983,19 +4156,25 @@ def _extract_signed_order_dict(signed_order) -> dict:
     return data
 
 
-def _resolve_builder_code() -> str:
+def _resolve_builder_code(side_upper: str = "BUY") -> str:
     """
-    Return a valid bytes32 builder code for attributed orders.
-    Falls back to zero-bytes if constant is not valid.
+    Return the bytes32 builder code the backend requires for this order side.
+    BUYs sign builderCodes.buy (the fee profile) and SELLs sign builderCodes.sell
+    (zero-fee profile) — the cutover backend rejects mismatched codes
+    (INVALID_BUILDER_CODE / BUILDER_CODE_NOT_ALLOWED_ON_SELL). Codes are read
+    from GET /v1/trading/config at runtime; when the endpoint is unavailable
+    (pre-cutover backend) fall back to the legacy static constant for both
+    sides, preserving the old behaviour.
     """
-    code = str(POLY_BUILDER_CODE or "").strip()
-    if code.startswith("0x") and len(code) == 66:
-        try:
-            int(code[2:], 16)
-            return code
-        except ValueError:
-            pass
-    return "0x0000000000000000000000000000000000000000000000000000000000000000"
+    cfg = fetch_trading_config()
+    codes = (cfg or {}).get("builderCodes") or {}
+    code = str(codes.get("sell" if side_upper == "SELL" else "buy") or "").strip()
+    if _is_valid_bytes32(code):
+        return code
+    legacy = str(POLY_BUILDER_CODE or "").strip()
+    if _is_valid_bytes32(legacy):
+        return legacy
+    return ZERO_BYTES32
 
 
 def _normalize_sell_size_for_clob(size: float) -> float:
@@ -4078,9 +4257,21 @@ def place_order(
         adjusted_price = price
 
     use_proxy_funder = bool(proxy_address and wallet_address and proxy_address.lower() != wallet_address.lower())
-    signature_type_candidates = [1, 2] if use_proxy_funder else [None]
+    session_sig = _session_data().get("signatureType")
+    wallet_kind = _session_wallet_kind()
+    if use_proxy_funder and (wallet_kind == "deposit" or session_sig == 3):
+        # Deposit wallet (POLY_1271): the SDK sets maker = signer = funder, i.e.
+        # both are the deposit-wallet address; the EOA key still signs (ERC-1271).
+        signature_type_candidates = [3]
+    elif use_proxy_funder and session_sig in (1, 2):
+        signature_type_candidates = [int(session_sig)]
+    elif use_proxy_funder:
+        # Legacy backends without signatureType on the session: retry 1 → 2.
+        signature_type_candidates = [1, 2]
+    else:
+        signature_type_candidates = [None]
     last_response = None
-    builder_code = _resolve_builder_code()
+    builder_code = _resolve_builder_code(side_upper)
 
     for idx, sig_type in enumerate(signature_type_candidates):
         signed_flow_payload = None
@@ -4179,10 +4370,22 @@ def place_order(
             print(json.dumps(resp.json(), indent=2))
             return
 
+        try:
+            body = resp.json() or {}
+        except Exception:
+            body = {}
+
+        if resp.status_code == 403 and str(body.get("error") or "").upper() == "MIGRATION_REQUIRED":
+            details = body.get("details") or {}
+            print("Order rejected: Safe-wallet trading has ended (MIGRATION_REQUIRED).")
+            print(f"  Cutoff: {details.get('cutoffDate') or 'see almanac.market'}")
+            print("  Migrate once in the web app at https://almanac.market, then use")
+            print("  'Refresh Trading Session'. Cancels, withdrawals, and claims still work.")
+            return
+
         # Some backends still verify proxy orders using signatureType=2; retry once.
         should_retry_invalid_sig = False
         try:
-            body = resp.json() or {}
             details = body.get("details") if isinstance(body, dict) else {}
             error_text = str((details or {}).get("error") or body.get("error") or "").lower()
             should_retry_invalid_sig = "invalid signature" in error_text
