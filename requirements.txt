@@ -17,4 +17,7 @@ pandas
 tabulate
 requests
 py_clob_client_v2
+eth-account
+web3
+py-builder-relayer-client
 psycopg2-binary>=2.9,<3
