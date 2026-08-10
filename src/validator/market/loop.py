@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -323,15 +324,6 @@ def score_market(
             use_synthetic_data=use_synthetic_data,
         )
 
-        if write_trading_history_to is not None:
-            with open(write_trading_history_to, "w") as f:
-                json.dump(trading_history, f, indent=2)
-            logger.info(
-                "Trading history written to %s (%d trades)",
-                write_trading_history_to,
-                len(trading_history),
-            )
-
         tao_price_usd = fetch_tao_price()
         logger.info("TAO price: %.2f USD", tao_price_usd)
 
@@ -344,6 +336,25 @@ def score_market(
             share,
             effective_epoch_budget,
         )
+
+        if write_trading_history_to is not None:
+            snapshot_at = datetime.now(timezone.utc).isoformat()
+            payload = {
+                "snapshot_at": snapshot_at,
+                "epoch_budget_usd": effective_epoch_budget,
+                "subnet_epoch_budget_usd": current_epoch_budget,
+                "budget_share": share,
+                "data": trading_history,
+            }
+            with open(write_trading_history_to, "w") as f:
+                json.dump(payload, f, indent=2)
+            logger.info(
+                "Trading history written to %s (%d trades, snapshot_at=%s, epoch_budget_usd=%.2f)",
+                write_trading_history_to,
+                len(trading_history),
+                snapshot_at,
+                effective_epoch_budget,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to fetch required Almanac data for scoring: %s", exc)
         logger.warning("Skipping Almanac Market scoring for this epoch.")
@@ -360,6 +371,8 @@ def score_market(
         all_uids = [int(uid) for uid in metagraph.uids.tolist()]
     all_hotkeys = metagraph.hotkeys
 
+    # Pin the UTC day boundary once for the whole scoring run.
+    as_of = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     (
         miner_history,
         general_pool_history,
@@ -367,7 +380,13 @@ def score_market(
         general_pool_scores,
         miner_budget,
         general_pool_budget,
-    ) = score_miners(all_uids, all_hotkeys, trading_history, effective_epoch_budget)
+    ) = score_miners(
+        all_uids,
+        all_hotkeys,
+        trading_history,
+        effective_epoch_budget,
+        as_of=as_of,
+    )
 
     if print_stats:
         print("\n############################## OVERALL POOL STATS ##############################")

@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,7 @@ from src.validator.market.scoring import (  # noqa: E402
     calculate_weights,
     compute_edge,
     pool_epoch_fees,
+    utc_epoch_boundary,
     ROLLING_HISTORY_IN_DAYS,
     PARETO_ALPHA,
     EDGE_DECAY,
@@ -115,21 +117,14 @@ def resolve_epoch_budget(offline: bool):
 # Historical replay
 # ---------------------------------------------------------------------------
 
-def _trade_date(trade):
-    raw = trade.get("completed_at")
-    if not raw:
-        return None
-    raw = str(raw)
-    return raw.split("T")[0] if "T" in raw else raw
-
-
 def calculate_historical_payouts(miner_history, all_uids, all_hotkeys, trading_history, debug=False):
     """
     Replay each epoch as it would have scored on the day, returning per-epoch
     payout and diagnostic arrays.
 
-    Much cheaper than the v1 replay: there is no solver in the loop, so this is
-    O(epochs x traders) rather than 30 sequential convex programs.
+    Each day D is scored with as_of = D+1 (exclusive UTC midnight) so the
+    trailing window is always ROLLING_HISTORY_IN_DAYS long — not a truncated
+    prefix of today's matrix.
     """
     n_epochs = miner_history["n_epochs"]
     epoch_dates = miner_history["epoch_dates"]
@@ -143,20 +138,17 @@ def calculate_historical_payouts(miner_history, all_uids, all_hotkeys, trading_h
     print(f"Replaying {n_epochs} epochs...")
     for epoch_idx in range(n_epochs):
         epoch_date = epoch_dates[epoch_idx]
-        epoch_trades = [
-            t for t in trading_history
-            if t.get("is_completed") and (_trade_date(t) or "9999") <= epoch_date
-        ]
-        if not epoch_trades:
-            continue
+        as_of = datetime.strptime(epoch_date, "%Y-%m-%d").replace(
+            tzinfo=timezone.utc
+        ) + timedelta(days=1)
 
         try:
             _, _, m_scores, g_scores, m_budget, g_budget = score_miners(
                 all_uids=all_uids,
                 all_hotkeys=all_hotkeys,
-                trading_history=epoch_trades,
+                trading_history=trading_history,
                 verbose=False,
-                target_epoch_idx=epoch_idx,
+                as_of=as_of,
             )
         except Exception as exc:  # noqa: BLE001
             print(f"Warning: epoch {epoch_idx} ({epoch_date}) failed: {exc}")
@@ -172,12 +164,83 @@ def calculate_historical_payouts(miner_history, all_uids, all_hotkeys, trading_h
 
         if debug:
             print(
-                f"  epoch {epoch_idx:>2} {epoch_date}: {len(epoch_trades):>6} trades  "
+                f"  epoch {epoch_idx:>2} {epoch_date}: as_of {as_of.date()}  "
                 f"budget ${m_budget:>10,.2f}  paid ${out['mp_payout'][epoch_idx]:>10,.2f}  "
                 f"active {int(out['mp_active'][epoch_idx]):>3}  dust {int(out['mp_dust'][epoch_idx]):>3}"
             )
 
     return out
+
+
+def _u16_weights(weights):
+    """Quantise a weight vector the way chain set_weights effectively does."""
+    arr = np.asarray(weights, dtype=float)
+    if arr.size == 0 or arr.sum() <= 0:
+        return np.zeros_like(arr, dtype=int)
+    scaled = arr / arr.sum()
+    return np.floor(scaled * 65535 + 1e-12).astype(int)
+
+
+def export_settled_epoch(
+    path: Path,
+    *,
+    as_of,
+    snapshot_at: str,
+    epoch_budget_usd: float,
+    miner_budget: float,
+    gp_budget: float,
+    miner_history,
+    miners_scores,
+    weight_uids,
+    weights,
+):
+    """Write a checkable end-to-end epoch artefact (per account + burn + u16)."""
+    u16 = _u16_weights(weights)
+    weight_by_uid = {int(uid): float(w) for uid, w in zip(weight_uids, weights)}
+    u16_by_uid = {int(uid): int(q) for uid, q in zip(weight_uids, u16)}
+
+    accounts = []
+    for eid, tok, active, dormant, edge, score in zip(
+        miners_scores["entity_ids"],
+        miners_scores["tokens"],
+        miners_scores["active"],
+        miners_scores["dormant"],
+        miners_scores["edge"],
+        miners_scores["scores"],
+    ):
+        uid = int(eid)
+        accounts.append({
+            "uid": uid,
+            "tokens": float(tok),
+            "tier": "active" if active else ("dust" if dormant else "gated"),
+            "edge": float(edge),
+            "score": float(score),
+            "weight": weight_by_uid.get(uid, 0.0),
+            "weight_u16": u16_by_uid.get(uid, 0),
+        })
+
+    burn_w = weight_by_uid.get(BURN_UID, 0.0)
+    payload = {
+        "snapshot_at": snapshot_at,
+        "as_of": as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of),
+        "epoch_budget_usd": float(epoch_budget_usd),
+        "miner_pool_fees": float(miner_budget),
+        "general_pool_fees": float(gp_budget),
+        "distributed": float(miners_scores["distributed"]),
+        "undistributed": float(miners_scores["undistributed"]),
+        "burn_uid": BURN_UID,
+        "burn_weight": burn_w,
+        "burn_weight_u16": u16_by_uid.get(BURN_UID, 0),
+        "weight_sum": float(sum(weights)),
+        "weight_sum_u16": int(u16.sum()),
+        "n_epochs": int(miner_history["n_epochs"]),
+        "epoch_dates": list(miner_history["epoch_dates"]),
+        "accounts": accounts,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Wrote settled-epoch export to {path}")
 
 
 def print_daily_stats(miner_history, general_pool_history, hist, miners_scores, general_pool_scores):
@@ -386,6 +449,12 @@ def main():
                         help="Limit pool tables to the top N by payout")
     parser.add_argument("--history", type=Path, default=_TRADING_HISTORY_PATH)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--export-epoch",
+        type=Path,
+        default=None,
+        help="Write a settled-epoch JSON (per-account tokens, burn, u16 weights)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -397,9 +466,21 @@ def main():
     if not args.history.exists():
         raise FileNotFoundError(f"Trading history not found: {args.history}")
     with open(args.history) as f:
-        trading_history = json.load(f)
-    if isinstance(trading_history, dict):
-        trading_history = trading_history.get("data", trading_history)
+        raw = json.load(f)
+
+    snapshot_at = None
+    exported_budget = None
+    if isinstance(raw, dict):
+        snapshot_at = raw.get("snapshot_at")
+        exported_budget = raw.get("epoch_budget_usd")
+        trading_history = raw.get("data", raw)
+        if snapshot_at or exported_budget is not None:
+            print(
+                f"Export metadata: snapshot_at={snapshot_at!r}  "
+                f"epoch_budget_usd={exported_budget}"
+            )
+    else:
+        trading_history = raw
     print(f"Loaded {len(trading_history)} trades")
 
     all_uids, all_hotkeys = extract_miner_info(trading_history)
@@ -414,9 +495,14 @@ def main():
         weight_uids.insert(0, EXCESS_MINER_WEIGHT_UID)
     weight_uids.append(BURN_UID)
 
-    current_epoch_budget = resolve_epoch_budget(args.offline)
+    if exported_budget is not None:
+        current_epoch_budget = float(exported_budget)
+        print(f"Using epoch_budget_usd from export: ${current_epoch_budget:,.2f}")
+    else:
+        current_epoch_budget = resolve_epoch_budget(args.offline)
     print(f"Subnet epoch (24h) emission budget: ${current_epoch_budget:,.2f}\n")
 
+    as_of = utc_epoch_boundary()
     print("Scoring current epoch...")
     (miner_history, general_pool_history, miners_scores,
      general_pool_scores, miner_budget, gp_budget) = score_miners(
@@ -425,6 +511,7 @@ def main():
         trading_history=trading_history,
         current_epoch_budget=current_epoch_budget,
         verbose=True,
+        as_of=as_of,
     )
 
     if args.no_replay:
@@ -484,6 +571,20 @@ def main():
             f"\nWARNING: smallest weight is {min(nz) / max(nz):.2e} of the largest, "
             f"below the u16 quantisation floor ({U16_QUANT_FLOOR:.2e}). "
             "Dustings will round to zero on chain."
+        )
+
+    if args.export_epoch is not None:
+        export_settled_epoch(
+            args.export_epoch,
+            as_of=as_of,
+            snapshot_at=snapshot_at or datetime.now(timezone.utc).isoformat(),
+            epoch_budget_usd=current_epoch_budget,
+            miner_budget=miner_budget,
+            gp_budget=gp_budget,
+            miner_history=miner_history,
+            miners_scores=miners_scores,
+            weight_uids=weight_uids,
+            weights=weights,
         )
 
 

@@ -32,7 +32,7 @@ def test_score_market_applies_budget_share_to_epoch_budget(
     monkeypatch.setattr(market_loop, "fetch_tao_price", lambda: 100.0)
     monkeypatch.setattr(market_loop, "compute_epoch_budget", lambda metagraph, tao_price_usd: 200.0)
 
-    def _score_miners(all_uids, all_hotkeys, trading_history, current_epoch_budget):
+    def _score_miners(all_uids, all_hotkeys, trading_history, current_epoch_budget, **kwargs):
         seen["score_miners_budget"] = float(current_epoch_budget)
         return (
             {},

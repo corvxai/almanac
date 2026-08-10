@@ -21,14 +21,17 @@ of (routed volume, PnL), and ALPHA slides along that frontier. ALPHA = 1 is a
 pure pro-rata fee rebate, ALPHA = 0 is pure skill. No solver, no price, no
 cliff.
 
-Both axes are ADDITIVE (epoch volume, decayed positive PnL). That makes the
+Both axes are ADDITIVE (decayed volume, decayed positive PnL). That makes the
 score invariant to splitting one book across k identities: the exponents sum
 to 1, so k entities holding (v/k, p/k) score exactly what one entity holding
-(v, p) does. An earlier draft used a shrunk ROI estimate ("edge") as the skill
-axis; the per-entity shrinkage constant made splitting strictly profitable
-(sum of P/(V/k + S) grows with k), so it was replaced with raw PnL share. The
-residual benefit of splitting is escaping the per-entity concentration cap,
-which is bounded at plain pro-rata and priced by UID registration.
+(v, p) does. Volume uses the same exponential memory as the edge gate and
+dust ranking, so a steady daily cadence outranks an equal monthly total
+dumped in one burst when both show up today. An earlier draft used a shrunk
+ROI estimate ("edge") as the skill axis; the per-entity shrinkage constant
+made splitting strictly profitable (sum of P/(V/k + S) grows with k), so it
+was replaced with raw PnL share. The residual benefit of splitting is
+escaping the per-entity concentration cap, which is bounded at plain
+pro-rata and priced by UID registration.
 
 BUDGET
 ------
@@ -36,10 +39,13 @@ Per pool, per epoch:  B = fees collected by that pool this epoch (1% of volume).
     - dust reserve is taken off the top (small, bounded)
     - the rest is distributed by score, subject to a per-trader concentration
       cap and a fee-return floor
-    - anything the cap prevents distributing is simply not distributed; it
-      falls through to burn. Concentrated epochs pay out less. That is correct:
-      the cap is what makes volume-dumping unprofitable.
-Only the final miner-pool weight boost is allowed to exceed budget.
+    - when caps bind before the residual is exhausted, leftover budget is not
+      distributed and falls through to burn. Note the effective per-entity cap
+      is max(CONCENTRATION_CAP, CAP_RELAX_FACTOR / n_scoring), so with few
+      scorers total cap capacity can exceed the pool — the cap redistributes
+      rather than forcing burn in that regime.
+Only the final miner-pool weight boost is allowed to exceed fee budget
+(clamped so miner + general-pool weight never exceeds 1.0).
 
 TIERS
 -----
@@ -52,20 +58,22 @@ The general pool is a separate track that is being retired: its history is
 still built for fee accounting and reporting, but scoring is disabled
 (ENABLE_GENERAL_POOL_SCORING) and it earns zero tokens.
 
-build_epoch_history() from the current codebase is unchanged and still upstream
-of everything here; this module consumes the same dict.
+build_epoch_history() buckets the rolling UTC-day window; pass an explicit
+``as_of`` boundary so live scoring and historical replay share one definition.
 """
 
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+AsOf = Optional[Union[datetime, date]]
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -79,8 +87,10 @@ VOLUME_FEE = 0.01
 # frontier. This is the single most important number in the file.
 PARETO_ALPHA = 0.65
 
-# --- skill estimation ------------------------------------------------------
-# One decay, applied once, to both PnL and volume. Half-life ~9.5 days at 0.93.
+# --- skill / presence estimation ------------------------------------------
+# One decay, applied to both PnL and volume. Half-life ~9.5 days at 0.93.
+# Volume memory is the presence axis in the active score (and dust ranking);
+# budget and fee floors still key off this epoch's fees only.
 EDGE_DECAY = 0.93
 
 # --- concentration ---------------------------------------------------------
@@ -166,6 +176,16 @@ def compute_pnl(history: Dict[str, Any]) -> np.ndarray:
     return np.maximum(_decayed(history["profit_prev"], EDGE_DECAY), 0.0)
 
 
+def compute_volume_memory(history: Dict[str, Any]) -> np.ndarray:
+    """
+    Decayed volume per entity — the presence mass in the score.
+
+    Same decay as PnL / edge. Active traders must still trade today to be
+    eligible; among those who do, trailing cadence outranks a one-day burst.
+    """
+    return _decayed(history["volume_prev"], EDGE_DECAY)
+
+
 def compute_edge(history: Dict[str, Any]) -> np.ndarray:
     """
     Decayed PnL / decayed volume per entity. Used for the fee-floor gate and
@@ -173,7 +193,7 @@ def compute_edge(history: Dict[str, Any]) -> np.ndarray:
     small-sample ROI outliers.
     """
     pnl = _decayed(history["profit_prev"], EDGE_DECAY)
-    vol = _decayed(history["volume_prev"], EDGE_DECAY)
+    vol = compute_volume_memory(history)
     return np.maximum(pnl, 0.0) / np.maximum(vol, 1.0)
 
 
@@ -199,9 +219,10 @@ def _project_to_budget(
     Distribute `total` proportional to `shares`, respecting per-entity floors and
     a per-entity cap, by water-filling.
 
-    Replaces the LP diversity constraints, the dust constraint, the retention
-    floors and the post-hoc rescaling passes. Undistributable mass (when caps
-    bind) is intentionally left on the table and falls through to burn.
+    Starts at floors (scaled to fit if needed), then allocates the residual
+    proportional to shares with per-entity headroom up to the cap. By
+    construction ``0 <= sum(alloc) <= total``. Undistributable mass (when caps
+    bind before the residual is exhausted) is left on the table for burn.
     """
     n = shares.size
     if n == 0 or total <= 0:
@@ -215,34 +236,48 @@ def _project_to_budget(
     if floors.sum() > total:
         floors = floors * (total / floors.sum())
 
-    alloc = np.zeros(n)
-    pinned = np.zeros(n, dtype=bool)
-    remaining = total
+    # Floors first so a simultaneous cap+floor pin cannot overshoot the budget.
+    alloc = floors.copy()
+    remaining = float(total - alloc.sum())
+    free = np.ones(n, dtype=bool)
 
     for _ in range(max_iter):
         if remaining <= 1e-12:
             break
-        free = ~pinned
+        headroom = np.where(free, cap - alloc, 0.0)
+        free = free & (headroom > 1e-12)
         w = np.where(free, shares, 0.0)
         if w.sum() <= 0:
-            need = np.where(free, floors, 0.0)
-            if need.sum() > 0:
-                alloc = alloc + need * (min(remaining, need.sum()) / need.sum())
             break
 
-        candidate = np.where(free, remaining * w / w.sum(), alloc)
-        over = free & (candidate > cap + 1e-9)
-        under = free & (candidate < floors - 1e-9)
-
-        if not over.any() and not under.any():
-            alloc = candidate
+        add = remaining * w / w.sum()
+        over = free & (add > headroom + 1e-9)
+        if not over.any():
+            alloc = alloc + add
             break
 
-        alloc = np.where(over, cap, np.where(under, floors, alloc))
-        pinned = pinned | over | under
-        remaining = max(total - alloc[pinned].sum(), 0.0)
+        alloc = np.where(over, cap, alloc)
+        free = free & ~over
+        remaining = float(total - alloc.sum())
 
     return alloc
+
+
+def utc_epoch_boundary(as_of: AsOf = None) -> datetime:
+    """Exclusive end of the scoring window, floored to 00:00 UTC.
+
+    Epochs are calendar UTC days. Pass an explicit ``as_of`` so validators and
+    historical replays share the same window; default is wall-clock now.
+    """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    if isinstance(as_of, datetime):
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        else:
+            as_of = as_of.astimezone(timezone.utc)
+        return as_of.replace(hour=0, minute=0, second=0, microsecond=0)
+    return datetime(as_of.year, as_of.month, as_of.day, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +324,7 @@ def dust_allocations(history: Dict[str, Any], dormant: np.ndarray, pnl: np.ndarr
     if idx.size == 0 or reserve <= 0:
         return out
 
-    v_mem = _decayed(history["volume_prev"], EDGE_DECAY)
+    v_mem = compute_volume_memory(history)
     quality = pareto_score(v_mem[idx], pnl[idx])
     if quality.sum() <= 0:
         quality = np.ones(idx.size)
@@ -322,11 +357,11 @@ def score_pool(history: Dict[str, Any], budget: float, allow_dust: bool, verbose
         }
 
     cur = history["n_epochs"] - 1
-    epoch_volume = history["volume_prev"][cur]
     epoch_fees = history["fees_prev"][cur]
 
     edge = compute_edge(history)
     pnl = compute_pnl(history)
+    v_mem = compute_volume_memory(history)
     active, dormant = classify_entities(history, edge, allow_dust)
 
     # --- dust reserve off the top ------------------------------------------
@@ -337,7 +372,7 @@ def score_pool(history: Dict[str, Any], budget: float, allow_dust: bool, verbose
     # --- Pareto score over active traders ----------------------------------
     scores = np.zeros(n)
     if active.any():
-        scores[active] = pareto_score(epoch_volume[active], pnl[active])
+        scores[active] = pareto_score(v_mem[active], pnl[active])
 
     # --- fee-return floors --------------------------------------------------
     floors = np.zeros(n)
@@ -376,6 +411,7 @@ def build_epoch_history(
     all_hotkeys: List[str],
     is_miner_pool: bool,
     target_epoch_idx: int = None,
+    as_of: AsOf = None,
 ) -> Dict[str, Any]:
     """
     Bucket settled trades into (epoch, entity) matrices.
@@ -385,11 +421,28 @@ def build_epoch_history(
     off-Almanac position top-ups) now count their losses against profit_prev
     even though their volume is excluded — see the comment at the flagged
     branch below.
-    """
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = today - timedelta(days=ROLLING_HISTORY_IN_DAYS)
 
-    n_epochs = target_epoch_idx + 1 if target_epoch_idx is not None else ROLLING_HISTORY_IN_DAYS
+    ``as_of`` is the exclusive end of the window (floored to 00:00 UTC). The
+    trailing ``ROLLING_HISTORY_IN_DAYS`` calendar days before that boundary are
+    scored. Pass it explicitly for historical replay and so a single scoring
+    run does not drift across midnight mid-computation.
+
+    ``target_epoch_idx`` is retained for older call sites: when ``as_of`` is
+    omitted it selects the exclusive boundary so epoch ``k`` of a live-built
+    history is replayed against a full trailing window ending on that day,
+    rather than a truncated ``k+1``-day matrix.
+    """
+    if as_of is not None:
+        today = utc_epoch_boundary(as_of)
+    elif target_epoch_idx is not None:
+        today = utc_epoch_boundary(None) - timedelta(
+            days=ROLLING_HISTORY_IN_DAYS - 1 - int(target_epoch_idx)
+        )
+    else:
+        today = utc_epoch_boundary(None)
+
+    start_date = today - timedelta(days=ROLLING_HISTORY_IN_DAYS)
+    n_epochs = ROLLING_HISTORY_IN_DAYS
     epoch_dates = [(start_date + timedelta(days=i)).date() for i in range(n_epochs)]
 
     entity_set = set()
@@ -534,6 +587,7 @@ def score_miners(
     current_epoch_budget: float = None,
     verbose: bool = False,
     target_epoch_idx: int = None,
+    as_of: AsOf = None,
 ):
     """
     Drop-in replacement for the v1 entry point. Same signature, same 6-tuple.
@@ -542,6 +596,8 @@ def score_miners(
     distribution — each pool's distributable budget is the fees that pool
     generated. It is retained because calculate_weights needs it as the
     denominator when converting tokens to on-chain weight.
+
+    Pass ``as_of`` (UTC day boundary) so both pools share one pinned window.
     """
     if trading_history is None:
         raise ValueError("trading_history is required")
@@ -554,11 +610,21 @@ def score_miners(
     if all_uids is None or all_hotkeys is None:
         raise ValueError("all_uids and all_hotkeys are required")
 
+    # One pinned boundary for both pools — never call datetime.now() twice.
+    if as_of is not None:
+        boundary = utc_epoch_boundary(as_of)
+    elif target_epoch_idx is not None:
+        boundary = utc_epoch_boundary(None) - timedelta(
+            days=ROLLING_HISTORY_IN_DAYS - 1 - int(target_epoch_idx)
+        )
+    else:
+        boundary = utc_epoch_boundary(None)
+
     miner_history = build_epoch_history(
-        trading_history, all_uids, all_hotkeys, True, target_epoch_idx
+        trading_history, all_uids, all_hotkeys, True, as_of=boundary
     )
     general_pool_history = build_epoch_history(
-        trading_history, all_uids, all_hotkeys, False, target_epoch_idx
+        trading_history, all_uids, all_hotkeys, False, as_of=boundary
     )
 
     miner_budget = pool_epoch_fees(miner_history)
@@ -654,7 +720,8 @@ def calculate_weights(
 
     Weight is denominated as a fraction of the full subnet epoch budget, so an
     epoch that generates few fees emits proportionally less and burns the rest.
-    The miner-pool boost is the only step permitted to exceed budget.
+    The miner-pool boost may lift payouts above fee budget, but is clamped so
+    miner + general-pool weight never exceeds 1.0 (no all-or-nothing cliff).
     """
     miners_to_penalize = miners_to_penalize or []
     all_uids = all_uids or []
@@ -663,7 +730,14 @@ def calculate_weights(
     if total_epoch_budget <= 0:
         return [0.0] * len(all_uids)
 
-    for uid, tok in zip(miner_scores["entity_ids"], miner_scores["tokens"]):
+    entity_ids = list(miner_scores["entity_ids"])
+    if BURN_UID in entity_ids:
+        raise AssertionError(
+            f"BURN_UID ({BURN_UID}) collides with a scored entity id; "
+            "refusing to mix burn residual into a miner weight"
+        )
+
+    for uid, tok in zip(entity_ids, miner_scores["tokens"]):
         if uid in miners_to_penalize:
             continue
         weights[uid] = float(tok) / total_epoch_budget
@@ -671,10 +745,13 @@ def calculate_weights(
     miner_weight = sum(weights.values())
     gp_weight = float(np.sum(gp_scores["tokens"])) / total_epoch_budget  # burned
 
-    if MINER_POOL_WEIGHT_BOOST_PERCENTAGE > 0 and miner_weight + gp_weight < 1.0:
-        boosted = {u: w * (1 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE) for u, w in weights.items()}
-        if sum(boosted.values()) + gp_weight <= 1.0:
-            weights = boosted
+    # Partial boost up to the remaining headroom — avoids a hard cliff where
+    # one dollar of distributed volume suddenly drops the whole pool's boost.
+    if MINER_POOL_WEIGHT_BOOST_PERCENTAGE > 0 and miner_weight > 0:
+        room = max(1.0 - gp_weight, 0.0)
+        factor = min(1.0 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE, room / miner_weight)
+        if factor > 1.0:
+            weights = {u: w * factor for u, w in weights.items()}
             miner_weight = sum(weights.values())
 
     weights[BURN_UID] = weights.get(BURN_UID, 0.0) + max(1.0 - miner_weight, 0.0)

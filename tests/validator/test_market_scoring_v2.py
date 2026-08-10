@@ -84,6 +84,33 @@ def test_score_is_split_invariant():
     np.testing.assert_allclose(results[4], results[1], rtol=1e-6)
 
 
+def test_volume_memory_rewards_trailing_cadence():
+    """Same volume/PnL today: the book with trailing cadence must out-earn a newcomer."""
+    hv, hp = honest_pool(n=10)
+    today_vol, roi = 20_000.0, 0.03
+
+    steady_v = np.full((N_EPOCHS, 1), today_vol)
+    steady_p = steady_v * roi
+
+    # Clear eligibility (3 epochs) without building meaningful volume memory.
+    burst_v = np.zeros((N_EPOCHS, 1))
+    burst_p = np.zeros((N_EPOCHS, 1))
+    for i in range(3):
+        burst_v[i, 0] = 100.0
+        burst_p[i, 0] = 100.0 * roi
+    burst_v[-1, 0] = today_vol
+    burst_p[-1, 0] = today_vol * roi
+
+    r, _ = run_pool(
+        np.hstack([hv, steady_v, burst_v]),
+        np.hstack([hp, steady_p, burst_p]),
+    )
+    steady_idx = hv.shape[1]
+    burst_idx = steady_idx + 1
+    assert r["active"][steady_idx] and r["active"][burst_idx]
+    assert r["tokens"][steady_idx] > r["tokens"][burst_idx]
+
+
 def wash_fixture():
     """One $3k win 12 epochs ago, then $50k/epoch of PnL-neutral churn."""
     hv, hp = honest_pool(n=10)
@@ -200,3 +227,83 @@ def test_general_pool_scoring_disabled_but_fees_reported():
     assert gp_history["n_entities"] == 1
     assert gp_budget > 0  # fees still collected and reported
     assert float(np.sum(gp_scores["tokens"])) == 0.0  # but nothing is paid
+
+
+def test_project_to_budget_never_exceeds_total():
+    """Caps + floors binding together must not overshoot (audit repro)."""
+    from src.validator.market.scoring import _project_to_budget
+
+    shares = np.array([1.0] * 16 + [1e-9] * 40)
+    floors = np.array([0.0] * 16 + [1.0] * 40)
+    alloc = _project_to_budget(shares, total=100.0, floors=floors, cap_fraction=0.06)
+    assert float(alloc.sum()) <= 100.0 + 1e-9
+    assert float(alloc.sum()) == pytest.approx(100.0, abs=1e-6)
+    np.testing.assert_allclose(alloc[16:], 1.0, atol=1e-9)
+    assert np.all(alloc >= 0.0)
+
+
+def test_project_to_budget_respects_floors_and_caps():
+    from src.validator.market.scoring import _project_to_budget, CAP_RELAX_FACTOR
+
+    rng = np.random.default_rng(0)
+    for n in (5, 16, 40):
+        shares = rng.random(n)
+        floors = rng.random(n) * 2.0
+        total = 100.0
+        alloc = _project_to_budget(shares, total=total, floors=floors, cap_fraction=0.06)
+        n_scoring = max(int(np.sum(shares > 0)), 1)
+        cap = max(0.06, CAP_RELAX_FACTOR / n_scoring) * total
+        floors_fit = np.clip(floors, 0.0, cap)
+        if floors_fit.sum() > total:
+            floors_fit = floors_fit * (total / floors_fit.sum())
+        assert float(alloc.sum()) <= total + 1e-6
+        assert np.all(alloc <= cap + 1e-6)
+        assert np.all(alloc + 1e-6 >= floors_fit)
+
+
+def test_boost_clamps_instead_of_cliff():
+    """Crossing the full-boost threshold must taper, not drop the whole boost."""
+    from src.validator.market.scoring import (
+        BURN_UID,
+        MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
+        calculate_weights,
+    )
+
+    budget = 1000.0
+    # Just under the full-boost cliff: distributed * 1.75 == budget.
+    under = budget / (1 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE) - 1.0
+    over = budget / (1 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE) + 1.0
+
+    def run(tokens: float):
+        miner = {"entity_ids": [1], "tokens": np.array([tokens])}
+        gp = {"tokens": np.array([0.0])}
+        uids = [1, BURN_UID]
+        return calculate_weights(miner, gp, budget, tokens, 0.0, [], uids)
+
+    w_under = run(under)
+    w_over = run(over)
+    # Both should still receive a boost factor > 1 relative to unboosted share.
+    assert w_under[0] > under / budget
+    assert w_over[0] > over / budget
+    # Continuous: overshoot case must not collapse to the unboosted weight.
+    assert w_over[0] > (over / budget) * 1.01
+
+
+def test_as_of_keeps_full_trailing_window():
+    """Historical as_of must score a full ROLLING window, not a truncated prefix."""
+    from src.validator.market.scoring import ROLLING_HISTORY_IN_DAYS, build_epoch_history
+
+    as_of = datetime(2026, 6, 15, tzinfo=timezone.utc)
+    hist = build_epoch_history([], [1], ["", "hk1"], True, as_of=as_of)
+    assert hist["n_epochs"] == ROLLING_HISTORY_IN_DAYS
+    assert hist["epoch_dates"][0] == "2026-05-16"
+    assert hist["epoch_dates"][-1] == "2026-06-14"
+
+
+def test_burn_uid_collision_rejected():
+    from src.validator.market.scoring import BURN_UID, calculate_weights
+
+    miner = {"entity_ids": [BURN_UID], "tokens": np.array([10.0])}
+    gp = {"tokens": np.array([0.0])}
+    with pytest.raises(AssertionError, match="BURN_UID"):
+        calculate_weights(miner, gp, 100.0, 10.0, 0.0, [], [BURN_UID])
