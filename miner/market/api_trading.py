@@ -325,11 +325,14 @@ def _detect_credential_sets():
     required_keys = [
         "EOA_WALLET_ADDRESS",
         "EOA_WALLET_PK",
-        "EOA_PROXY_FUNDER"
     ]
-    
-    # Optional credential keys (must exist but can be empty)
+
+    # Optional credential keys (must exist but can be empty).
+    # EOA_PROXY_FUNDER is an offline fallback only — the session's proxyWallet
+    # (Safe or deposit wallet, server-derived) is authoritative, so a blank
+    # value must not disqualify the credential set.
     optional_keys = [
+        "EOA_PROXY_FUNDER",
         "POLYMARKET_API_KEY",
         "POLYMARKET_API_SECRET",
         "POLYMARKET_API_PASSPHRASE"
@@ -4984,12 +4987,7 @@ def generate_polymarket_credentials():
         print(f"Invalid private key: {exc}")
         return
 
-    proxy_funder_address = _get_credential("EOA_PROXY_FUNDER")
-    if not proxy_funder_address:
-        print(f"EOA_PROXY_FUNDER not found in {ENV_PATH}. Please set it and try again.")
-        return
-
-    # Create client and generate credentials
+    # Credential generation is L1 auth by the EOA key alone; no funder needed.
     client = ClobClient(host=POLYMARKET_CLOB_HOST, key=private_key, chain_id=POLYGON_CHAIN_ID)
     try:
         credentials = client.create_or_derive_api_key()
