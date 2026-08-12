@@ -89,6 +89,7 @@ from .constants import (
     MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
     PARETO_ALPHA,
     ROLLING_HISTORY_IN_DAYS,
+    SKIP_METAGRAPH_MINER_ALIGNMENT,
     U16_QUANT_FLOOR,
 )
 
@@ -333,11 +334,13 @@ def score_pool(history: Dict[str, Any], budget: float, allow_dust: bool, verbose
 
     distributed = float(tokens.sum())
     if verbose:
-        print(
+        msg = (
             f"  budget={budget:,.2f}  active={int(active.sum())}  dormant={int(dormant.sum())}  "
             f"dust={dust.sum():,.2f}  distributed={distributed:,.2f}  "
             f"undistributed={budget - distributed:,.2f}"
         )
+        print(msg)
+        logger.info(msg.strip())
 
     return {
         "entity_ids": history["entity_ids"],
@@ -421,7 +424,7 @@ def build_epoch_history(
             miner_hotkey = trade.get("miner_hotkey")
             if miner_id is None or miner_hotkey is None:
                 continue
-            if (
+            if not SKIP_METAGRAPH_MINER_ALIGNMENT and (
                 miner_id not in all_uids
                 or miner_id >= len(all_hotkeys)
                 or all_hotkeys[miner_id] != miner_hotkey
@@ -577,11 +580,15 @@ def score_miners(
     gp_budget = pool_epoch_fees(general_pool_history)
 
     if verbose:
-        print(f"Epoch fees — miner: {miner_budget:,.2f}  general: {gp_budget:,.2f}")
+        msg = f"Epoch fees — miner: {miner_budget:,.2f}  general: {gp_budget:,.2f}"
+        print(msg)
+        logger.info(msg)
         print("Miner pool:")
     miners_scores = score_pool(miner_history, miner_budget, allow_dust=True, verbose=verbose)
     if verbose:
-        print("General pool:" + ("" if ENABLE_GENERAL_POOL_SCORING else " (scoring disabled)"))
+        gp_msg = "General pool:" + ("" if ENABLE_GENERAL_POOL_SCORING else " (scoring disabled)")
+        print(gp_msg)
+        logger.info(gp_msg)
     # Passing a zero budget yields a correctly-shaped all-zero result, so the
     # return contract and downstream reporting are unchanged when disabled.
     general_pool_scores = score_pool(
@@ -605,33 +612,75 @@ def score_miners(
 # Reporting
 # ---------------------------------------------------------------------------
 
-def _print_pool(label: str, history: Dict[str, Any], scores: Dict[str, Any] | None, include_current_epoch: bool) -> None:
+def print_pool_table(
+    history: Dict[str, Any],
+    scores: Dict[str, Any] | None,
+    budget: float,
+    label: str,
+    top_n: int | None = None,
+) -> None:
+    """Per-trader breakdown used by the validator and the scoring simulator."""
     n = history["n_entities"]
-    print(f"--- {label} ---")
     if n == 0:
-        print("(no entities)")
+        print(f"\n--- {label} --- (no entities)")
         return
 
-    cur = history["n_epochs"] - 1
-    vol, pnl, fees = history["volume_prev"], history["profit_prev"], history["fees_prev"]
-    tokens = scores["tokens"] if scores is not None else np.zeros(n)
+    from tabulate import tabulate
 
-    order = np.argsort(-tokens) if scores is not None else np.argsort(-pnl.sum(axis=0))
-    header = f"{'ID':>12} {'30d Vol':>12} {'30d PnL':>12}"
-    if include_current_epoch:
-        header += f" {'Ep Vol':>10} {'Ep PnL':>10} {'Ep Fees':>9} {'Tokens':>10}"
-    print(header)
-    for j in order:
-        line = (
-            f"{str(history['entity_ids'][j]):>12} "
-            f"{vol[:, j].sum():>12,.0f} {pnl[:, j].sum():>12,.2f}"
-        )
-        if include_current_epoch:
-            line += (
-                f" {vol[cur, j]:>10,.0f} {pnl[cur, j]:>10,.2f}"
-                f" {fees[cur, j]:>9,.2f} {tokens[j]:>10,.2f}"
-            )
-        print(line)
+    cur = history["n_epochs"] - 1
+    vol_m = history["volume_prev"]
+    pnl_m = history["profit_prev"]
+    fee_m = history["fees_prev"]
+    trd_m = history["trade_counts"]
+
+    rows: List[List[Any]] = []
+    for j, eid in enumerate(history["entity_ids"]):
+        tv = float(vol_m[:, j].sum())
+        tp = float(pnl_m[:, j].sum())
+        ev = float(vol_m[cur, j])
+        ep = float(pnl_m[cur, j])
+        ef = float(fee_m[cur, j])
+        et = int(trd_m[cur, j])
+        tokens = float(scores["tokens"][j]) if scores is not None else 0.0
+        if scores is not None:
+            tier = "active" if scores["active"][j] else ("dust" if scores["dormant"][j] else "gated")
+            edge = float(scores["edge"][j])
+        else:
+            tier = "-"
+            edge = (tp / tv) if tv > 0 else 0.0
+
+        rows.append([
+            str(eid),
+            tier,
+            int(np.sum(trd_m[:, j] > 0)),
+            int(trd_m[:, j].sum()),
+            f"${tv:,.0f}",
+            f"${tp:,.2f}",
+            f"{(tp / tv * 100) if tv else 0:.2f}%",
+            f"{edge * 100:.2f}%",
+            et,
+            f"${ev:,.0f}",
+            f"${ep:,.2f}",
+            f"{(ep / ev * 100) if ev else 0:.2f}%",
+            f"${ef:,.2f}",
+            f"{tokens:,.2f}",
+            f"{(tokens / budget * 100) if budget > 0 else 0:.2f}%",
+            f"{tokens / ef:.2f}x" if ef > 0 else "-",
+        ])
+
+    if scores is not None:
+        rows.sort(key=lambda r: -float(str(r[13]).replace(",", "")))
+    else:
+        rows.sort(key=lambda r: -float(str(r[4]).replace("$", "").replace(",", "") or 0))
+    if top_n:
+        rows = rows[:top_n]
+
+    print(f"\n--- {label} (budget ${budget:,.2f}) ---")
+    print(tabulate(rows, headers=[
+        "ID", "Tier", "Eps", "Preds", "30d Vol", "30d PnL", "30d ROI",
+        "Edge", "Ep Preds", "Ep Vol", "Ep PnL", "Ep ROI", "Ep Fees",
+        "Earnings", "Share", "vs Fees",
+    ], tablefmt="grid", stralign="right"))
 
 
 def print_pool_stats(
@@ -641,10 +690,135 @@ def print_pool_stats(
     miner_scores: Dict[str, Any] = None,
     general_pool_scores: Dict[str, Any] = None,
 ) -> None:
-    """Plain-text pool summaries. Same call surface the v1 module exposed."""
-    _print_pool("MINER POOL", miner_history, miner_scores, include_current_epoch)
-    gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
-    _print_pool(gp_label, general_pool_history, general_pool_scores, include_current_epoch)
+    """Pool summaries for validator stdout (same shape as the scoring simulator)."""
+    miner_budget = pool_epoch_fees(miner_history) if include_current_epoch else 0.0
+    gp_budget = pool_epoch_fees(general_pool_history) if include_current_epoch else 0.0
+    if include_current_epoch:
+        print_pool_table(miner_history, miner_scores, miner_budget, "MINER POOL")
+        gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
+        print_pool_table(general_pool_history, general_pool_scores, gp_budget, gp_label)
+        if MINER_POOL_WEIGHT_BOOST_PERCENTAGE > 0 and miner_scores is not None:
+            print(
+                f"* Miner weights are boosted by {MINER_POOL_WEIGHT_BOOST_PERCENTAGE:.0%} "
+                "after token allocation (see WEIGHTS / calculate_weights)."
+            )
+    else:
+        print_pool_table(miner_history, None, 0.0, "MINER POOL (trailing)")
+        gp_label = (
+            "GENERAL POOL (trailing)"
+            if ENABLE_GENERAL_POOL_SCORING
+            else "GENERAL POOL (trailing, scoring disabled)"
+        )
+        print_pool_table(general_pool_history, None, 0.0, gp_label)
+
+
+def print_mechanism_diagnostics(
+    miner_history: Dict[str, Any],
+    miners_scores: Dict[str, Any],
+    miner_budget: float,
+) -> None:
+    """Compact v2 health checks — mirrors the simulator diagnostics block."""
+    print("\n--- MECHANISM DIAGNOSTICS ---")
+    print(
+        f"alpha={PARETO_ALPHA}  pnl_decay={EDGE_DECAY}  "
+        f"cap={CONCENTRATION_CAP:.0%} (relax {CAP_RELAX_FACTOR}x)\n"
+        f"fee_floor={FEE_FLOOR_MULTIPLIER:.0%} (gate roi>={FEE_FLOOR_MIN_ROI:.2%})  "
+        f"dust_reserve={DUST_RESERVE_SHARE:.0%}  "
+        f"inactivity={INACTIVITY_EPOCHS} epochs"
+    )
+
+    tokens = miners_scores["tokens"]
+    active = miners_scores["active"]
+    dormant = miners_scores["dormant"]
+    n = miner_history["n_entities"]
+    gated = n - int(active.sum()) - int(dormant.sum())
+    print(
+        f"\nTiers: active={int(active.sum())}  dust={int(dormant.sum())}  "
+        f"gated/inactive={gated}  total={n}"
+    )
+    print(f"Paid (tokens > 0): {int(np.sum(tokens > 0))}")
+
+    dist = float(miners_scores["distributed"])
+    burned = float(miners_scores["undistributed"])
+    print(
+        f"\nBudget: ${miner_budget:,.2f}  distributed ${dist:,.2f} "
+        f"({(dist / miner_budget * 100) if miner_budget else 0:.1f}%)  "
+        f"burned ${burned:,.2f}"
+    )
+    if dist > miner_budget + 1e-6:
+        print(f"  WARNING: budget overrun by ${dist - miner_budget:,.6f}")
+    else:
+        print("Budget constraint: OK")
+
+    n_scoring = max(int(np.sum(miners_scores["scores"] > 0)), 1)
+    cap_eff = max(CONCENTRATION_CAP, CAP_RELAX_FACTOR / n_scoring)
+    if miner_budget > 0 and tokens.size:
+        top = float(tokens.max() / miner_budget)
+        n_at_cap = int(np.sum(tokens / miner_budget >= cap_eff - 1e-6))
+        print(
+            f"Concentration: top share {top:.2%}, effective cap {cap_eff:.2%} "
+            f"({n_scoring} scoring), {n_at_cap} at cap"
+        )
+        if n_at_cap >= max(3, n_scoring // 2):
+            print(
+                "  NOTE: cap is binding for most payees — payouts are flattening. "
+                "Raise CAP_RELAX_FACTOR or lower CONCENTRATION_CAP deliberately."
+            )
+
+    edge = miners_scores["edge"]
+    live = edge[active | dormant]
+    if live.size:
+        print(
+            f"Edge (decayed ROI): zero={int(np.sum(live <= 0))}  "
+            f"below floor gate={int(np.sum((live > 0) & (live < FEE_FLOOR_MIN_ROI)))}  "
+            f"median={np.median(live[live > 0]) * 100 if np.any(live > 0) else 0:.2f}%  "
+            f"max={live.max() * 100:.2f}%"
+        )
+
+    if dormant.any():
+        d = np.sort(tokens[dormant])[::-1]
+        print(
+            f"Dust: {d.size} miners, total ${d.sum():,.2f}, "
+            f"range ${d.min():,.4f}-${d.max():,.4f} "
+            f"(ratio {d.min() / d.max() if d.max() > 0 else 0:.2f}, target {DUST_MIN_RATIO})"
+        )
+        if np.any(d <= 0):
+            print("  WARNING: dormant miner scored zero dust")
+        else:
+            print("Dust floor: OK (no dormant miner at zero)")
+
+    cur = miner_history["n_epochs"] - 1
+    fees = miner_history["fees_prev"][cur]
+    floored = active & (miners_scores["edge"] >= FEE_FLOOR_MIN_ROI) & (fees > 0)
+    if floored.any():
+        ratio = tokens[floored] / fees[floored]
+        print(
+            f"Fee return (active, positive edge): min {ratio.min():.2f}x  "
+            f"median {np.median(ratio):.2f}x  max {ratio.max():.2f}x"
+        )
+
+    trd = miner_history["trade_counts"]
+    blocked = (
+        (np.sum(trd > 0, axis=0) < MIN_EPOCHS_FOR_ELIGIBILITY)
+        | (np.sum(trd, axis=0) < MIN_TRADES_FOR_ELIGIBILITY)
+    ) & (miner_history["volume_prev"][cur] > 0)
+    if blocked.any():
+        print(
+            f"Build-up gate: {int(blocked.sum())} miners traded this epoch but are "
+            f"still in build-up (paid ${fees[blocked].sum():,.2f} in fees, earned nothing)"
+        )
+
+    logger.info(
+        "Scoring v2: miner_budget=%.2f distributed=%.2f burned=%.2f "
+        "active=%d dust=%d gated=%d paid=%d",
+        miner_budget,
+        dist,
+        burned,
+        int(active.sum()),
+        int(dormant.sum()),
+        gated,
+        int(np.sum(tokens > 0)),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -711,12 +885,16 @@ def calculate_weights(
         nz = [w for w in vec if w > 0]
         peak = max(nz) if nz else 0.0
         smallest = min(nz) if nz else 0.0
-        print(
+        msg = (
             f"miner weight={miner_weight:.4f}  burn={weights[BURN_UID]:.4f}  "
             f"nonzero uids={len(nz)}  smallest/largest={smallest / peak if peak else 0:.2e} "
             f"(u16 floor {U16_QUANT_FLOOR:.2e})"
         )
+        print(msg)
+        logger.info(msg)
         if peak and smallest / peak < U16_QUANT_FLOOR:
-            print("  WARNING: smallest emitted weight rounds to zero under u16 quantisation")
+            warn = "WARNING: smallest emitted weight rounds to zero under u16 quantisation"
+            print(f"  {warn}")
+            logger.warning(warn)
 
     return vec

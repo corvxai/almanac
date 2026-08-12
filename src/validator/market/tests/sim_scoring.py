@@ -35,28 +35,18 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.validator.market.constants import (  # noqa: E402
     BURN_UID,
-    CAP_RELAX_FACTOR,
-    CONCENTRATION_CAP,
-    DUST_MIN_RATIO,
-    DUST_RESERVE_SHARE,
-    EDGE_DECAY,
     ENABLE_GENERAL_POOL_SCORING,
     EXCESS_MINER_WEIGHT_UID,
-    FEE_FLOOR_MIN_ROI,
-    FEE_FLOOR_MULTIPLIER,
-    INACTIVITY_EPOCHS,
-    MIN_EPOCHS_FOR_ELIGIBILITY,
-    MIN_TRADES_FOR_ELIGIBILITY,
     MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
-    PARETO_ALPHA,
     ROLLING_HISTORY_IN_DAYS,
     TOTAL_MINER_ALPHA_PER_DAY,
     U16_QUANT_FLOOR,
 )
 from src.validator.market.scoring import (  # noqa: E402
     calculate_weights,
-    compute_edge,
     pool_epoch_fees,
+    print_mechanism_diagnostics,
+    print_pool_table,
     score_miners,
     utc_epoch_boundary,
 )
@@ -289,158 +279,11 @@ def print_daily_stats(miner_history, general_pool_history, hist, miners_scores, 
 
 
 # ---------------------------------------------------------------------------
-# Pool tables
-# ---------------------------------------------------------------------------
-
-def print_pool_table(history, scores, budget, label, top_n=None):
-    """Per-trader breakdown: history, edge, epoch activity, payout."""
-    n = history["n_entities"]
-    if n == 0:
-        print(f"\n--- {label} --- (no entities)")
-        return
-
-    cur = history["n_epochs"] - 1
-    vol_m, pnl_m, fee_m, trd_m = (
-        history["volume_prev"], history["profit_prev"],
-        history["fees_prev"], history["trade_counts"],
-    )
-    edge = scores["edge"]
-    tokens = scores["tokens"]
-
-    rows = []
-    for j, eid in enumerate(history["entity_ids"]):
-        tv = float(vol_m[:, j].sum())
-        tp = float(pnl_m[:, j].sum())
-        ev, ep, ef = float(vol_m[cur, j]), float(pnl_m[cur, j]), float(fee_m[cur, j])
-        et = int(trd_m[cur, j])
-        tier = "active" if scores["active"][j] else ("dust" if scores["dormant"][j] else "gated")
-        rows.append([
-            str(eid), tier,
-            int(np.sum(trd_m[:, j] > 0)), int(trd_m[:, j].sum()),
-            f"${tv:,.0f}", f"${tp:,.2f}",
-            f"{(tp / tv * 100) if tv else 0:.2f}%",
-            f"{edge[j] * 100:.2f}%",
-            et, f"${ev:,.0f}", f"${ep:,.2f}",
-            f"{(ep / ev * 100) if ev else 0:.2f}%",
-            f"${ef:,.2f}",
-            f"{tokens[j]:,.2f}",
-            f"{(tokens[j] / budget * 100) if budget > 0 else 0:.2f}%",
-            f"{tokens[j] / ef:.2f}x" if ef > 0 else "-",
-        ])
-
-    rows.sort(key=lambda r: -float(r[13].replace(",", "")))
-    if top_n:
-        rows = rows[:top_n]
-
-    print(f"\n--- {label} (budget ${budget:,.2f}) ---")
-    print(tabulate(rows, headers=[
-        "ID", "Tier", "Eps", "Preds", "30d Vol", "30d PnL", "30d ROI",
-        "Edge", "Ep Preds", "Ep Vol", "Ep PnL", "Ep ROI", "Ep Fees",
-        "Earnings", "Share", "vs Fees",
-    ], tablefmt="grid", stralign="right"))
-
-
-# ---------------------------------------------------------------------------
-# Mechanism diagnostics
-# ---------------------------------------------------------------------------
-
-def print_mechanism_diagnostics(miner_history, miners_scores, miner_budget):
-    print("\n--- MECHANISM DIAGNOSTICS ---")
-    print(
-        f"alpha={PARETO_ALPHA}  pnl_decay={EDGE_DECAY}  "
-        f"cap={CONCENTRATION_CAP:.0%} (relax {CAP_RELAX_FACTOR}x)\n"
-        f"fee_floor={FEE_FLOOR_MULTIPLIER:.0%} (gate roi>={FEE_FLOOR_MIN_ROI:.2%})  "
-        f"dust_reserve={DUST_RESERVE_SHARE:.0%}  "
-        f"inactivity={INACTIVITY_EPOCHS} epochs"
-    )
-
-    tokens, active, dormant = miners_scores["tokens"], miners_scores["active"], miners_scores["dormant"]
-    n = miner_history["n_entities"]
-    gated = n - int(active.sum()) - int(dormant.sum())
-    print(
-        f"\nTiers: active={int(active.sum())}  dust={int(dormant.sum())}  "
-        f"gated/inactive={gated}  total={n}"
-    )
-    print(f"Paid (tokens > 0): {int(np.sum(tokens > 0))}")
-
-    # --- budget accounting ---
-    dist = miners_scores["distributed"]
-    print(
-        f"\nBudget: ${miner_budget:,.2f}  distributed ${dist:,.2f} "
-        f"({(dist / miner_budget * 100) if miner_budget else 0:.1f}%)  "
-        f"burned ${miners_scores['undistributed']:,.2f}"
-    )
-    assert dist <= miner_budget + 1e-6, "BUDGET VIOLATION"
-    print("Budget constraint: OK")
-
-    # --- concentration ---
-    n_scoring = max(int(np.sum(miners_scores["scores"] > 0)), 1)
-    cap_eff = max(CONCENTRATION_CAP, CAP_RELAX_FACTOR / n_scoring)
-    if miner_budget > 0:
-        top = tokens.max() / miner_budget
-        n_at_cap = int(np.sum(tokens / miner_budget >= cap_eff - 1e-6))
-        print(
-            f"Concentration: top share {top:.2%}, effective cap {cap_eff:.2%} "
-            f"({n_scoring} scoring), {n_at_cap} at cap"
-        )
-        if n_at_cap >= max(3, n_scoring // 2):
-            print(
-                "  NOTE: cap is binding for most payees — payouts are flattening. "
-                "Raise CAP_RELAX_FACTOR or lower CONCENTRATION_CAP deliberately."
-            )
-
-    # --- edge distribution ---
-    edge = miners_scores["edge"]
-    live = edge[active | dormant]
-    if live.size:
-        print(
-            f"Edge (decayed ROI): zero={int(np.sum(live <= 0))}  "
-            f"below floor gate={int(np.sum((live > 0) & (live < FEE_FLOOR_MIN_ROI)))}  "
-            f"median={np.median(live[live > 0]) * 100 if np.any(live > 0) else 0:.2f}%  "
-            f"max={live.max() * 100:.2f}%"
-        )
-
-    # --- dust ranking ---
-    if dormant.any():
-        d = np.sort(tokens[dormant])[::-1]
-        print(
-            f"Dust: {d.size} miners, total ${d.sum():,.2f}, "
-            f"range ${d.min():,.4f}-${d.max():,.4f} "
-            f"(ratio {d.min() / d.max():.2f}, target {DUST_MIN_RATIO})"
-        )
-        assert np.all(d > 0), "DUST FAILURE: dormant miner scored zero"
-        print("Dust floor: OK (no dormant miner at zero)")
-
-    # --- fee floor ---
-    cur = miner_history["n_epochs"] - 1
-    fees = miner_history["fees_prev"][cur]
-    floored = active & (miners_scores["edge"] >= FEE_FLOOR_MIN_ROI) & (fees > 0)
-    if floored.any():
-        ratio = tokens[floored] / fees[floored]
-        print(
-            f"Fee return (active, positive edge): min {ratio.min():.2f}x  "
-            f"median {np.median(ratio):.2f}x  max {ratio.max():.2f}x"
-        )
-
-    # --- build-up gate cost ---
-    trd = miner_history["trade_counts"]
-    blocked = (
-        (np.sum(trd > 0, axis=0) < MIN_EPOCHS_FOR_ELIGIBILITY)
-        | (np.sum(trd, axis=0) < MIN_TRADES_FOR_ELIGIBILITY)
-    ) & (miner_history["volume_prev"][cur] > 0)
-    if blocked.any():
-        print(
-            f"Build-up gate: {int(blocked.sum())} miners traded this epoch but are "
-            f"still in build-up (paid ${fees[blocked].sum():,.2f} in fees, earned nothing)"
-        )
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Simulate scoring_v2 against trading history")
+    parser = argparse.ArgumentParser(description="Simulate scoring against trading history")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--offline", action="store_true",

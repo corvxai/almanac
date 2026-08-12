@@ -67,6 +67,12 @@ INACTIVITY_EPOCHS = 10
 # built (fees, reporting) but it earns zero tokens.
 ENABLE_GENERAL_POOL_SCORING = False
 
+# Testing only: score trades even when miner_id/hotkey do not match this
+# network's metagraph, and skip profile/metadata penalties. Use when replaying
+# mainnet trade history against a testnet (or otherwise mismatched) validator.
+# MUST be False in production.
+SKIP_METAGRAPH_MINER_ALIGNMENT = False
+
 # Weighting parameters
 # If ENABLE_STATIC_WEIGHTING is True, we will use the static weighting parameters below.
 ENABLE_STATIC_WEIGHTING = False

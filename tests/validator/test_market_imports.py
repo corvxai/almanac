@@ -22,6 +22,7 @@ def test_constants_module_loads_known_values() -> None:
     assert constants.EDGE_DECAY == 0.93
     assert constants.FEE_FLOOR_MULTIPLIER == 0.57
     assert constants.ENABLE_GENERAL_POOL_SCORING is False
+    assert constants.SKIP_METAGRAPH_MINER_ALIGNMENT is True
 
 
 def test_scoring_module_exposes_public_entries() -> None:
@@ -32,7 +33,7 @@ def test_scoring_module_exposes_public_entries() -> None:
 
     from src.validator.market import scoring
 
-    for name in ("score_miners", "calculate_weights", "print_pool_stats"):
+    for name in ("score_miners", "calculate_weights", "print_pool_stats", "print_mechanism_diagnostics"):
         assert callable(getattr(scoring, name)), f"missing {name}"
 
 

@@ -51,6 +51,7 @@ def test_score_market_applies_budget_share_to_epoch_budget(
         general_pool_budget,
         miners_to_penalize,
         all_uids,
+        verbose=False,
     ):
         seen["calculate_weights_budget"] = float(current_epoch_budget)
         return [1.0, 0.0]
@@ -59,6 +60,7 @@ def test_score_market_applies_budget_share_to_epoch_budget(
         score_miners=_score_miners,
         calculate_weights=_calculate_weights,
         print_pool_stats=lambda *args, **kwargs: None,
+        print_mechanism_diagnostics=lambda *args, **kwargs: None,
     )
     monkeypatch.setitem(sys.modules, "src.validator.market.scoring", fake_scoring_module)
 
