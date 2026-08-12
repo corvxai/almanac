@@ -10,98 +10,83 @@ PRICE_BUFFER_ADJUSTMENT = 0.01
 # Public Polymarket builder code (bytes32) used for order attribution.
 POLY_BUILDER_CODE = "0x196258757463baebc045d1adc1c9c0a55cad7ac5d09ab7b7e1eb31803d9bfbe0"
 
-ROI_MIN = 0.0
-VOLUME_MIN = 1
-VOLUME_DECAY = 0.85
-RAMP = 0.1 # originally 0.1
-RHO_CAP = 0.06 # originally 0.1
-KAPPA_NEXT = 0.03 # originally 0.02
-KAPPA_SCALING_FACTOR = 8 # originally 6; raised to 8 to fund more active high-volume contributors past the Phase 1 ROI cliff
-# Minimum allocation gate (x) for eligible traders in both optimizer phases.
-DUST_GATE = 0.001
+# --- the Pareto knob -------------------------------------------------------
+# 1.0 = pay volume only, 0.0 = pay PnL only. Everything between is on the
+# frontier. This is the single most important number in the scoring module.
+PARETO_ALPHA = 0.65
 
-# Phase 1: optional entropy smoothing for the knapsack objective (Proposal 2).
-# Keep disabled by default for no behavior change; set true to enable.
-ENABLE_P1_ENTROPY_SMOOTHING = True
-# Entropy strength (tau) used when ENABLE_P1_ENTROPY_SMOOTHING=True.
-# ~0.01-0.02 materially softens cliff behavior in recent production sims.
-SOFTNESS_TAU = 0.005
+# --- skill / presence estimation ------------------------------------------
+# One decay, applied to both PnL and volume. Half-life ~9.5 days at 0.93.
+# Volume memory is the presence axis in the active score (and dust ranking);
+# budget and fee floors still key off this epoch's fees only.
+EDGE_DECAY = 0.93
 
-# Standalone miner fee-return floor for current-epoch losers with positive history.
-ENABLE_MINER_POSITIVE_SCORE_FEE_FLOOR = True
-# If enabled, eligible miners receive at least this fraction of current-epoch fees.
-MINER_POSITIVE_SCORE_FEE_FLOOR_MULTIPLIER = 0.7
+# --- concentration ---------------------------------------------------------
+# Max share of the epoch pool any single trader can take.
+CONCENTRATION_CAP = 0.06
+# A hard cap flattens the top of the distribution into equal payouts whenever
+# it binds for everyone, which is what happens in thin epochs. So the effective
+# cap never tightens below CAP_RELAX_FACTOR x the equal share of the traders who
+# actually scored. With many scorers CONCENTRATION_CAP binds; with few, the cap
+# only clips genuine outliers and the ranking survives.
+CAP_RELAX_FACTOR = 2.5
 
-# Build-up period constants for miner eligibility
+# --- fee-return floor ------------------------------------------------------
+# Active traders with real trailing edge get back at least this much of the
+# fees they paid this epoch, even on a losing day. Must stay <= 1 / (1 + boost)
+# so the boosted floor never exceeds 1.0x fees — otherwise PnL-neutral wash
+# volume becomes a guaranteed money pump (validated at import time below).
+FEE_FLOOR_MULTIPLIER = 0.57
+# Floor eligibility: decayed PnL / decayed volume must clear this. `> 0` is not
+# enough — a single old win plus PnL-neutral churn keeps decayed PnL positive
+# forever. The trader's own volume grows the denominator, so holding the gate
+# while churning requires maintaining real, proportional wins.
+FEE_FLOOR_MIN_ROI = 0.005
+# Floors may never consume more than this share of the active pool.
+FEE_FLOOR_MAX_POOL_SHARE = 0.40
+
+# --- dust ------------------------------------------------------------------
+# Total reserve for dormant-but-historically-positive miners.
+DUST_RESERVE_SHARE = 0.02
+# Worst-ranked dormant miner gets this fraction of the best-ranked one's dust.
+DUST_MIN_RATIO = 0.25
+# Sanity check only: emitted dust weight relative to the largest weight in the
+# vector. Below ~1/65535 the u16 quantisation in set_weights rounds it to zero
+# and the dusting does nothing.
+U16_QUANT_FLOOR = 1.0 / 65535.0
+
+# --- gates -----------------------------------------------------------------
+MIN_EPOCH_VOLUME = 1.0
 MIN_EPOCHS_FOR_ELIGIBILITY = 3  # Must trade for X epochs
-MIN_PREDICTIONS_FOR_ELIGIBILITY = 5  # Must have X predictions
-# If enabled, miners with no trades in the last N epochs are ineligible (no dustings).
-ENABLE_MINER_INACTIVITY_GATE = True
-MINER_INACTIVITY_EPOCHS = 10
+MIN_TRADES_FOR_ELIGIBILITY = 5  # Must have X predictions/trades
+INACTIVITY_EPOCHS = 10
 
-# Protocol Contributor scoring: route profitable epoch flow, cap diversity on epoch volume,
-# and weight Phase 2 redistribution by historical volume credibility.
-ENABLE_PROTOCOL_CONTRIBUTOR = False
-# Diversity cap volume basis when protocol contributor is on: "block" (epoch) or "eff" (legacy).
-RHO_VOLUME_BASIS = "block"
-# Phase 2: multiply ROI weights by log(1 + v_memory) to favor long-term fee contributors.
-ENABLE_P2_CREDIBILITY_WEIGHT = False
-# Phase 2: apply credibility only when roi > kappa (don't amplify below-kappa penalties).
-ENABLE_P2_CRED_ON_POSITIVE_DELTA_ONLY = True
-# Phase 2: epoch-active miners retain at least this fraction of their Phase 1 gate (0=off).
-# Higher = keep more of the Phase 1 gate, less redistribution. Lower = more redistribution, phase 2 can reallocate more.
-PHASE2_ACTIVE_GATE_RETENTION = 0.1
-# Only apply retention when Phase 1 opened a meaningful gate (above dust).
-PHASE2_ACTIVE_GATE_MIN_X1 = 0.08
-# Phase 1 budget volume blend when protocol contributor is on: 0=v_eff (legacy), 1=v_block.
-PHASE1_BUDGET_VOLUME_ALPHA = 0.1
+# --- pool split / boost ----------------------------------------------------
+# Dynamic split: each pool's budget is the fees that pool generated.
+# General pool is a separate track and is being retired: its history is still
+# built (fees, reporting) but it earns zero tokens.
+ENABLE_GENERAL_POOL_SCORING = False
 
 # Weighting parameters
 # If ENABLE_STATIC_WEIGHTING is True, we will use the static weighting parameters below.
 ENABLE_STATIC_WEIGHTING = False
 GENERAL_POOL_WEIGHT_PERCENTAGE = 0.5
 MINER_WEIGHT_PERCENTAGE = 1 - GENERAL_POOL_WEIGHT_PERCENTAGE
-# Max percent of the total possible epoch budget that can be allocated.
-# This is used to give more weights (and in turn, more incentives) to the miners when we aren't using the full budget.
-MAX_EPOCH_BUDGET_PERCENTAGE_FOR_BOOST = .25
-
-# If ENABLE_STATIC_WEIGHTING is False, we will use the dynamic weighting.
-# This is used to give more weights (and in turn, more incentives) to the miners when we aren't using the full budget by increasing the total miner pool budget.
-# Set to 0 to disable.
-MINER_POOL_BUDGET_BOOST_PERCENTAGE = 0
-
-# Early stage incentive parameters for the miner pool
-ENABLE_ES_MINER_INCENTIVES = False
-# This is the multiplier of the trader's fees paid that is given to the miner if they have positive tokens (score). 1.2 == 120%.
-ESM_MIN_MULTIPLIER = 1.2
-# If ENABLE_ES_MINER_LOSS_COMPENSATION is True, we will give back the trader's fees paid to the miner if they have positive epoch profit but no score.
-ENABLE_ES_MINER_LOSS_COMPENSATION = True
-# This is the percentage of the trader's fees paid that is given back to the miner if they have positive epoch profit but no score. 1.0 == 100%.
-ESM_LOSS_COMPENSATION_PERCENTAGE = 1.0
-
-# Early stage incentive parameters for the general pool
-ENABLE_ES_GP_INCENTIVES = False
-# This is the multiplier of the trader's fees paid that is given to the gp trader if they have positive tokens (score). 1.2 == 120%.
-ESGP_MIN_MULTIPLIER = 1.2
-# If ENABLE_ES_GP_LOSS_COMPENSATION is True, we will give back the trader's fees paid to the gp trader if they have positive epoch profit but no score.
-ENABLE_ES_GP_LOSS_COMPENSATION = False
-# This is the percentage of the trader's fees paid that is given back to the gp trader if they have positive epoch profit but no score. 1.0 == 100%.
-ESGP_LOSS_COMPENSATION_PERCENTAGE = 1.0
 
 # This is used to give more weights (and in turn, more incentives) to the miners by taking the final miner pool weights and boosting them by this percentage.
 # Set to 0 to disable.
 MINER_POOL_WEIGHT_BOOST_PERCENTAGE = 0.75
 
-TOTAL_MINER_ALPHA_PER_DAY = 2952 # 7200 alpha per day for entire subnet * 0.41 (41% for miners)
+TOTAL_MINER_ALPHA_PER_DAY = 2952  # 7200 alpha per day for entire subnet * 0.41 (41% for miners)
 
 # Subnet owner burn UID
 BURN_UID = 210
 # Subnet owner excess miner weight UID
 EXCESS_MINER_WEIGHT_UID = None
-EXCESS_MINER_MIN_WEIGHT = 0 # 0.00001 should be low enough if used
-EXCESS_MINER_TAKE_PERCENTAGE = 0 # percentage of the excess miner weight that is set to EXCESS_MINER_WEIGHT_UID. rest goes to BURN_UID.
+EXCESS_MINER_MIN_WEIGHT = 0  # 0.00001 should be low enough if used
+EXCESS_MINER_TAKE_PERCENTAGE = 0  # percentage of the excess miner weight that is set to EXCESS_MINER_WEIGHT_UID. rest goes to BURN_UID.
 
-# --- Fail-fast validation of weight-distribution constants ---------------
+# --- Fail-fast validation of weight-distribution / scoring constants -------
 # These feed directly into on-chain weight setting. A value outside [0, 1]
 # silently produces negative or >1 burn/excess weights (corrupting payouts)
 # rather than erroring, so validate them at import time.
@@ -112,4 +97,11 @@ if not 0.0 <= EXCESS_MINER_TAKE_PERCENTAGE <= 1.0:
 if not 0.0 <= GENERAL_POOL_WEIGHT_PERCENTAGE <= 1.0:
     raise ValueError(
         f"GENERAL_POOL_WEIGHT_PERCENTAGE must be in [0, 1], got {GENERAL_POOL_WEIGHT_PERCENTAGE}"
+    )
+# Fail fast: if the boosted floor exceeds 1.0x fees, wash trading turns +EV.
+if FEE_FLOOR_MULTIPLIER * (1 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE) > 1.0:
+    raise ValueError(
+        f"FEE_FLOOR_MULTIPLIER ({FEE_FLOOR_MULTIPLIER}) x boost "
+        f"(1 + {MINER_POOL_WEIGHT_BOOST_PERCENTAGE}) exceeds 1.0x fees; "
+        "this makes fee-churning profitable. Lower one of them."
     )

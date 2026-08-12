@@ -1,5 +1,5 @@
 """
-Simulation script to test scoring_v2.py against real trading history.
+Simulation script to test scoring.py against real trading history.
 
 1. Loads data/trading_history.json
 2. Extracts miner UIDs / hotkeys
@@ -33,32 +33,34 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.validator.market.scoring import (  # noqa: E402
-    score_miners,
-    calculate_weights,
-    compute_edge,
-    pool_epoch_fees,
-    utc_epoch_boundary,
-    ROLLING_HISTORY_IN_DAYS,
-    PARETO_ALPHA,
-    EDGE_DECAY,
-    CONCENTRATION_CAP,
+from src.validator.market.constants import (  # noqa: E402
+    BURN_UID,
     CAP_RELAX_FACTOR,
-    FEE_FLOOR_MULTIPLIER,
-    FEE_FLOOR_MIN_ROI,
-    ENABLE_GENERAL_POOL_SCORING,
-    DUST_RESERVE_SHARE,
+    CONCENTRATION_CAP,
     DUST_MIN_RATIO,
+    DUST_RESERVE_SHARE,
+    EDGE_DECAY,
+    ENABLE_GENERAL_POOL_SCORING,
+    EXCESS_MINER_WEIGHT_UID,
+    FEE_FLOOR_MIN_ROI,
+    FEE_FLOOR_MULTIPLIER,
     INACTIVITY_EPOCHS,
     MIN_EPOCHS_FOR_ELIGIBILITY,
     MIN_TRADES_FOR_ELIGIBILITY,
     MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
+    PARETO_ALPHA,
+    ROLLING_HISTORY_IN_DAYS,
+    TOTAL_MINER_ALPHA_PER_DAY,
     U16_QUANT_FLOOR,
-    BURN_UID,
+)
+from src.validator.market.scoring import (  # noqa: E402
+    calculate_weights,
+    compute_edge,
+    pool_epoch_fees,
+    score_miners,
+    utc_epoch_boundary,
 )
 
-TOTAL_MINER_ALPHA_PER_DAY = 2952
-EXCESS_MINER_WEIGHT_UID = None
 FALLBACK_ALPHA_PRICE_USD = 5.0  # used with --offline
 
 _TRADING_HISTORY_PATH = _REPO_ROOT / "data" / "trading_history.json"

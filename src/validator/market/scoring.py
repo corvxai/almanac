@@ -1,5 +1,5 @@
 """
-scoring_v2.py
+Almanac Market Scoring v2
 
 DESIGN
 ------
@@ -71,84 +71,30 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
+from .constants import (
+    BURN_UID,
+    CAP_RELAX_FACTOR,
+    CONCENTRATION_CAP,
+    DUST_MIN_RATIO,
+    DUST_RESERVE_SHARE,
+    EDGE_DECAY,
+    ENABLE_GENERAL_POOL_SCORING,
+    FEE_FLOOR_MAX_POOL_SHARE,
+    FEE_FLOOR_MIN_ROI,
+    FEE_FLOOR_MULTIPLIER,
+    INACTIVITY_EPOCHS,
+    MIN_EPOCH_VOLUME,
+    MIN_EPOCHS_FOR_ELIGIBILITY,
+    MIN_TRADES_FOR_ELIGIBILITY,
+    MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
+    PARETO_ALPHA,
+    ROLLING_HISTORY_IN_DAYS,
+    U16_QUANT_FLOOR,
+)
+
 logger = logging.getLogger(__name__)
 
 AsOf = Optional[Union[datetime, date]]
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-ROLLING_HISTORY_IN_DAYS = 30
-VOLUME_FEE = 0.01
-
-# --- the Pareto knob -------------------------------------------------------
-# 1.0 = pay volume only, 0.0 = pay PnL only. Everything between is on the
-# frontier. This is the single most important number in the file.
-PARETO_ALPHA = 0.65
-
-# --- skill / presence estimation ------------------------------------------
-# One decay, applied to both PnL and volume. Half-life ~9.5 days at 0.93.
-# Volume memory is the presence axis in the active score (and dust ranking);
-# budget and fee floors still key off this epoch's fees only.
-EDGE_DECAY = 0.93
-
-# --- concentration ---------------------------------------------------------
-# Max share of the epoch pool any single trader can take.
-CONCENTRATION_CAP = 0.06
-# A hard cap flattens the top of the distribution into equal payouts whenever
-# it binds for everyone, which is what happens in thin epochs. So the effective
-# cap never tightens below CAP_RELAX_FACTOR x the equal share of the traders who
-# actually scored. With many scorers CONCENTRATION_CAP binds; with few, the cap
-# only clips genuine outliers and the ranking survives.
-CAP_RELAX_FACTOR = 2.5
-
-# --- fee-return floor ------------------------------------------------------
-# Active traders with real trailing edge get back at least this much of the
-# fees they paid this epoch, even on a losing day. Must stay <= 1 / (1 + boost)
-# so the boosted floor never exceeds 1.0x fees — otherwise PnL-neutral wash
-# volume becomes a guaranteed money pump (validated at import time below).
-FEE_FLOOR_MULTIPLIER = 0.57
-# Floor eligibility: decayed PnL / decayed volume must clear this. `> 0` is not
-# enough — a single old win plus PnL-neutral churn keeps decayed PnL positive
-# forever. The trader's own volume grows the denominator, so holding the gate
-# while churning requires maintaining real, proportional wins.
-FEE_FLOOR_MIN_ROI = 0.005
-# Floors may never consume more than this share of the active pool.
-FEE_FLOOR_MAX_POOL_SHARE = 0.40
-
-# --- dust ------------------------------------------------------------------
-# Total reserve for dormant-but-historically-positive miners.
-DUST_RESERVE_SHARE = 0.02
-# Worst-ranked dormant miner gets this fraction of the best-ranked one's dust.
-DUST_MIN_RATIO = 0.25
-# Sanity check only: emitted dust weight relative to the largest weight in the
-# vector. Below ~1/65535 the u16 quantisation in set_weights rounds it to zero
-# and the dusting does nothing.
-U16_QUANT_FLOOR = 1.0 / 65535.0
-
-# --- gates -----------------------------------------------------------------
-MIN_EPOCH_VOLUME = 1.0
-MIN_EPOCHS_FOR_ELIGIBILITY = 3
-MIN_TRADES_FOR_ELIGIBILITY = 5
-INACTIVITY_EPOCHS = 10
-
-# --- pool split / boost ----------------------------------------------------
-# Dynamic split: each pool's budget is the fees that pool generated.
-MINER_POOL_WEIGHT_BOOST_PERCENTAGE = 0.75
-BURN_UID = 210
-
-# General pool is a separate track and is being retired: its history is still
-# built (fees, reporting) but it earns zero tokens.
-ENABLE_GENERAL_POOL_SCORING = False
-
-# Fail fast: if the boosted floor exceeds 1.0x fees, wash trading turns +EV.
-if FEE_FLOOR_MULTIPLIER * (1 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE) > 1.0:
-    raise ValueError(
-        f"FEE_FLOOR_MULTIPLIER ({FEE_FLOOR_MULTIPLIER}) x boost "
-        f"(1 + {MINER_POOL_WEIGHT_BOOST_PERCENTAGE}) exceeds 1.0x fees; "
-        "this makes fee-churning profitable. Lower one of them."
-    )
 
 
 # ---------------------------------------------------------------------------
