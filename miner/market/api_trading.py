@@ -2127,7 +2127,7 @@ def funds_show_balance() -> None:
     if raw is None:
         return
     formatted = _extract_proxy_token_formatted(raw)
-    print("\nSafe/Proxy wallet balance")
+    print("\nDeposit wallet balance")
     if formatted is not None:
         print(f"  {PROXY_TOKEN_SYMBOL}: {formatted}")
     else:
