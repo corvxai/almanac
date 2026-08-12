@@ -704,8 +704,14 @@ def _log_score_table(
 ) -> None:
     """Emit per-miner diagnostics table at INFO level every scoring tick."""
     rows: list[list[object]] = []
+    # Only miners with attributable predictions in the window — not the full
+    # metagraph UID map. Rank among that subset by shaped score (desc).
     ranked = sorted(
-        ((idx, uid, float(scores[idx])) for idx, uid in enumerate(uids)),
+        (
+            (idx, uid, float(scores[idx]))
+            for idx, uid in enumerate(uids)
+            if int(total_in_window[idx]) > 0
+        ),
         key=lambda x: x[2],
         reverse=True,
     )
@@ -725,7 +731,7 @@ def _log_score_table(
         raw_brier: object = "-"
         recs = records_by_idx[idx]
         if recs:
-            raw_brier = float(np.mean([(1.0 - r.p_win) ** 2 for r in recs]))
+            raw_brier = round(float(np.mean([(1.0 - r.p_win) ** 2 for r in recs])), 3)
 
         pnl = 0.0
         pnl_trades = 0
@@ -736,7 +742,7 @@ def _log_score_table(
             pnl += ((1.0 / r.market_p_pred) - 1.0) if r.hit == 1 else -1.0
         roi: object = "-"
         if pnl_trades > 0:
-            roi = pnl / float(pnl_trades)
+            roi = round(pnl / float(pnl_trades), 3)
 
         age_h = latest_age_hours_by_idx[idx]
         age_display: object = "-"
