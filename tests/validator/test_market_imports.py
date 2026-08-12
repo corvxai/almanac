@@ -22,7 +22,7 @@ def test_constants_module_loads_known_values() -> None:
     assert constants.EDGE_DECAY == 0.93
     assert constants.FEE_FLOOR_MULTIPLIER == 0.57
     assert constants.ENABLE_GENERAL_POOL_SCORING is False
-    assert constants.SKIP_METAGRAPH_MINER_ALIGNMENT is True
+    assert constants.SKIP_METAGRAPH_MINER_ALIGNMENT is False
 
 
 def test_scoring_module_exposes_public_entries() -> None:
