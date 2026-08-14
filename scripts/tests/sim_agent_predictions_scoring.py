@@ -69,10 +69,10 @@ SCORE_TIER_LABELS = ("Bottom quartile", "Lower-mid quartile", "Upper-mid quartil
 # Mock data generation constants.
 MOCK_RANDOM_SEED = 29
 MOCK_MINER_COUNT = 100
-# Volume range spans the new rho curve (RHO_THRESHOLD_PREDICTIONS = 150
-# effective, ~14d half-life): low-count miners sit near the rho floor,
-# high-count miners saturate. Sized for orchestrator-metered cadence of
-# roughly 5-15 predictions/miner/day over the 30-day window.
+# Volume range spans the rho curve (leave-floor ~15-20, saturate ~150
+# effective; RHO_THRESHOLD_PREDICTIONS is the logistic midpoint). Low-count
+# miners sit near the rho floor, high-count miners saturate. Sized for
+# orchestrator-metered cadence over the 30-day window.
 MOCK_MIN_PREDICTIONS_PER_MINER = 50
 MOCK_MAX_PREDICTIONS_PER_MINER = 1200
 MOCK_MAX_AGE_DAYS = 30

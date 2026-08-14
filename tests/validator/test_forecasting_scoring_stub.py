@@ -7,7 +7,17 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 
-from src.validator.forecasting.scoring import PARETO_BOOST, PARETO_MU, _apply_pareto, _apply_pareto_by_rank, score_agent_predictions
+from src.validator.forecasting.scoring import (
+    PARETO_BOOST,
+    PARETO_MU,
+    RHO_ALPHA,
+    RHO_FLOOR,
+    RHO_THRESHOLD_PREDICTIONS,
+    _apply_pareto,
+    _apply_pareto_by_rank,
+    compute_significance_score,
+    score_agent_predictions,
+)
 
 
 class _StubMetagraph:
@@ -157,12 +167,22 @@ def test_baseline_brier_gets_zero_score() -> None:
     np.testing.assert_allclose(out, np.array([0.0]))
 
 
+def test_rho_leaves_floor_near_twenty_and_saturates_near_one_fifty() -> None:
+    rho = lambda n: compute_significance_score(
+        n, RHO_THRESHOLD_PREDICTIONS, RHO_ALPHA
+    )
+    assert RHO_FLOOR < rho(15) < 0.15
+    assert rho(20) > rho(15)
+    assert rho(RHO_THRESHOLD_PREDICTIONS) == pytest.approx(0.55, abs=0.01)
+    assert rho(150) > 0.95
+
+
 def test_time_based_rho_rewards_recent_volume() -> None:
     metagraph = _StubMetagraph(uids=[1, 2])
     now = datetime.now(timezone.utc)
 
-    low_volume = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(12)]
-    high_volume = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(40)]
+    low_volume = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(18)]
+    high_volume = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(150)]
 
     out = score_agent_predictions(
         metagraph=metagraph,

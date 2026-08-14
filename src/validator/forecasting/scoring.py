@@ -38,10 +38,10 @@ Post-gate scoring details:
     * Recency-weighted pillar means use exponential calendar-time decay
       (``RECENCY_HALF_LIFE_DAYS``), not an EMA. The function is stateless and
       order-independent across validator ticks.
-    * Rho significance multiplies the composite by a logistic ramp in
-      recency-weighted effective sample size (``RHO_THRESHOLD_PREDICTIONS``),
-      so new or low-volume miners earn proportionally less until they build
-      history.
+    * Rho significance multiplies the composite by a logistic S-curve in
+      recency-weighted effective sample size. The floor holds through ~15-20
+      predictions, then rho ramps toward saturation by ~150
+      (``RHO_THRESHOLD_PREDICTIONS`` is the midpoint, not full rho).
     * Inactivity applies after rho: linear fade beyond ``INACTIVITY_GRACE_HOURS``,
       hard zero beyond ``INACTIVITY_ZERO_HOURS``.
     * Pareto shaping maps positive scores with a leader-relative power law
@@ -107,12 +107,15 @@ MAX_EVENTS_PER_MINER = 1000
 # the pillar means and rho's effective prediction count.
 RECENCY_HALF_LIFE_DAYS = 14.0
 
-# Time-based significance (rho): confidence from recency-weighted sample size.
-# Threshold calibrated for orchestrator cadence of ~50 predictions/miner/day
-# at ~7 days to rho≈0.5 and ~12+ days toward saturation (eff_n≈350-500).
-# Retune proportionally if the orchestrator's daily cap changes.
-RHO_THRESHOLD_PREDICTIONS = 350.0
-RHO_ALPHA = 0.06
+# Time-based significance (rho): logistic in recency-weighted sample size.
+# Orchestration caps how many predictions a miner can make, so rho is a
+# small-sample prior, not a grind incentive. Daily scored volume will vary;
+# the curve is in effective count, not calendar time.
+#   ~15-20  leave the floor (rho just above RHO_FLOOR)
+#   ~80     logistic midpoint (rho≈0.55) = RHO_THRESHOLD_PREDICTIONS
+#   ~150    saturation (rho≈1)
+RHO_THRESHOLD_PREDICTIONS = 80.0
+RHO_ALPHA = 0.05
 RHO_FLOOR = 0.10                      # minimum rho once miner passes hard gates
 
 # Inactivity policy (separate from rho): fade stale miners then switch off.
