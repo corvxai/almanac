@@ -373,4 +373,10 @@ python3 scripts/run_market_miner.py
 python3 scripts/run_api_trading.py
 ```
 
+> **Safe → deposit-wallet cutover:** Polymarket retired legacy Safe proxy wallets.
+> If you traded before the cutover, migrate once in the web app and see
+> [market/DEPOSIT_WALLETS.md](market/DEPOSIT_WALLETS.md) for what changed in the
+> trading client (nothing to configure — orders, claims, and withdrawals adapt
+> to your wallet kind automatically).
+
 Account setup and trading happen on [almanac.market](https://almanac.market). The rest of this file is **Forecasting only**.
