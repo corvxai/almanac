@@ -74,7 +74,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE
+from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE, POLY_BUILDER_CODE_SELL
 
 MARKET_API_URL = "https://api.almanac.market/api"
 #MARKET_API_URL = "http://localhost:3001/api"
@@ -4166,15 +4166,15 @@ def _resolve_builder_code(side_upper: str = "BUY") -> str:
     (zero-fee profile) — the cutover backend rejects mismatched codes
     (INVALID_BUILDER_CODE / BUILDER_CODE_NOT_ALLOWED_ON_SELL). Codes are read
     from GET /v1/trading/config at runtime; when the endpoint is unavailable
-    (pre-cutover backend) fall back to the legacy static constant for both
-    sides, preserving the old behaviour.
+    fall back to POLY_BUILDER_CODE (buy) or POLY_BUILDER_CODE_SELL (sell).
     """
     cfg = fetch_trading_config()
     codes = (cfg or {}).get("builderCodes") or {}
-    code = str(codes.get("sell" if side_upper == "SELL" else "buy") or "").strip()
+    is_sell = side_upper == "SELL"
+    code = str(codes.get("sell" if is_sell else "buy") or "").strip()
     if _is_valid_bytes32(code):
         return code
-    legacy = str(POLY_BUILDER_CODE or "").strip()
+    legacy = str((POLY_BUILDER_CODE_SELL if is_sell else POLY_BUILDER_CODE) or "").strip()
     if _is_valid_bytes32(legacy):
         return legacy
     return ZERO_BYTES32

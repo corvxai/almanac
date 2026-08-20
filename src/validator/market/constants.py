@@ -7,8 +7,10 @@ VOLUME_FEE = 0.01
 # Price adjustment buffer for order placement
 PRICE_BUFFER_ADJUSTMENT = 0.01
 
-# Public Polymarket builder code (bytes32) used for order attribution.
+# Public Polymarket builder codes (bytes32) used for order attribution.
+# BUY = 1% fee profile; SELL = zero-fee profile. Almanac rejects a buy code on SELL.
 POLY_BUILDER_CODE = "0x196258757463baebc045d1adc1c9c0a55cad7ac5d09ab7b7e1eb31803d9bfbe0"
+POLY_BUILDER_CODE_SELL = "0x830937f45b056a8664783d7d50e7b0f5f188547235a65416fc9367b1f3340b78"
 
 # --- the Pareto knob -------------------------------------------------------
 # 1.0 = pay volume only, 0.0 = pay PnL only. Everything between is on the
