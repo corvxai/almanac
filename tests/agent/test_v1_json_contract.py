@@ -32,6 +32,7 @@ from src.agent.examples._v1_common import (
     _coerce_unit,
     belief_path_single_final,
     belief_path_steps,
+    chat,
     parse_forecast,
 )
 from src.validator.forecasting.assignment_pipeline import normalize_prediction_values
@@ -343,6 +344,43 @@ def test_belief_final_genuine_disagreement_still_raises():
             prediction=0.7, reasoning="r",
             beliefPath=[BeliefStep(step=0, type="final", probability=0.6, text="t")],
         )
+
+
+class _FakeChatCtx:
+    def __init__(self, payloads: list[object]) -> None:
+        self.payloads = list(payloads)
+        self.calls: list[dict] = []
+
+    def call_provider(self, provider_id: str, call_type: str, params: dict) -> dict:
+        self.calls.append({"provider_id": provider_id, "call_type": call_type, **params})
+        payload = self.payloads.pop(0)
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+
+def test_chat_retries_truncated_length_with_doubled_max_tokens():
+    ctx = _FakeChatCtx([
+        {"output": "", "finishReason": "length"},
+        {"output": '{"reasoning": "x", "prediction": 0.4, "confidence": 0.5}'},
+    ])
+    text = chat(ctx, "openai/gpt-4o-mini", [{"role": "user", "content": "hi"}], max_tokens=100)
+    assert len(ctx.calls) == 2
+    assert ctx.calls[0]["max_tokens"] == 100
+    assert ctx.calls[1]["max_tokens"] == 200
+    assert "0.4" in text
+
+
+def test_chat_does_not_retry_on_stop():
+    ctx = _FakeChatCtx([{"output": "hello", "finishReason": "stop"}])
+    assert chat(ctx, "m", [{"role": "user", "content": "x"}], max_tokens=50) == "hello"
+    assert len(ctx.calls) == 1
+
+
+def test_chat_returns_empty_on_provider_error():
+    ctx = _FakeChatCtx([RuntimeError("Gateway 502")])
+    assert chat(ctx, "m", [{"role": "user", "content": "x"}]) == ""
+    assert len(ctx.calls) == 1
 
 
 # --- F4: size caps at the docker boundary ------------------------------------

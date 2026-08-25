@@ -140,13 +140,19 @@ class PortalGateway:
             )
             if key in body
         }
-        return {
+        result = {
             "output": output,
             "choices": [{"message": {"content": output}}],
             "model": body.get("model"),
             "usage": body.get("usage"),
             "_almanac": almanac,
         }
+        finish = body.get("finishReason")
+        if not isinstance(finish, str):
+            finish = body.get("finish_reason")
+        if isinstance(finish, str) and finish:
+            result["finishReason"] = finish
+        return result
 
 
 def fetch_portal_event(

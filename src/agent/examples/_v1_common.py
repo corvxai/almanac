@@ -32,7 +32,8 @@ Output contract (replaces the old NL ``PREDICTION/CONVICTION/REASONING`` templat
 All external calls go through ``ctx.call_provider("openrouter", "chat_completion",
 ...)``. A "web search call" is a model id with the ``:online`` suffix or a
 web-native model (e.g. ``perplexity/sonar-pro``); a "reasoning call" is a plain
-model id.
+model id. ``chat()`` retries once at 2× ``max_tokens`` when the billed 200
+payload has ``finishReason="length"`` (thinking models hitting the token cap).
 """
 
 from __future__ import annotations
@@ -298,13 +299,22 @@ def extract_text(raw: dict) -> str:
     return ""
 
 
-def chat(ctx, model: str, messages: list[dict], *, max_tokens: int = 1024,
-         temperature: float = 0.2, provider_id: str = "openrouter") -> str:
-    """One chat_completion call through the gateway → assistant text.
+def _finish_reason(raw: dict) -> str:
+    value = raw.get("finishReason")
+    if not isinstance(value, str):
+        value = raw.get("finish_reason")
+    return value.strip().lower() if isinstance(value, str) else ""
 
-    Returns "" on failure so callers can degrade gracefully rather than crash
-    the whole run.
-    """
+
+def _one_chat(
+    ctx,
+    model: str,
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    temperature: float,
+    provider_id: str,
+) -> dict | None:
     try:
         raw = ctx.call_provider(provider_id, "chat_completion", {
             "model": model,
@@ -313,7 +323,31 @@ def chat(ctx, model: str, messages: list[dict], *, max_tokens: int = 1024,
             "temperature": temperature,
         })
     except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def chat(ctx, model: str, messages: list[dict], *, max_tokens: int = 1024,
+         temperature: float = 0.2, provider_id: str = "openrouter") -> str:
+    """One chat_completion call through the gateway → assistant text.
+
+    Returns "" on failure so callers can degrade gracefully rather than crash
+    the whole run. A billed 200 with ``finishReason="length"`` (empty/truncated
+    thinking-model output) is retried once at 2× ``max_tokens``.
+    """
+    raw = _one_chat(
+        ctx, model, messages,
+        max_tokens=max_tokens, temperature=temperature, provider_id=provider_id,
+    )
+    if raw is None:
         return ""
+    if _finish_reason(raw) == "length":
+        retried = _one_chat(
+            ctx, model, messages,
+            max_tokens=max_tokens * 2, temperature=temperature, provider_id=provider_id,
+        )
+        if retried is not None:
+            raw = retried
     return extract_text(raw)
 
 
