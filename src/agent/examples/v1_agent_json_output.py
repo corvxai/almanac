@@ -17,6 +17,8 @@ Contract alignment (verified against base + validator):
   forecast — a structurally-valid ``AgentResult`` with ``prediction=0.5`` and a
   single-``final`` belief path — rather than ``raise`` (a sandbox crash path) or a
   silent, unvalidated 0.5. It is scored normally.
+* Truncated thinking-model completions (HTTP 200, ``finishReason="length"``) are
+  retried once at 2× ``max_tokens`` inside ``chat()`` — see ``_v1_common``.
 * No ``record_reasoning_step``: the Docker sandbox discards agent-recorded steps
   (``orchestrator``: agent_steps=None); the reasoning_chain is validator-assembled.
 """

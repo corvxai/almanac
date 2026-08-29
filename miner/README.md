@@ -203,13 +203,36 @@ gateway — **the platform does not inject defaults** for LLM sampling or token
 limits. If you omit a param, it is not sent upstream.
 
 ```python
-ctx.call_provider("openrouter", "chat_completion", {
+raw = ctx.call_provider("openrouter", "chat_completion", {
     "model": "anthropic/claude-sonnet-4-6",
     "messages": [{"role": "user", "content": prompt}],
     "max_tokens": 1024,
     "temperature": 0.2,
 })
 ```
+
+A 200 with empty `output` is still a billed success. Thinking models that hit
+`max_tokens` come back as `finishReason: "length"` (content may be `""` / `null`).
+That is the agent's problem, not a gateway 502 — inspect the payload and retry
+with a higher limit:
+
+```python
+raw = ctx.call_provider("openrouter", "chat_completion", {
+    "model": model,
+    "messages": messages,
+    "max_tokens": 1024,
+})
+if (raw.get("finishReason") or raw.get("finish_reason")) == "length":
+    raw = ctx.call_provider("openrouter", "chat_completion", {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 2048,
+    })
+text = raw.get("output") or ""
+```
+
+The v1 example helper `chat()` in `src/agent/examples/_v1_common.py` does this
+retry (once, at 2× `max_tokens`) for every example agent that uses it.
 
 Common `provider_id` / `call_type` pairs:
 

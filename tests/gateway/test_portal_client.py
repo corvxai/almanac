@@ -45,6 +45,7 @@ def test_portal_gateway_uses_bearer_auth_and_normalizes_output() -> None:
                 "provider": "openrouter",
                 "model": "openai/gpt-4o-mini",
                 "output": "hello",
+                "finishReason": "stop",
                 "usage": {"totalTokens": 3},
                 "costMicro": "4",
                 "providerCostMicro": "4",
@@ -67,6 +68,7 @@ def test_portal_gateway_uses_bearer_auth_and_normalizes_output() -> None:
 
     assert all(request.headers["authorization"] == "Bearer secret" for request in requests)
     assert result["output"] == "hello"
+    assert result["finishReason"] == "stop"
     assert result["choices"][0]["message"]["content"] == "hello"
     assert result["_almanac"]["costMicro"] == "4"
     assert gateway.call_log[0].balance_after_micro == "99"
