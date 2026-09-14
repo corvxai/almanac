@@ -432,6 +432,7 @@ def score_market(
         miners_to_penalize,
         all_uids,
         verbose=print_stats,
+        budget_share=share,
     )
 
     if db_score_logging:

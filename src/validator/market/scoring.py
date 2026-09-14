@@ -700,7 +700,8 @@ def print_pool_stats(
         if MINER_POOL_WEIGHT_BOOST_PERCENTAGE > 0 and miner_scores is not None:
             print(
                 f"* Miner weights are boosted by {MINER_POOL_WEIGHT_BOOST_PERCENTAGE:.0%} "
-                "after token allocation (see WEIGHTS / calculate_weights)."
+                "after token allocation; applied factor and any clip against "
+                "remaining emission are logged with WEIGHTS."
             )
     else:
         print_pool_table(miner_history, None, 0.0, "MINER POOL (trailing)")
@@ -834,14 +835,18 @@ def calculate_weights(
     miners_to_penalize: List[int] = None,
     all_uids: List[int] = None,
     verbose: bool = False,
+    budget_share: float = 1.0,
 ) -> List[float]:
     """
-    Convert token allocations to an on-chain weight vector.
+    Convert token allocations to a market-slice weight vector.
 
-    Weight is denominated as a fraction of the full subnet epoch budget, so an
-    epoch that generates few fees emits proportionally less and burns the rest.
-    The miner-pool boost may lift payouts above fee budget, but is clamped so
-    miner + general-pool weight never exceeds 1.0 (no all-or-nothing cliff).
+    ``total_epoch_budget`` is the *market slice* (subnet emission × budget_share),
+    not the full subnet. An epoch that generates few fees emits proportionally
+    less of that slice and burns the rest. The miner-pool boost may lift
+    payouts above fee budget, but is clamped so miner + general-pool weight
+    never exceeds 1.0 (no all-or-nothing cliff). The blend step later scales
+    this vector by the same share so forecasting (or another mechanism) can
+    occupy the remainder — that reserved remainder is not BURN_UID.
     """
     miners_to_penalize = miners_to_penalize or []
     all_uids = all_uids or []
@@ -864,15 +869,24 @@ def calculate_weights(
 
     miner_weight = sum(weights.values())
     gp_weight = float(np.sum(gp_scores["tokens"])) / total_epoch_budget  # burned
+    pre_boost_weight = miner_weight
+    requested_factor = 1.0 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE
+    applied_factor = 1.0
+    boost_tag = ""
 
     # Partial boost up to the remaining headroom — avoids a hard cliff where
     # one dollar of distributed volume suddenly drops the whole pool's boost.
     if MINER_POOL_WEIGHT_BOOST_PERCENTAGE > 0 and miner_weight > 0:
         room = max(1.0 - gp_weight, 0.0)
-        factor = min(1.0 + MINER_POOL_WEIGHT_BOOST_PERCENTAGE, room / miner_weight)
+        factor = min(requested_factor, room / miner_weight)
         if factor > 1.0:
             weights = {u: w * factor for u, w in weights.items()}
             miner_weight = sum(weights.values())
+            applied_factor = factor
+            if factor + 1e-12 < requested_factor:
+                boost_tag = " (clipped)"
+        else:
+            boost_tag = " (no headroom)"
 
     weights[BURN_UID] = weights.get(BURN_UID, 0.0) + max(1.0 - miner_weight, 0.0)
 
@@ -882,11 +896,40 @@ def calculate_weights(
         vec = [w / total for w in vec]
 
     if verbose:
+        pre_usd = pre_boost_weight * total_epoch_budget
+        filled_usd = (miner_weight - pre_boost_weight) * total_epoch_budget
+        burn_usd = weights[BURN_UID] * total_epoch_budget
+        share = float(np.clip(budget_share, 0.0, 1.0))
+        implied_subnet = (total_epoch_budget / share) if share > 0 else total_epoch_budget
+        reserved_usd = implied_subnet - total_epoch_budget
+
+        def _factor_label(factor: float) -> str:
+            rounded = round(float(factor), 2)
+            return f"{rounded:.2f}x ({int(round((rounded - 1.0) * 100))}%)"
+
+        boost_msg = (
+            f"boost: configured={_factor_label(requested_factor)}  "
+            f"applied={_factor_label(applied_factor)}{boost_tag}  "
+            f"pre={pre_boost_weight:.4f} (${pre_usd:,.2f})  "
+            f"post={miner_weight:.4f}  "
+            f"filled=${filled_usd:,.2f}  "
+            f"emission=${total_epoch_budget:,.2f}"
+        )
+        share_msg = (
+            f"share: {share:.4f}  slice=${total_epoch_budget:,.2f}  "
+            f"subnet=${implied_subnet:,.2f}  "
+            f"reserved=${reserved_usd:,.2f} (other mechanisms at blend, not burn)"
+        )
+        print(boost_msg)
+        logger.info(boost_msg)
+        print(share_msg)
+        logger.info(share_msg)
         nz = [w for w in vec if w > 0]
         peak = max(nz) if nz else 0.0
         smallest = min(nz) if nz else 0.0
         msg = (
-            f"miner weight={miner_weight:.4f}  burn={weights[BURN_UID]:.4f}  "
+            f"miner weight={miner_weight:.4f}  "
+            f"burn={weights[BURN_UID]:.4f} (${burn_usd:,.2f})  "
             f"nonzero uids={len(nz)}  smallest/largest={smallest / peak if peak else 0:.2e} "
             f"(u16 floor {U16_QUANT_FLOOR:.2e})"
         )
