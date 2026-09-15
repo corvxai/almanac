@@ -33,11 +33,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from src.core.constants import VALIDATOR_LOOP  # noqa: E402
 from src.validator.market.constants import (  # noqa: E402
     BURN_UID,
     ENABLE_GENERAL_POOL_SCORING,
     EXCESS_MINER_WEIGHT_UID,
-    MINER_POOL_WEIGHT_BOOST_PERCENTAGE,
     ROLLING_HISTORY_IN_DAYS,
     TOTAL_MINER_ALPHA_PER_DAY,
     U16_QUANT_FLOOR,
@@ -314,15 +314,21 @@ def main():
         raw = json.load(f)
 
     snapshot_at = None
-    exported_budget = None
+    exported_effective = None
+    exported_subnet = None
+    exported_share = None
     if isinstance(raw, dict):
         snapshot_at = raw.get("snapshot_at")
-        exported_budget = raw.get("epoch_budget_usd")
+        exported_effective = raw.get("epoch_budget_usd")
+        exported_subnet = raw.get("subnet_epoch_budget_usd")
+        exported_share = raw.get("budget_share")
         trading_history = raw.get("data", raw)
-        if snapshot_at or exported_budget is not None:
+        if snapshot_at or exported_effective is not None:
             print(
                 f"Export metadata: snapshot_at={snapshot_at!r}  "
-                f"epoch_budget_usd={exported_budget}"
+                f"epoch_budget_usd={exported_effective}  "
+                f"subnet_epoch_budget_usd={exported_subnet}  "
+                f"budget_share={exported_share}"
             )
     else:
         trading_history = raw
@@ -340,12 +346,33 @@ def main():
         weight_uids.insert(0, EXCESS_MINER_WEIGHT_UID)
     weight_uids.append(BURN_UID)
 
-    if exported_budget is not None:
-        current_epoch_budget = float(exported_budget)
-        print(f"Using epoch_budget_usd from export: ${current_epoch_budget:,.2f}")
+    share = float(VALIDATOR_LOOP.market_weight_share)
+    forecast_share = float(VALIDATOR_LOOP.forecasting_weight_share)
+    if exported_subnet is not None:
+        subnet_budget = float(exported_subnet)
+    elif exported_effective is not None and exported_share:
+        subnet_budget = float(exported_effective) / float(exported_share)
+    elif exported_effective is not None:
+        subnet_budget = float(exported_effective)
+        print(
+            "WARNING: export has no subnet_epoch_budget_usd/budget_share; "
+            "treating epoch_budget_usd as the full subnet emission"
+        )
     else:
-        current_epoch_budget = resolve_epoch_budget(args.offline)
-    print(f"Subnet epoch (24h) emission budget: ${current_epoch_budget:,.2f}\n")
+        subnet_budget = resolve_epoch_budget(args.offline)
+    current_epoch_budget = subnet_budget * float(np.clip(share, 0.0, 1.0))
+    print(f"Subnet epoch (24h) emission: ${subnet_budget:,.2f}")
+    print(
+        f"market_weight_share={share:.4f} → market slice ${current_epoch_budget:,.2f}  "
+        f"forecasting_weight_share={forecast_share:.4f} reserved "
+        f"${subnet_budget - current_epoch_budget:,.2f}"
+    )
+    if exported_share is not None and abs(float(exported_share) - share) > 1e-9:
+        print(
+            f"NOTE: export was written with budget_share={float(exported_share):.4f}; "
+            f"scoring with market_weight_share={share:.4f} from src.core.constants"
+        )
+    print()
 
     as_of = utc_epoch_boundary()
     print("Scoring current epoch...")
@@ -382,7 +409,12 @@ def main():
     print(f"Miner pool (fees):   ${miner_budget:,.2f}")
     print(f"General pool (fees): ${gp_budget:,.2f}")
     print(f"Total distributable: ${miner_budget + gp_budget:,.2f}")
-    print(f"Subnet emission:     ${current_epoch_budget:,.2f}")
+    print(f"Subnet emission:     ${subnet_budget:,.2f}")
+    print(f"Market slice:        ${current_epoch_budget:,.2f}  (share={share:.4f})")
+    print(
+        f"Forecasting reserve: ${subnet_budget - current_epoch_budget:,.2f}  "
+        f"(share={forecast_share:.4f})"
+    )
 
     print_pool_table(miner_history, miners_scores, miner_budget, "MINER POOL", args.top)
     gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
@@ -400,14 +432,18 @@ def main():
         [],
         weight_uids,
         verbose=True,
+        budget_share=share,
     )
-    print(f"Miner pool weight boost: {MINER_POOL_WEIGHT_BOOST_PERCENTAGE:.0%}")
-    print(f"Total weight sum: {sum(weights):.6f}")
+    print(
+        f"Market vector sum={sum(weights):.6f} (100% of the market slice). "
+        f"On-chain blend keeps {share:.4f} of this vector and "
+        f"{forecast_share:.4f} for forecasting."
+    )
     print("-" * 40)
     for uid, w in zip(weight_uids, weights):
         if w > 1e-9 or uid in (BURN_UID, EXCESS_MINER_WEIGHT_UID):
             tag = " (burn)" if uid == BURN_UID else ""
-            print(f"{str(uid):<6} {w:.8f}{tag}")
+            print(f"{str(uid):<6} {w:.8f} * share = {w * share:.8f}{tag}")
     print("-" * 40)
 
     nz = [w for w in weights if w > 0]

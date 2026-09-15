@@ -75,8 +75,8 @@ class ValidatorLoopDefaults:
     market_enabled: bool = True
     forecasting_enabled: bool = True
     metadata_manager_enabled: bool = True
-    market_weight_share: float = 0.95
-    forecasting_weight_share: float = 0.05
+    market_weight_share: float = 0.9
+    forecasting_weight_share: float = 0.1
     market_api_url: str | None = None
     use_synthetic_trading_data: bool = False
     write_trading_history: bool = False

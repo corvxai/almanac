@@ -289,6 +289,66 @@ def test_boost_clamps_instead_of_cliff():
     assert w_over[0] > (over / budget) * 1.01
 
 
+def _boost_log(tokens: float, budget: float, capsys) -> str:
+    from src.validator.market.scoring import BURN_UID, calculate_weights
+
+    miner = {"entity_ids": [1], "tokens": np.array([tokens])}
+    gp = {"tokens": np.array([0.0])}
+    calculate_weights(miner, gp, budget, tokens, 0.0, [], [1, BURN_UID], verbose=True)
+    return capsys.readouterr().out
+
+
+def test_boost_verbose_log_reports_clip_and_fill(capsys):
+    """When 75% overshoots remaining emission, log the clipped factor and dollars filled."""
+    budget, tokens = 3507.78, 2079.50
+    out = _boost_log(tokens, budget, capsys)
+    filled = budget - tokens
+    assert "configured=1.75x (75%)" in out
+    assert "applied=1.69x (69%) (clipped)" in out
+    assert f"pre=0.5928 (${tokens:,.2f})" in out
+    assert "post=1.0000" in out
+    assert f"filled=${filled:,.2f}" in out
+    assert f"emission=${budget:,.2f}" in out
+    assert "burn=0.0000 ($0.00)" in out
+    assert "share: 1.0000" in out
+
+
+def test_boost_verbose_log_reports_full_boost_and_remaining_burn(capsys):
+    """When 75% fits, log the full factor and leftover emission as burn dollars."""
+    budget, tokens = 3507.78, 1000.00
+    out = _boost_log(tokens, budget, capsys)
+    filled = tokens * MINER_POOL_WEIGHT_BOOST_PERCENTAGE
+    burn = budget - tokens - filled
+    assert "configured=1.75x (75%)" in out
+    assert "applied=1.75x (75%)" in out
+    assert "(clipped)" not in out
+    assert f"filled=${filled:,.2f}" in out
+    assert f"burn=0.5011 (${burn:,.2f})" in out
+    assert "share: 1.0000" in out
+    assert "reserved=$0.00" in out
+
+
+def test_boost_verbose_log_reports_share_reservation(capsys):
+    """budget_share must show the slice vs subnet split, not as emission burn."""
+    from src.validator.market.scoring import BURN_UID, calculate_weights
+
+    slice_budget, tokens, share = 3507.78, 2079.50, 0.95
+    miner = {"entity_ids": [1], "tokens": np.array([tokens])}
+    gp = {"tokens": np.array([0.0])}
+    calculate_weights(
+        miner, gp, slice_budget, tokens, 0.0, [], [1, BURN_UID],
+        verbose=True, budget_share=share,
+    )
+    out = capsys.readouterr().out
+    subnet = slice_budget / share
+    reserved = subnet - slice_budget
+    assert "share: 0.9500" in out
+    assert f"slice=${slice_budget:,.2f}" in out
+    assert f"subnet=${subnet:,.2f}" in out
+    assert f"reserved=${reserved:,.2f} (other mechanisms at blend, not burn)" in out
+    assert "burn=0.0000 ($0.00)" in out
+
+
 def test_as_of_keeps_full_trailing_window():
     """Historical as_of must score a full ROLLING window, not a truncated prefix."""
     from src.validator.market.scoring import ROLLING_HISTORY_IN_DAYS, build_epoch_history

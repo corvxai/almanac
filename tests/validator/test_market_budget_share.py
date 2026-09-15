@@ -52,8 +52,11 @@ def test_score_market_applies_budget_share_to_epoch_budget(
         miners_to_penalize,
         all_uids,
         verbose=False,
+        budget_share=1.0,
+        **kwargs,
     ):
         seen["calculate_weights_budget"] = float(current_epoch_budget)
+        seen["calculate_weights_share"] = float(budget_share)
         return [1.0, 0.0]
 
     fake_scoring_module = SimpleNamespace(
@@ -82,3 +85,4 @@ def test_score_market_applies_budget_share_to_epoch_budget(
     np.testing.assert_allclose(out, np.array([1.0, 0.0]))
     assert seen["score_miners_budget"] == pytest.approx(expected_budget)
     assert seen["calculate_weights_budget"] == pytest.approx(expected_budget)
+    assert seen["calculate_weights_share"] == pytest.approx(float(np.clip(budget_share, 0.0, 1.0)))
