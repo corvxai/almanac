@@ -237,6 +237,7 @@ def score_agent_predictions(
     rho_by_idx = np.zeros(n, dtype=float)
     effective_n_by_idx = np.zeros(n, dtype=float)
     latest_age_hours_by_idx = np.full(n, np.nan, dtype=float)
+    mean_brier_by_idx = np.full(n, np.nan, dtype=float)
     total_in_window = np.zeros(n, dtype=int)
     invalid_in_window = np.zeros(n, dtype=int)
     records_by_idx: list[list[_Record]] = [[] for _ in range(n)]
@@ -278,6 +279,7 @@ def score_agent_predictions(
         cal = _calibration_score(recs)
         edg = _edge_score(recs, rec_weights)
         mean_brier = _mean_brier(recs, rec_weights)
+        mean_brier_by_idx[idx] = mean_brier
         accuracy[idx] = acc
         calibration[idx] = cal
         edge[idx] = edg
@@ -343,6 +345,7 @@ def score_agent_predictions(
         rho_by_idx=rho_by_idx,
         effective_n_by_idx=effective_n_by_idx,
         latest_age_hours_by_idx=latest_age_hours_by_idx,
+        mean_brier_by_idx=mean_brier_by_idx,
         records_by_idx=records_by_idx,
         total_in_window=total_in_window,
         invalid_in_window=invalid_in_window,
@@ -701,6 +704,7 @@ def _log_score_table(
     rho_by_idx: np.ndarray,
     effective_n_by_idx: np.ndarray,
     latest_age_hours_by_idx: np.ndarray,
+    mean_brier_by_idx: np.ndarray,
     records_by_idx: list[list[_Record]],
     total_in_window: np.ndarray,
     invalid_in_window: np.ndarray,
@@ -720,6 +724,7 @@ def _log_score_table(
     )
     any_invalid_gate = False
     any_stale_age = False
+    any_baseline_gate = False
     for rank, (idx, uid, score) in enumerate(ranked, start=1):
         total = int(total_in_window[idx])
         invalid = int(invalid_in_window[idx])
@@ -735,6 +740,14 @@ def _log_score_table(
         recs = records_by_idx[idx]
         if recs:
             raw_brier = round(float(np.mean([(1.0 - r.p_win) ** 2 for r in recs])), 3)
+
+        w_brier: object = "-"
+        w_brier_val = mean_brier_by_idx[idx]
+        if not np.isnan(w_brier_val):
+            w_brier = f"{float(w_brier_val):.3f}"
+            if float(w_brier_val) >= ACCURACY_BASELINE_BRIER:
+                w_brier = f"{w_brier}‡"
+                any_baseline_gate = True
 
         pnl = 0.0
         pnl_trades = 0
@@ -766,6 +779,7 @@ def _log_score_table(
                 float(calibration[idx]),
                 float(edge[idx]),
                 raw_brier,
+                w_brier,
                 roi,
                 total,
                 float(rho_by_idx[idx]),
@@ -788,6 +802,7 @@ def _log_score_table(
         f"calib. ({w_cal:.0f}%)",
         f"edge ({w_edge:.0f}%)",
         "brier",
+        "w_brier",
         "roi",
         "# preds",
         "rho",
@@ -797,7 +812,7 @@ def _log_score_table(
     ]
     floatfmt = (
         ".0f", ".0f", ".3f", ".3f", ".3f", ".3f", ".3f",
-        ".3f", ".3f", ".0f", ".3f", ".0f", "", "",
+        ".3f", "", ".3f", ".0f", ".3f", ".0f", "", "",
     )
     table = tabulate(
         rows,
@@ -811,6 +826,11 @@ def _log_score_table(
         legends.append("* too many invalid predictions tripped the INVALID_RATE_THRESHOLD gate. Setting score to 0.")
     if any_stale_age:
         legends.append(f"\u2020 age_h > {INACTIVITY_GRACE_HOURS:.0f}h (inactivity decay region).")
+    if any_baseline_gate:
+        legends.append(
+            f"‡ w_brier is the recency-weighted (half-life={RECENCY_HALF_LIFE_DAYS:.0f}d) "
+            f"mean Brier used by the baseline gate; >= {ACCURACY_BASELINE_BRIER} sets score to 0."
+        )
 
     if legends:
         logger.info("forecasting scoring miner table:\n%s\n%s", table, "\n".join(legends))
