@@ -94,6 +94,7 @@ class ScoredPredictionItem(BaseModel):
     sourceMarketId: str
     predictedOutcomeId: str | None = None
     predictedAt: datetime
+    minerLastPredictedAt: datetime | None = None
     confidence: float | None = None
     outcomePricesAtPrediction: dict[str, float] | None = None
     outcomeProbabilities: dict[str, float] | None = None

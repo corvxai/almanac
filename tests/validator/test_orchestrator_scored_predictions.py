@@ -51,6 +51,7 @@ def test_fetch_scored_predictions_page_parses_payload_and_signs_path_query() -> 
                         "sourceMarketId": "0xabc123...",
                         "predictedOutcomeId": "yes",
                         "predictedAt": "2026-06-08T15:10:00.000Z",
+                        "minerLastPredictedAt": "2026-06-08T16:00:00.000Z",
                         "confidence": 0.71,
                         "outcomePricesAtPrediction": {"yes": 0.64, "no": 0.36},
                         "outcomeProbabilities": {"yes": 0.71, "no": 0.29},
@@ -81,6 +82,7 @@ def test_fetch_scored_predictions_page_parses_payload_and_signs_path_query() -> 
     assert len(page.items) == 1
     assert page.items[0].agentPredictionId == "ap_01JX9F8KQ4R2M7N6T3V1W5Y8Z"
     assert page.items[0].predictedAt is not None
+    assert page.items[0].minerLastPredictedAt is not None
     assert page.items[0].outcomePricesAtPrediction == {"yes": 0.64, "no": 0.36}
     assert page.items[0].predictionValidation is not None
     assert page.items[0].predictionValidation.isValid is True
