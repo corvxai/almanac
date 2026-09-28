@@ -779,7 +779,7 @@ def _log_score_table(
         if not np.isnan(w_brier_val):
             w_brier = f"{float(w_brier_val):.3f}"
             if float(w_brier_val) >= ACCURACY_BASELINE_BRIER:
-                w_brier = f"{w_brier}‡"
+                w_brier = f"{w_brier}\u00a7"
                 any_baseline_gate = True
 
         pnl = 0.0
@@ -871,7 +871,7 @@ def _log_score_table(
         )
     if any_baseline_gate:
         legends.append(
-            f"‡ w_brier is the recency-weighted (half-life={RECENCY_HALF_LIFE_DAYS:.0f}d) "
+            f"\u00a7 w_brier is the recency-weighted (half-life={RECENCY_HALF_LIFE_DAYS:.0f}d) "
             f"mean Brier used by the baseline gate; >= {ACCURACY_BASELINE_BRIER} sets score to 0."
         )
 
