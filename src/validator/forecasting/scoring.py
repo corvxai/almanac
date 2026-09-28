@@ -31,8 +31,9 @@ Eligibility gates (any failure -> score 0):
       per-event max(0, ...) floor would let a zero-information "lottery"
       miner (predict 1.0/0.0 everywhere) keep half its events at full score,
       while its mean Brier of ~0.5 is plainly worse than the coin baseline.
-    * Inactivity gate: latest scored prediction older than
-      INACTIVITY_ZERO_HOURS -> 0, linear fade after INACTIVITY_GRACE_HOURS.
+    * Inactivity gate: minerLastPredictedAt older than INACTIVITY_ZERO_HOURS
+      -> 0, linear fade after INACTIVITY_GRACE_HOURS. A null or missing
+      timestamp does not penalize.
 
 Post-gate scoring details:
     * Recency-weighted pillar means use exponential calendar-time decay
@@ -42,8 +43,10 @@ Post-gate scoring details:
       recency-weighted effective sample size. The floor holds through ~15-20
       predictions, then rho ramps toward saturation by ~150
       (``RHO_THRESHOLD_PREDICTIONS`` is the midpoint, not full rho).
-    * Inactivity applies after rho: linear fade beyond ``INACTIVITY_GRACE_HOURS``,
-      hard zero beyond ``INACTIVITY_ZERO_HOURS``.
+    * Inactivity applies after rho, using the orchestrator's
+      ``minerLastPredictedAt`` (last submission, including unresolved).
+      Linear fade beyond ``INACTIVITY_GRACE_HOURS``, hard zero beyond
+      ``INACTIVITY_ZERO_HOURS``. Null leaves the multiplier at 1.
     * Pareto shaping maps positive scores with a leader-relative power law
       (``PARETO_GAMMA``) into ``[PARETO_MU, PARETO_MU + PARETO_BOOST]``.
       :func:`_apply_pareto_by_rank` is an alternate rank-knee curve for
@@ -119,7 +122,9 @@ RHO_ALPHA = 0.05
 RHO_FLOOR = 0.10                      # minimum rho once miner passes hard gates
 
 # Inactivity policy (separate from rho): fade stale miners then switch off.
-# This is the anti-perpetuity guard - nobody coasts on old history.
+# Clock is minerLastPredictedAt, the last submission across open and settled
+# predictions. This is the anti-perpetuity guard - nobody coasts on old history.
+# A null timestamp means the orchestrator did not know; do not zero the miner.
 INACTIVITY_GRACE_HOURS = 24.0         # no inactivity penalty while within grace
 INACTIVITY_ZERO_HOURS = 72.0          # score forced to 0 after this staleness age
 
@@ -204,6 +209,7 @@ def score_agent_predictions(
     rows_by_idx: list[list[tuple[datetime, Optional[_Record], bool]]] = [
         [] for _ in range(n)
     ]
+    last_predicted_by_idx: list[Optional[datetime]] = [None for _ in range(n)]
 
     for item in scored_predictions:
         if getattr(item, "resolutionStatus", None) != "resolved":
@@ -223,6 +229,12 @@ def score_agent_predictions(
         idx = uid_to_idx.get(int(uid))
         if idx is None:
             continue
+
+        last_predicted = _as_utc(getattr(item, "minerLastPredictedAt", None))
+        if last_predicted is not None:
+            prev = last_predicted_by_idx[idx]
+            if prev is None or last_predicted > prev:
+                last_predicted_by_idx[idx] = last_predicted
 
         if getattr(item, "predictionIsInvalid", None) is True:
             rows_by_idx[idx].append((scored_at, None, True))
@@ -245,6 +257,7 @@ def score_agent_predictions(
     gated_sample = 0
     gated_baseline = 0
     gated_inactive = 0
+    missing_last_predicted = 0
     scored_miners = 0
 
     weight_sum = sum(_WEIGHTS.values())
@@ -288,11 +301,13 @@ def score_agent_predictions(
             num_threshold_predictions=RHO_THRESHOLD_PREDICTIONS,
             alpha=RHO_ALPHA,
         )
-        latest_age_hours = _latest_prediction_age_hours(recs, now=now)
+        latest_age_hours = _submission_age_hours(last_predicted_by_idx[idx], now=now)
         inactivity_mult = _inactivity_multiplier(latest_age_hours)
         effective_n_by_idx[idx] = effective_n
         rho_by_idx[idx] = rho
-        if latest_age_hours is not None:
+        if latest_age_hours is None:
+            missing_last_predicted += 1
+        else:
             latest_age_hours_by_idx[idx] = latest_age_hours
 
         # Do not reward miners whose Brier is baseline-or-worse. Gate on mean
@@ -333,6 +348,12 @@ def score_agent_predictions(
         rolling_window_days,
         MAX_EVENTS_PER_MINER,
     )
+    if missing_last_predicted:
+        logger.warning(
+            "forecasting scoring: %d miner(s) missing minerLastPredictedAt; "
+            "inactivity gate not applied to them",
+            missing_last_predicted,
+        )
     _log_score_table(
         uids=uids,
         scores=scores,
@@ -576,18 +597,29 @@ def compute_significance_score(
     return floor + (1.0 - floor) * raw
 
 
-def _latest_prediction_age_hours(records: list[_Record], *, now: datetime) -> Optional[float]:
-    """Hours since miner's latest valid prediction, or None if no records."""
-    if not records:
+def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
         return None
-    latest = max(r.scored_at for r in records)
-    return max(0.0, (now - latest).total_seconds() / 3600.0)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _submission_age_hours(submitted_at: Optional[datetime], *, now: datetime) -> Optional[float]:
+    """Hours since minerLastPredictedAt, or None when the field is null."""
+    submitted_at = _as_utc(submitted_at)
+    if submitted_at is None:
+        return None
+    return max(0.0, (now - submitted_at).total_seconds() / 3600.0)
 
 
 def _inactivity_multiplier(age_hours: Optional[float]) -> float:
-    """Linear fade after grace window; hard off at inactivity zero threshold."""
+    """Linear fade after grace window; hard off at inactivity zero threshold.
+
+    ``None`` (minerLastPredictedAt missing) is not evidence of silence -> 1.0.
+    """
     if age_hours is None:
-        return 0.0
+        return 1.0
     if age_hours <= INACTIVITY_GRACE_HOURS:
         return 1.0
     if age_hours >= INACTIVITY_ZERO_HOURS:
@@ -720,6 +752,7 @@ def _log_score_table(
     )
     any_invalid_gate = False
     any_stale_age = False
+    any_inactive_gate = False
     for rank, (idx, uid, score) in enumerate(ranked, start=1):
         total = int(total_in_window[idx])
         invalid = int(invalid_in_window[idx])
@@ -752,7 +785,10 @@ def _log_score_table(
         if not np.isnan(age_h):
             rounded_age = int(round(float(age_h)))
             age_display = str(rounded_age)
-            if float(age_h) > INACTIVITY_GRACE_HOURS:
+            if float(age_h) >= INACTIVITY_ZERO_HOURS:
+                age_display = f"{age_display}\u2021"
+                any_inactive_gate = True
+            elif float(age_h) > INACTIVITY_GRACE_HOURS:
                 age_display = f"{age_display}\u2020"
                 any_stale_age = True
 
@@ -810,7 +846,14 @@ def _log_score_table(
     if any_invalid_gate:
         legends.append("* too many invalid predictions tripped the INVALID_RATE_THRESHOLD gate. Setting score to 0.")
     if any_stale_age:
-        legends.append(f"\u2020 age_h > {INACTIVITY_GRACE_HOURS:.0f}h (inactivity decay region).")
+        legends.append(
+            f"\u2020 {INACTIVITY_GRACE_HOURS:.0f}h < age_h < {INACTIVITY_ZERO_HOURS:.0f}h "
+            "(inactivity decay region)."
+        )
+    if any_inactive_gate:
+        legends.append(
+            f"\u2021 age_h > {INACTIVITY_ZERO_HOURS:.0f}h (inactivity gate tripped, setting score to 0)."
+        )
 
     if legends:
         logger.info("forecasting scoring miner table:\n%s\n%s", table, "\n".join(legends))
