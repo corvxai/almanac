@@ -192,14 +192,18 @@ def test_time_based_rho_rewards_recent_volume() -> None:
     assert out[1] > out[0] > 0.0
 
 
-def test_inactivity_gate_zeroes_stale_miner() -> None:
+def test_inactivity_gate_uses_last_submission_not_scored_at() -> None:
     metagraph = _StubMetagraph(uids=[1, 2])
     now = datetime.now(timezone.utc)
 
     fresh = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
     stale = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(20)]
-    for row in stale:
+    for row in fresh:
+        row.minerLastPredictedAt = now - timedelta(hours=1)
         row.scoredAt = now - timedelta(hours=120)
+    for row in stale:
+        row.minerLastPredictedAt = now - timedelta(hours=120)
+        row.scoredAt = now - timedelta(hours=1)
 
     out = score_agent_predictions(
         metagraph=metagraph,
@@ -208,6 +212,19 @@ def test_inactivity_gate_zeroes_stale_miner() -> None:
     )
     assert out[0] > 0.0
     assert out[1] == 0.0
+
+
+def test_null_last_submission_does_not_zero_miner(caplog) -> None:
+    metagraph = _StubMetagraph(uids=[1])
+    now = datetime.now(timezone.utc)
+    rows = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
+    for row in rows:
+        row.minerLastPredictedAt = None
+
+    with caplog.at_level("WARNING", logger="forecasting.scoring"):
+        out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
+    assert out[0] > 0.0
+    assert "1 miner(s) missing minerLastPredictedAt" in caplog.text
 
 
 def test_unmapped_uid_is_skipped_not_counted() -> None:
