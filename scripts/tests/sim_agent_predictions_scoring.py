@@ -69,7 +69,7 @@ SCORE_TIER_LABELS = ("Bottom quartile", "Lower-mid quartile", "Upper-mid quartil
 # Mock data generation constants.
 MOCK_RANDOM_SEED = 29
 MOCK_MINER_COUNT = 100
-# Volume range spans the rho curve (leave-floor ~15-20, saturate ~150
+# Volume range spans the rho curve (leave-floor ~15-20, saturate ~170
 # effective; RHO_THRESHOLD_PREDICTIONS is the logistic midpoint). Low-count
 # miners sit near the rho floor, high-count miners saturate. Sized for
 # orchestrator-metered cadence over the 30-day window.

@@ -5,11 +5,13 @@ that miner's most recent predictions (``MAX_EVENTS_PER_MINER``) within the
 orchestrator fetch window:
 
     1. Accuracy     (weight 0.50) - hardness-curved Brier closeness to truth.
-                     The anchor pillar.
-    2. Calibration  (weight 0.30) - do stated confidences match realized hit
-                     rates? (1 - ECE over reliability bins)
-    3. Edge         (weight 0.20) - did the agent beat the market price at
-                     prediction time? Brier-difference + PnL blend.
+                     Events worse than the coin-flip Brier pull the mean down,
+                     bounded at -1. The anchor pillar.
+    2. Calibration  (weight 0.30) - recency-weighted ECE as excess over a
+                     competent-forecaster baseline. 0 matches that baseline.
+    3. Edge         (weight 0.20) - centered market-relative Brier-difference
+                     + PnL, scaled so a few points of edge move the composite.
+                     0 matches the market at prediction time.
 
 Pillar weights are renormalised over their sum at compute time, so only their relative sizes matter.
 
@@ -41,7 +43,7 @@ Post-gate scoring details:
       order-independent across validator ticks.
     * Rho significance multiplies the composite by a logistic S-curve in
       recency-weighted effective sample size. The floor holds through ~15-20
-      predictions, then rho ramps toward saturation by ~150
+      predictions, then rho ramps toward saturation by ~170
       (``RHO_THRESHOLD_PREDICTIONS`` is the midpoint, not full rho).
     * Inactivity applies after rho, using the orchestrator's
       ``minerLastPredictedAt`` (last submission, including unresolved).
@@ -51,8 +53,8 @@ Post-gate scoring details:
       (``PARETO_GAMMA``) into ``[PARETO_MU, PARETO_MU + PARETO_BOOST]``.
       :func:`_apply_pareto_by_rank` is an alternate rank-knee curve for
       environments where many miners cluster at similar composites.
-    * Edge pillar blends bounded Brier-difference vs market (60%) with
-      winner-side PnL (40%).
+    * Edge pillar blends centered Brier-difference vs market (60%) with
+      winner-side PnL (40%), then scales by ``EDGE_SIGNAL_GAIN``.
 
 Coverage (research-trace quality) is not a scoring pillar. Invalid
 predictions are marked orchestrator-side via ``predictionIsInvalid`` and
@@ -115,9 +117,9 @@ RECENCY_HALF_LIFE_DAYS = 14.0
 # small-sample prior, not a grind incentive. Daily scored volume will vary;
 # the curve is in effective count, not calendar time.
 #   ~15-20  leave the floor (rho just above RHO_FLOOR)
-#   ~80     logistic midpoint (rho≈0.55) = RHO_THRESHOLD_PREDICTIONS
-#   ~150    saturation (rho≈1)
-RHO_THRESHOLD_PREDICTIONS = 80.0
+#   ~100    logistic midpoint (rho≈0.55) = RHO_THRESHOLD_PREDICTIONS
+#   ~170    saturation (rho≈0.97)
+RHO_THRESHOLD_PREDICTIONS = 100.0
 RHO_ALPHA = 0.05
 RHO_FLOOR = 0.10                      # minimum rho once miner passes hard gates
 
@@ -128,10 +130,25 @@ RHO_FLOOR = 0.10                      # minimum rho once miner passes hard gates
 INACTIVITY_GRACE_HOURS = 24.0         # no inactivity penalty while within grace
 INACTIVITY_ZERO_HOURS = 72.0          # score forced to 0 after this staleness age
 
-# Accuracy hardening. Per-event score is max(0, 1 - (brier/baseline)**gamma):
-# zero at baseline-or-worse Brier, sharpened reward gradient above it.
+# Accuracy hardening. Per-event score is 1 - (brier/baseline)**gamma, clipped
+# to [-1, 1]. Zero at the coin-flip Brier; worse events pull the mean down
+# instead of contributing a free 0. The mean-Brier gate is still what zeroes
+# a miner who is baseline-or-worse overall.
 ACCURACY_BASELINE_BRIER = 0.25        # Brier of always predicting 0.5
 ACCURACY_HARDNESS_GAMMA = 1.7
+
+# Calibration pillar is excess over this ECE (recency-weighted). 0.10 is a
+# competent forecaster, so a typical miner sits near 0 instead of ~0.9 and
+# the pillar stops adding a shared ~0.27 to every composite. Positive means
+# better calibrated than the baseline.
+CALIBRATION_BASELINE_ECE = 0.10
+
+# Edge is centered at 0 (matching the market). The raw Brier-difference / PnL
+# blend is only a few hundredths in practice; mapping it through (x+1)/2 used
+# to pin every miner near 0.5. Gain 10 saturates the pillar at a 0.10 blended
+# edge, so a few points of market-relative Brier move the composite on the
+# same scale as accuracy's within-cohort range. The pillar is clipped to [-1, 1].
+EDGE_SIGNAL_GAIN = 10.0
 
 # Predictions are rounded once, at the input boundary, for cross-validator
 # determinism. Never reapplied downstream (spec section 9.5).
@@ -154,7 +171,7 @@ PARETO_TAIL = 1.35        # >1 steepens the very top tail; 1 is linear in knee-s
 
 # Pillar internals.
 NUM_CALIBRATION_BINS = 5          # reliability bins for the calibration pillar
-NEUTRAL_PILLAR_SCORE = 0.5        # edge fallback when no market prices exist
+NEUTRAL_PILLAR_SCORE = 0.0        # edge fallback when no market prices exist
 
 _WEIGHTS = {
     "accuracy": WEIGHT_ACCURACY,
@@ -289,7 +306,7 @@ def score_agent_predictions(
 
         rec_weights = _recency_weights(recs, now=now)
         acc = _accuracy_score(recs, rec_weights)
-        cal = _calibration_score(recs)
+        cal = _calibration_score(recs, rec_weights)
         edg = _edge_score(recs, rec_weights)
         mean_brier = _mean_brier(recs, rec_weights)
         mean_brier_by_idx[idx] = mean_brier
@@ -313,9 +330,9 @@ def score_agent_predictions(
             latest_age_hours_by_idx[idx] = latest_age_hours
 
         # Do not reward miners whose Brier is baseline-or-worse. Gate on mean
-        # Brier, NOT on the accuracy pillar: the pillar's per-event floor
-        # would let lottery-style extremizing (half the events at full score,
-        # half at zero) pass despite a mean Brier far worse than baseline.
+        # Brier, not on the accuracy pillar: the pillar is a curved, bounded
+        # transform, so a mean above zero is not the same claim as beating
+        # the coin-flip Brier.
         if mean_brier >= ACCURACY_BASELINE_BRIER:
             gated_baseline += 1
             continue
@@ -450,24 +467,19 @@ def _coerce_prob(value) -> Optional[float]:
 def _accuracy_score(recs: list[_Record], weights: np.ndarray) -> float:
     """Recency-weighted mean of per-event accuracy scores.
 
-    Per event: ``max(0, 1 - (brier / B0) ** gamma)`` with
+    Per event: ``clip(1 - (brier / B0) ** gamma, -1, 1)`` with
     ``brier = (1 - p_win)^2`` and ``B0 = ACCURACY_BASELINE_BRIER``. Zero at
-    baseline-or-worse Brier, sharpened gradient above it.
+    the coin-flip Brier, positive above it, negative below it.
 
-    The spec's per-event "Brier < 0.5" accuracy gate is subsumed here: any
-    event with brier >= 0.25 already scores exactly 0. Gate-failing events are
-    deliberately NEVER dropped from the window - their zero stays in the
-    denominator and their (usually negative) edge contribution still counts.
-    Dropping them would let a miner's worst predictions vanish from their own
-    average.
+    Events worse than baseline stay in the average and pull it down. Dropping
+    them would let a miner's worst predictions vanish from their own score.
+    The clip keeps one confident miss from outweighing every hit.
     """
     per_event = np.empty(len(recs), dtype=float)
     for i, r in enumerate(recs):
         brier = (1.0 - r.p_win) ** 2
-        per_event[i] = max(
-            0.0,
-            1.0 - (brier / ACCURACY_BASELINE_BRIER) ** ACCURACY_HARDNESS_GAMMA,
-        )
+        raw = 1.0 - (brier / ACCURACY_BASELINE_BRIER) ** ACCURACY_HARDNESS_GAMMA
+        per_event[i] = float(np.clip(raw, -1.0, 1.0))
     return float(np.average(per_event, weights=weights))
 
 
@@ -475,19 +487,23 @@ def _accuracy_score(recs: list[_Record], weights: np.ndarray) -> float:
 # Pillar 2: Calibration (reliability of stated confidence)                    #
 # --------------------------------------------------------------------------- #
 
-def _calibration_score(recs: list[_Record]) -> float:
-    """1 - Expected Calibration Error over the miner's predicted-side confidences.
+def _calibration_score(recs: list[_Record], weights: np.ndarray) -> float:
+    """Recency-weighted ECE as excess over ``CALIBRATION_BASELINE_ECE``.
 
     For each prediction we take the probability the agent placed on the side
     it actually chose (``p_pred``) and whether that side won (``hit``).
     Predictions are binned by ``p_pred`` (half-open bins, 1.0 in the top bin);
-    within each bin we compare mean predicted confidence to the realized hit
-    rate. ECE is the sample-weighted mean absolute gap; empty bins contribute
-    nothing. A perfectly calibrated miner scores 1.0.
+    within each bin we compare the recency-weighted mean confidence to the
+    recency-weighted hit rate. ECE is the weight-weighted mean absolute gap;
+    empty bins contribute nothing.
+
+    The pillar is ``baseline - ECE``. A miner at the baseline scores 0.
+    Positive means better calibrated than the baseline; negative means worse.
     """
     bin_edges = np.linspace(0.0, 1.0, NUM_CALIBRATION_BINS + 1)
     preds = np.array([r.p_pred for r in recs], dtype=float)
     hits = np.array([r.hit for r in recs], dtype=float)
+    weights = np.asarray(weights, dtype=float)
 
     bin_ids = np.clip(
         np.digitize(preds, bin_edges[1:-1], right=False),
@@ -495,17 +511,21 @@ def _calibration_score(recs: list[_Record]) -> float:
         NUM_CALIBRATION_BINS - 1,
     )
 
-    total = len(recs)
+    total_w = float(weights.sum())
+    if total_w <= 0.0:
+        return 0.0
+
     ece = 0.0
     for b in range(NUM_CALIBRATION_BINS):
         mask = bin_ids == b
-        count = int(mask.sum())
-        if count == 0:
+        bin_w = float(weights[mask].sum())
+        if bin_w <= 0.0:
             continue
-        gap = abs(float(preds[mask].mean()) - float(hits[mask].mean()))
-        ece += (count / total) * gap
+        mean_p = float(np.average(preds[mask], weights=weights[mask]))
+        mean_h = float(np.average(hits[mask], weights=weights[mask]))
+        ece += (bin_w / total_w) * abs(mean_p - mean_h)
 
-    return float(np.clip(1.0 - ece, 0.0, 1.0))
+    return float(CALIBRATION_BASELINE_ECE - ece)
 
 
 # --------------------------------------------------------------------------- #
@@ -513,22 +533,25 @@ def _calibration_score(recs: list[_Record]) -> float:
 # --------------------------------------------------------------------------- #
 
 def _edge_score(recs: list[_Record], weights: np.ndarray) -> float:
-    """Recency-weighted market-relative edge, mapped to [0, 1] with 0.5 neutral.
+    """Recency-weighted market-relative edge, centered at 0 and scaled.
 
     Per event with a known market price on the winner (``m``) and the agent's
     prob on the winner (``a``):
 
         brier_diff = (1 - m)**2 - (1 - a)**2    # market error minus agent error
         pnl        = (a - m) * (1 - m)          # winner side, outcome = 1
+        signal     = 0.60 * brier_diff + 0.40 * pnl
 
-    Both are in [-1, 1] and martingale-fair: if the market is calibrated,
+    Both inputs are in [-1, 1] and martingale-fair: if the market is calibrated,
     uninformed divergence has zero expected value in either metric. The
     spec's ratio-BSS is deliberately not used - it has a large positive
     expectation for zero-information "extremize the market" strategies when
     the market is confident.
 
-    Events without a market price are skipped; a miner with none falls back
-    to the neutral pillar score.
+    ``signal`` is 0 when the agent matches the market. It is multiplied by
+    ``EDGE_SIGNAL_GAIN`` and clipped to [-1, 1] so a few points of realized
+    edge move the composite instead of sitting on 0.5. Events without a
+    market price are skipped; a miner with none falls back to 0.
     """
     num = 0.0
     den = 0.0
@@ -539,15 +562,13 @@ def _edge_score(recs: list[_Record], weights: np.ndarray) -> float:
         a = r.p_win
         brier_diff = (1.0 - m) ** 2 - (1.0 - a) ** 2
         pnl = (a - m) * (1.0 - m)
-        event_edge = (
-            EDGE_WEIGHT_BRIER_DIFF * (brier_diff + 1.0) / 2.0
-            + EDGE_WEIGHT_PNL * (pnl + 1.0) / 2.0
-        )
-        num += w * event_edge
+        signal = EDGE_WEIGHT_BRIER_DIFF * brier_diff + EDGE_WEIGHT_PNL * pnl
+        num += w * signal
         den += w
     if den <= 0.0:
         return NEUTRAL_PILLAR_SCORE
-    return float(np.clip(num / den, 0.0, 1.0))
+    scaled = EDGE_SIGNAL_GAIN * (num / den)
+    return float(np.clip(scaled, -1.0, 1.0))
 
 
 # --------------------------------------------------------------------------- #
@@ -779,7 +800,7 @@ def _log_score_table(
         if not np.isnan(w_brier_val):
             w_brier = f"{float(w_brier_val):.3f}"
             if float(w_brier_val) >= ACCURACY_BASELINE_BRIER:
-                w_brier = f"{w_brier}\u00a7"
+                w_brier = f"{w_brier}!"
                 any_baseline_gate = True
 
         pnl = 0.0
@@ -871,11 +892,11 @@ def _log_score_table(
         )
     if any_baseline_gate:
         legends.append(
-            f"\u00a7 w_brier is the recency-weighted (half-life={RECENCY_HALF_LIFE_DAYS:.0f}d) "
+            f"! w_brier is the recency-weighted (half-life={RECENCY_HALF_LIFE_DAYS:.0f}d) "
             f"mean Brier used by the baseline gate; >= {ACCURACY_BASELINE_BRIER} sets score to 0."
         )
 
     if legends:
-        logger.info("forecasting scoring miner table:\n%s\n%s", table, "\n".join(legends))
+        logger.info("forecasting scoring miner table:\n%s\n%s\n", table, "\n".join(legends))
     else:
         logger.info("forecasting scoring miner table:\n%s", table)

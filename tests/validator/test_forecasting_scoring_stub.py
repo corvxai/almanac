@@ -8,13 +8,19 @@ import numpy as np
 import pytest
 
 from src.validator.forecasting.scoring import (
+    CALIBRATION_BASELINE_ECE,
+    EDGE_SIGNAL_GAIN,
     PARETO_BOOST,
     PARETO_MU,
     RHO_ALPHA,
     RHO_FLOOR,
     RHO_THRESHOLD_PREDICTIONS,
+    _Record,
+    _accuracy_score,
     _apply_pareto,
     _apply_pareto_by_rank,
+    _calibration_score,
+    _edge_score,
     compute_significance_score,
     score_agent_predictions,
 )
@@ -167,14 +173,14 @@ def test_baseline_brier_gets_zero_score() -> None:
     np.testing.assert_allclose(out, np.array([0.0]))
 
 
-def test_rho_leaves_floor_near_twenty_and_saturates_near_one_fifty() -> None:
+def test_rho_leaves_floor_near_twenty_and_saturates_near_one_seventy() -> None:
     rho = lambda n: compute_significance_score(
         n, RHO_THRESHOLD_PREDICTIONS, RHO_ALPHA
     )
     assert RHO_FLOOR < rho(15) < 0.15
     assert rho(20) > rho(15)
     assert rho(RHO_THRESHOLD_PREDICTIONS) == pytest.approx(0.55, abs=0.01)
-    assert rho(150) > 0.95
+    assert rho(170) > 0.95
 
 
 def test_time_based_rho_rewards_recent_volume() -> None:
@@ -225,6 +231,72 @@ def test_null_last_submission_does_not_zero_miner(caplog) -> None:
         out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
     assert out[0] > 0.0
     assert "1 miner(s) missing minerLastPredictedAt" in caplog.text
+
+
+def _record(
+    *,
+    p_win: float,
+    now: datetime,
+    p_pred: float | None = None,
+    hit: int | None = None,
+    market_p_win: float | None = None,
+) -> _Record:
+    if p_pred is None:
+        p_pred = p_win
+    if hit is None:
+        hit = 1 if p_win >= 0.5 else 0
+    return _Record(
+        p_win=p_win,
+        p_pred=p_pred,
+        hit=hit,
+        scored_at=now,
+        market_p_win=market_p_win,
+        market_p_pred=market_p_win,
+    )
+
+
+def test_below_baseline_event_pulls_accuracy_down() -> None:
+    now = datetime.now(timezone.utc)
+    hit = _record(p_win=1.0, now=now)
+    miss = _record(p_win=0.0, now=now, p_pred=0.0, hit=0)
+    weights = np.ones(2)
+    # Perfect hit scores 1; a confident miss clips at -1. The miss stays in the mean.
+    assert _accuracy_score([hit, miss], weights) == pytest.approx(0.0)
+    assert _accuracy_score([hit, hit], np.ones(2)) == pytest.approx(1.0)
+
+
+def test_calibration_is_excess_over_baseline() -> None:
+    now = datetime.now(timezone.utc)
+    # Stated 0.90 and always won: ECE = 0.10, which is the baseline, so the pillar is 0.
+    at_baseline = [_record(p_win=0.9, now=now, p_pred=0.9, hit=1) for _ in range(20)]
+    assert _calibration_score(at_baseline, np.ones(20)) == pytest.approx(0.0)
+
+    # Stated 0.60 and hit 60% of the time: ECE = 0, excess = the baseline itself.
+    calibrated = []
+    for i in range(10):
+        calibrated.append(_record(p_win=0.6, now=now, p_pred=0.6, hit=1 if i < 6 else 0))
+    assert _calibration_score(calibrated, np.ones(10)) == pytest.approx(CALIBRATION_BASELINE_ECE)
+
+    # Recent misses count more than old hits, so this miner is worse than the unweighted ECE.
+    confident = _record(p_win=0.9, now=now, p_pred=0.9, hit=1)
+    recent_miss = _record(p_win=0.1, now=now, p_pred=0.9, hit=0)
+    unweighted = _calibration_score([confident, recent_miss], np.ones(2))
+    recency = _calibration_score([confident, recent_miss], np.array([0.1, 1.0]))
+    assert recency < unweighted
+
+
+def test_edge_is_centered_on_the_market_and_scaled() -> None:
+    now = datetime.now(timezone.utc)
+    matched = _record(p_win=0.6, now=now, market_p_win=0.6)
+    assert _edge_score([matched], np.ones(1)) == pytest.approx(0.0)
+
+    # Agent put 0.70 on a winner the market priced at 0.60.
+    # brier_diff = 0.16 - 0.09 = 0.07; pnl = 0.10 * 0.40 = 0.04
+    # signal = 0.6 * 0.07 + 0.4 * 0.04 = 0.058; gain 10 keeps it inside [-1, 1].
+    better = _record(p_win=0.7, now=now, market_p_win=0.6)
+    assert _edge_score([better], np.ones(1)) == pytest.approx(0.058 * EDGE_SIGNAL_GAIN)
+
+    assert _edge_score([_record(p_win=0.7, now=now)], np.ones(1)) == pytest.approx(0.0)
 
 
 def test_unmapped_uid_is_skipped_not_counted() -> None:
