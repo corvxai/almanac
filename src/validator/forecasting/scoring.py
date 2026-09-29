@@ -4,9 +4,9 @@ Composite score per miner is a weighted blend of three pillars, computed over
 that miner's most recent predictions (``MAX_EVENTS_PER_MINER``) within the
 orchestrator fetch window:
 
-    1. Accuracy     (weight 0.50) - hardness-curved Brier closeness to truth.
-                     Events worse than the coin-flip Brier pull the mean down,
-                     bounded at -1. The anchor pillar.
+    1. Accuracy     (weight 0.50) - hardness curve on the recency-weighted
+                     mean Brier. Zero at the coin-flip Brier, positive when
+                     the mean is better. The anchor pillar.
     2. Calibration  (weight 0.30) - recency-weighted ECE as excess over a
                      competent-forecaster baseline. 0 matches that baseline.
     3. Edge         (weight 0.20) - centered market-relative Brier-difference
@@ -28,11 +28,9 @@ Eligibility gates (any failure -> score 0):
     * Minimum-sample gate: fewer than MIN_VALID_PREDICTIONS_HARD_FLOOR valid
       predictions in the capped window -> 0.
     * Baseline-accuracy gate: recency-weighted mean Brier at or above
-      ACCURACY_BASELINE_BRIER (the always-0.5 coin baseline) -> 0. Gating on
-      mean Brier rather than on the accuracy pillar matters: the pillar's
-      per-event max(0, ...) floor would let a zero-information "lottery"
-      miner (predict 1.0/0.0 everywhere) keep half its events at full score,
-      while its mean Brier of ~0.5 is plainly worse than the coin baseline.
+      ACCURACY_BASELINE_BRIER (the always-0.5 coin baseline) -> 0. The
+      accuracy pillar is at most 0 there, but calibration and edge can still
+      leave the composite positive, so the gate is what zeroes the miner.
     * Inactivity gate: minerLastPredictedAt older than INACTIVITY_ZERO_HOURS
       -> 0, linear fade after INACTIVITY_GRACE_HOURS. A null or missing
       timestamp does not penalize.
@@ -130,10 +128,12 @@ RHO_FLOOR = 0.10                      # minimum rho once miner passes hard gates
 INACTIVITY_GRACE_HOURS = 24.0         # no inactivity penalty while within grace
 INACTIVITY_ZERO_HOURS = 72.0          # score forced to 0 after this staleness age
 
-# Accuracy hardening. Per-event score is 1 - (brier/baseline)**gamma, clipped
-# to [-1, 1]. Zero at the coin-flip Brier; worse events pull the mean down
-# instead of contributing a free 0. The mean-Brier gate is still what zeroes
-# a miner who is baseline-or-worse overall.
+# Accuracy hardening. The pillar is 1 - (mean_brier / baseline) ** gamma,
+# clipped to [-1, 1]. The curve is applied to the recency-weighted mean
+# Brier, not to each event: a per-event power is not a proper score. Zero
+# at the coin-flip Brier. The mean-Brier gate still zeroes a miner at or
+# above that baseline, because calibration and edge can leave the composite
+# positive there.
 ACCURACY_BASELINE_BRIER = 0.25        # Brier of always predicting 0.5
 ACCURACY_HARDNESS_GAMMA = 1.7
 
@@ -329,10 +329,9 @@ def score_agent_predictions(
         else:
             latest_age_hours_by_idx[idx] = latest_age_hours
 
-        # Do not reward miners whose Brier is baseline-or-worse. Gate on mean
-        # Brier, not on the accuracy pillar: the pillar is a curved, bounded
-        # transform, so a mean above zero is not the same claim as beating
-        # the coin-flip Brier.
+        # Mean Brier at or above the coin flip. The accuracy pillar is at most
+        # 0 here, but calibration and edge can still make the composite
+        # positive, so the gate is what zeroes the miner.
         if mean_brier >= ACCURACY_BASELINE_BRIER:
             gated_baseline += 1
             continue
@@ -465,22 +464,20 @@ def _coerce_prob(value) -> Optional[float]:
 # --------------------------------------------------------------------------- #
 
 def _accuracy_score(recs: list[_Record], weights: np.ndarray) -> float:
-    """Recency-weighted mean of per-event accuracy scores.
+    """Hardness curve on the recency-weighted mean Brier.
 
-    Per event: ``clip(1 - (brier / B0) ** gamma, -1, 1)`` with
-    ``brier = (1 - p_win)^2`` and ``B0 = ACCURACY_BASELINE_BRIER``. Zero at
-    the coin-flip Brier, positive above it, negative below it.
+    ``clip(1 - (mean_brier / B0) ** gamma, -1, 1)`` with ``mean_brier`` the
+    recency-weighted mean of ``(1 - p_win)^2`` and
+    ``B0 = ACCURACY_BASELINE_BRIER``. Zero at the coin-flip Brier, positive
+    when the mean is better.
 
-    Events worse than baseline stay in the average and pull it down. Dropping
-    them would let a miner's worst predictions vanish from their own score.
-    The clip keeps one confident miss from outweighing every hit.
+    The power is applied to the mean, not to each event. Mean Brier is a
+    proper score, and this curve preserves that: the expected score is
+    maximized by reporting the true probability.
     """
-    per_event = np.empty(len(recs), dtype=float)
-    for i, r in enumerate(recs):
-        brier = (1.0 - r.p_win) ** 2
-        raw = 1.0 - (brier / ACCURACY_BASELINE_BRIER) ** ACCURACY_HARDNESS_GAMMA
-        per_event[i] = float(np.clip(raw, -1.0, 1.0))
-    return float(np.average(per_event, weights=weights))
+    mean_brier = _mean_brier(recs, weights)
+    raw = 1.0 - (mean_brier / ACCURACY_BASELINE_BRIER) ** ACCURACY_HARDNESS_GAMMA
+    return float(np.clip(raw, -1.0, 1.0))
 
 
 # --------------------------------------------------------------------------- #

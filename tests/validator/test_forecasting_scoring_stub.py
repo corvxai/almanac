@@ -16,11 +16,16 @@ from src.validator.forecasting.scoring import (
     RHO_FLOOR,
     RHO_THRESHOLD_PREDICTIONS,
     _Record,
+    WEIGHT_ACCURACY,
+    WEIGHT_CALIBRATION,
+    WEIGHT_EDGE,
     _accuracy_score,
     _apply_pareto,
     _apply_pareto_by_rank,
     _calibration_score,
     _edge_score,
+    _mean_brier,
+    _parse_record,
     compute_significance_score,
     score_agent_predictions,
 )
@@ -60,7 +65,14 @@ def _row(
     now: datetime,
     invalid: bool = False,
     resolved: bool = True,
+    predicted_outcome_id: str = "yes",
+    resolved_outcome_id: str = "yes",
 ):
+    # ``p_win`` is the probability on the resolved outcome.
+    if resolved_outcome_id == "yes":
+        probs = {"yes": p_win, "no": 1.0 - p_win}
+    else:
+        probs = {"yes": 1.0 - p_win, "no": p_win}
     return type(
         "ScoredRow",
         (),
@@ -70,9 +82,9 @@ def _row(
             "resolutionStatus": "resolved" if resolved else "voided",
             "scoredAt": now - timedelta(hours=1),
             "marketId": f"mkt_{miner_uid}",
-            "outcomeProbabilities": {"yes": p_win, "no": 1.0 - p_win},
-            "predictedOutcomeId": "yes",
-            "resolvedOutcomeId": "yes",
+            "outcomeProbabilities": probs,
+            "predictedOutcomeId": predicted_outcome_id,
+            "resolvedOutcomeId": resolved_outcome_id,
         },
     )()
 
@@ -255,14 +267,58 @@ def _record(
     )
 
 
-def test_below_baseline_event_pulls_accuracy_down() -> None:
+def test_accuracy_curve_rewards_the_true_probability() -> None:
     now = datetime.now(timezone.utc)
+    # Six wins and four losses of the chosen side. Mean Brier is minimized
+    # by stating 0.60, and the hardness curve preserves that optimum.
+    def stated(q: float) -> list[_Record]:
+        hits = [_record(p_win=q, now=now, p_pred=q, hit=1) for _ in range(6)]
+        misses = [_record(p_win=1.0 - q, now=now, p_pred=q, hit=0) for _ in range(4)]
+        return hits + misses
+
+    weights = np.ones(10)
+    honest = _accuracy_score(stated(0.60), weights)
+    assert honest > 0.0
+    assert honest > _accuracy_score(stated(0.55), weights)
+    assert honest > _accuracy_score(stated(0.65), weights)
+    assert _accuracy_score([_record(p_win=1.0, now=now)], np.ones(1)) == pytest.approx(1.0)
+
     hit = _record(p_win=1.0, now=now)
     miss = _record(p_win=0.0, now=now, p_pred=0.0, hit=0)
-    weights = np.ones(2)
-    # Perfect hit scores 1; a confident miss clips at -1. The miss stays in the mean.
-    assert _accuracy_score([hit, miss], weights) == pytest.approx(0.0)
-    assert _accuracy_score([hit, hit], np.ones(2)) == pytest.approx(1.0)
+    assert _accuracy_score([hit, miss], np.ones(2)) < 0.0
+
+
+def test_baseline_gate_zeros_positive_composite() -> None:
+    metagraph = _StubMetagraph(uids=[1])
+    now = datetime.now(timezone.utc)
+    # Stated 0.55 and hit half the time. Mean Brier is just over the coin
+    # flip, but the accuracy penalty is small enough that the calibration
+    # excess leaves the pillar blend positive. The gate is what returns 0.
+    hits = [_row(miner_uid=1, p_win=0.55, now=now) for _ in range(5)]
+    misses = [
+        _row(
+            miner_uid=1,
+            p_win=0.45,
+            now=now,
+            predicted_outcome_id="yes",
+            resolved_outcome_id="no",
+        )
+        for _ in range(5)
+    ]
+    rows = hits + misses
+    recs = [_parse_record(row, scored_at=row.scoredAt) for row in rows]
+    assert all(rec is not None for rec in recs)
+    weights = np.ones(len(recs))
+    assert _mean_brier(recs, weights) >= 0.25
+    blend = (
+        WEIGHT_ACCURACY * _accuracy_score(recs, weights)
+        + WEIGHT_CALIBRATION * _calibration_score(recs, weights)
+        + WEIGHT_EDGE * _edge_score(recs, weights)
+    )
+    assert blend > 0.0
+
+    out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
+    assert out[0] == pytest.approx(0.0)
 
 
 def test_calibration_is_excess_over_baseline() -> None:
