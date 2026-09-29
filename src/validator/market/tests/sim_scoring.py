@@ -26,7 +26,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
-import requests
 from tabulate import tabulate
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -92,13 +91,11 @@ def resolve_epoch_budget(offline: bool):
 
     import bittensor as bt
 
+    from src.validator.market.loop import fetch_tao_price
+
     subtensor = bt.Subtensor(network="finney")
     metagraph = subtensor.subnets.metagraph(41)
-    tao_price = requests.get(
-        "https://api.coingecko.com/api/v3/simple/price"
-        "?ids=bittensor&vs_currencies=usd",
-        timeout=15,
-    ).json()["bittensor"]["usd"]
+    tao_price = fetch_tao_price()
     alpha_price = metagraph.moving_price * tao_price
     print(f"TAO price:   ${tao_price:,.2f}")
     print(f"Alpha price: ${alpha_price:,.4f}")
@@ -287,7 +284,7 @@ def main():
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--offline", action="store_true",
-                        help="Skip subtensor/coingecko; use a fixed alpha price")
+                        help="Skip subtensor and the live TAO price; use a fixed alpha price")
     parser.add_argument("--no-replay", action="store_true",
                         help="Score the current epoch only, skip the historical replay")
     parser.add_argument("--top", type=int, default=None,

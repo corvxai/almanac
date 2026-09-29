@@ -40,7 +40,8 @@ _DEFAULT_TRADING_HISTORY_ENDPOINT_PROD = "https://api.almanac.market/api/v1/trad
 _DEFAULT_TRADING_HISTORY_ENDPOINT_TEST = "http://host.docker.internal:3001/api/v1/trading/trading-history"
 _DEFAULT_TRADING_HISTORY_BATCH_LIMIT = 1000
 _DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
-_TAO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
+_COINBASE_TAO_PRICE_URL = "https://api.coinbase.com/v2/prices/TAO-USD/spot"
+_COINGECKO_TAO_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
 _TAO_PRICE_TIMEOUT_SECONDS = 10
 
 
@@ -74,15 +75,27 @@ def _retry_with_backoff(func, *args, **kwargs):
             time.sleep(delay)
 
 
+def _fetch_coinbase_tao_price() -> float:
+    """Live TAO/USD spot quote from Coinbase. ``data.amount`` is a string."""
+    response = requests.get(_COINBASE_TAO_PRICE_URL, timeout=_TAO_PRICE_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return float(response.json()["data"]["amount"])
+
+
+def _fetch_coingecko_tao_price() -> float:
+    """Live TAO/USD from CoinGecko's simple-price endpoint."""
+    response = requests.get(_COINGECKO_TAO_PRICE_URL, timeout=_TAO_PRICE_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return float(response.json()["bittensor"]["usd"])
+
+
 def fetch_tao_price() -> float:
-    """Fetch the live TAO/USD price from coingecko (sn41-verbatim)."""
-
-    def _fetch() -> float:
-        response = requests.get(_TAO_PRICE_URL, timeout=_TAO_PRICE_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.json()["bittensor"]["usd"]
-
-    return _retry_with_backoff(_fetch)
+    """Fetch the live TAO/USD price. Coinbase first, CoinGecko if that fails."""
+    try:
+        return _retry_with_backoff(_fetch_coinbase_tao_price)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Coinbase TAO price failed: %s. Falling back to CoinGecko.", exc)
+        return _retry_with_backoff(_fetch_coingecko_tao_price)
 
 
 def compute_epoch_budget(metagraph, tao_price_usd: float) -> float:
