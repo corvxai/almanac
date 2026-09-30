@@ -661,10 +661,32 @@ def main() -> int:
         print(f"failed to load {input_path}: {exc}")
         return 1
 
-    metagraph_uids = sorted(
-        {int(row.minerUid) for row in rows if row.minerUid is not None}
-    )
-    metagraph = SimpleNamespace(uids=metagraph_uids)
+    # Offline replay has no chain metagraph. Use one hotkey per UID, and when
+    # a UID was recycled inside the snapshot keep the hotkey on the latest
+    # predictedAt. Production scoring uses the live metagraph instead.
+    latest_hotkey_by_uid: dict[int, tuple[datetime, str]] = {}
+    hotkeys_by_uid: dict[int, set[str]] = {}
+    for row in rows:
+        if row.minerUid is None:
+            continue
+        uid = int(row.minerUid)
+        hotkeys_by_uid.setdefault(uid, set()).add(row.minerHotkey)
+        prev = latest_hotkey_by_uid.get(uid)
+        if prev is None or row.predictedAt > prev[0]:
+            latest_hotkey_by_uid[uid] = (row.predictedAt, row.minerHotkey)
+    metagraph_uids = sorted(latest_hotkey_by_uid)
+    metagraph_hotkeys = [latest_hotkey_by_uid[uid][1] for uid in metagraph_uids]
+    for uid in metagraph_uids:
+        seen = hotkeys_by_uid[uid]
+        if len(seen) > 1:
+            logger.warning(
+                "UID %s has %d hotkeys in the snapshot; sim metagraph keeps the "
+                "latest predictedAt hotkey (%s) and drops the others",
+                uid,
+                len(seen),
+                latest_hotkey_by_uid[uid][1],
+            )
+    metagraph = SimpleNamespace(uids=metagraph_uids, hotkeys=metagraph_hotkeys)
     now_utc = datetime.now(timezone.utc)
     scoring_result = forecasting_scoring.score_agent_predictions(
         metagraph=metagraph,

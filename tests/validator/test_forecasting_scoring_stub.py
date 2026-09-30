@@ -67,6 +67,7 @@ def _row(
     resolved: bool = True,
     predicted_outcome_id: str = "yes",
     resolved_outcome_id: str = "yes",
+    miner_hotkey: str | None = None,
 ):
     # ``p_win`` is the probability on the resolved outcome.
     if resolved_outcome_id == "yes":
@@ -78,6 +79,11 @@ def _row(
         (),
         {
             "minerUid": miner_uid,
+            "minerHotkey": (
+                miner_hotkey
+                if miner_hotkey is not None
+                else (f"hotkey_{miner_uid}" if miner_uid is not None else None)
+            ),
             "predictionIsInvalid": invalid,
             "resolutionStatus": "resolved" if resolved else "voided",
             "scoredAt": now - timedelta(hours=1),
@@ -230,6 +236,53 @@ def test_inactivity_gate_uses_last_submission_not_scored_at() -> None:
     )
     assert out[0] > 0.0
     assert out[1] == 0.0
+
+
+def test_mismatched_hotkey_is_dropped_and_does_not_refresh_inactivity() -> None:
+    metagraph = _StubMetagraph(uids=[1])
+    now = datetime.now(timezone.utc)
+
+    registered = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
+    for row in registered:
+        row.minerLastPredictedAt = now - timedelta(hours=120)
+        row.scoredAt = now - timedelta(hours=1)
+
+    # A recycled UID still carrying the previous occupant's history, plus one
+    # fresh row from a hotkey that is not the one registered at UID 1.
+    deregistered = [_row(miner_uid=1, p_win=1.0, now=now, miner_hotkey="old_hotkey") for _ in range(20)]
+    for row in deregistered:
+        row.minerLastPredictedAt = now - timedelta(hours=1)
+
+    out = score_agent_predictions(
+        metagraph=metagraph,
+        scored_predictions=registered + deregistered,
+        now=now,
+    )
+    assert out[0] == 0.0
+
+
+def test_only_the_registered_hotkey_is_scored() -> None:
+    metagraph = _StubMetagraph(uids=[1])
+    now = datetime.now(timezone.utc)
+    registered = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
+    other = [
+        _row(miner_uid=1, p_win=1.0, now=now, miner_hotkey="other_hotkey")
+        for _ in range(20)
+    ]
+    missing = [_row(miner_uid=1, p_win=1.0, now=now, miner_hotkey="") for _ in range(20)]
+
+    matched = score_agent_predictions(
+        metagraph=metagraph,
+        scored_predictions=registered,
+        now=now,
+    )
+    mixed = score_agent_predictions(
+        metagraph=metagraph,
+        scored_predictions=registered + other + missing,
+        now=now,
+    )
+    np.testing.assert_allclose(mixed, matched)
+    assert mixed[0] > 0.0
 
 
 def test_null_last_submission_does_not_zero_miner(caplog) -> None:

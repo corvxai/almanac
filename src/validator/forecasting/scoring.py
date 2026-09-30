@@ -58,6 +58,11 @@ Coverage (research-trace quality) is not a scoring pillar. Invalid
 predictions are marked orchestrator-side via ``predictionIsInvalid`` and
 enforced by the invalid-rate gate.
 
+A row counts only when ``minerUid`` is in the current metagraph and
+``minerHotkey`` is the hotkey registered at that UID. Predictions from a
+deregistered miner that still carry a recycled UID are dropped, including
+their ``minerLastPredictedAt``.
+
 Returns a ``np.ndarray`` of per-miner scores aligned to the metagraph UIDs.
 """
 
@@ -218,6 +223,14 @@ def score_agent_predictions(
     if n == 0:
         return np.zeros(0, dtype=float)
     uid_to_idx = {uid: idx for idx, uid in enumerate(uids)}
+    hotkeys = _metagraph_hotkeys(metagraph)
+    if len(hotkeys) < n:
+        logger.warning(
+            "forecasting scoring: metagraph hotkeys (%d) shorter than uids (%d); "
+            "rows without a registered hotkey at their UID are dropped",
+            len(hotkeys),
+            n,
+        )
 
     # Attributable rows per miner: (scored_at, record-or-None, invalid_flag).
     # record is None for invalid-flagged and unparseable rows; both stay in
@@ -227,6 +240,7 @@ def score_agent_predictions(
         [] for _ in range(n)
     ]
     last_predicted_by_idx: list[Optional[datetime]] = [None for _ in range(n)]
+    dropped_hotkey = 0
 
     for item in scored_predictions:
         if getattr(item, "resolutionStatus", None) != "resolved":
@@ -245,6 +259,14 @@ def score_agent_predictions(
             continue
         idx = uid_to_idx.get(int(uid))
         if idx is None:
+            continue
+        miner_hotkey = getattr(item, "minerHotkey", None)
+        if (
+            not isinstance(miner_hotkey, str)
+            or idx >= len(hotkeys)
+            or hotkeys[idx] != miner_hotkey
+        ):
+            dropped_hotkey += 1
             continue
 
         last_predicted = _as_utc(getattr(item, "minerLastPredictedAt", None))
@@ -355,7 +377,7 @@ def score_agent_predictions(
         "forecasting composite scoring: %d valid rows | %d miners scored, "
         "%d gated (invalid-rate), %d gated (min-sample-hard-floor), %d gated (baseline-accuracy), "
         "%d gated (inactive) "
-        "| cutoff=%s window=%dd cap=%d",
+        "| cutoff=%s window=%dd cap=%d | %d dropped (hotkey mismatch)",
         sum(len(r) for r in records_by_idx),
         scored_miners,
         gated_invalid,
@@ -365,6 +387,7 @@ def score_agent_predictions(
         cutoff.isoformat(),
         rolling_window_days,
         MAX_EVENTS_PER_MINER,
+        dropped_hotkey,
     )
     if missing_last_predicted:
         logger.warning(
@@ -647,6 +670,14 @@ def _inactivity_multiplier(age_hours: Optional[float]) -> float:
         return 0.0
     span = max(INACTIVITY_ZERO_HOURS - INACTIVITY_GRACE_HOURS, 1e-6)
     return float(np.clip(1.0 - ((age_hours - INACTIVITY_GRACE_HOURS) / span), 0.0, 1.0))
+
+
+def _metagraph_hotkeys(metagraph) -> list[str]:
+    """Hotkeys parallel to ``_metagraph_uids`` (index ``i`` is UID ``uids[i]``)."""
+    hotkeys = getattr(metagraph, "hotkeys", None)
+    if hotkeys is None:
+        return []
+    return [hk if isinstance(hk, str) else str(hk) for hk in hotkeys]
 
 
 def _metagraph_uids(metagraph) -> list[int]:
