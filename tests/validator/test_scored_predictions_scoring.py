@@ -20,6 +20,7 @@ class _StubUids:
 class _StubMetagraph:
     def __init__(self, uids: list[int]) -> None:
         self.uids = _StubUids(uids)
+        self.hotkeys = [f"hotkey_{uid}" for uid in uids]
 
 
 def _row(
@@ -32,6 +33,7 @@ def _row(
 ):
     return SimpleNamespace(
         minerUid=uid,
+        minerHotkey=f"hotkey_{uid}",
         predictionIsInvalid=invalid,
         resolutionStatus="resolved" if resolved else "voided",
         scoredAt=now - timedelta(hours=1),
