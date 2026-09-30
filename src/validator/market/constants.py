@@ -87,8 +87,10 @@ MINER_POOL_WEIGHT_BOOST_PERCENTAGE = 0.75
 
 TOTAL_MINER_ALPHA_PER_DAY = 2952  # 7200 alpha per day for entire subnet * 0.41 (41% for miners)
 
-# Subnet owner burn UID
-BURN_UID = 210
+# Burn UID
+BURN_UID = 46
+# Two uint16 ticks: one tick is 1/65535, so UID won't be deregistered if applicable.
+BURN_MIN_WEIGHT = 2.0 * U16_QUANT_FLOOR
 # Subnet owner excess miner weight UID
 EXCESS_MINER_WEIGHT_UID = None
 EXCESS_MINER_MIN_WEIGHT = 0  # 0.00001 should be low enough if used
@@ -98,6 +100,10 @@ EXCESS_MINER_TAKE_PERCENTAGE = 0  # percentage of the excess miner weight that i
 # These feed directly into on-chain weight setting. A value outside [0, 1]
 # silently produces negative or >1 burn/excess weights (corrupting payouts)
 # rather than erroring, so validate them at import time.
+if not 0.0 <= BURN_MIN_WEIGHT <= 1.0:
+    raise ValueError(
+        f"BURN_MIN_WEIGHT must be in [0, 1], got {BURN_MIN_WEIGHT}"
+    )
 if not 0.0 <= EXCESS_MINER_TAKE_PERCENTAGE <= 1.0:
     raise ValueError(
         f"EXCESS_MINER_TAKE_PERCENTAGE must be in [0, 1], got {EXCESS_MINER_TAKE_PERCENTAGE}"

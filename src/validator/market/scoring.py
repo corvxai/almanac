@@ -72,6 +72,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 from .constants import (
+    BURN_MIN_WEIGHT,
     BURN_UID,
     CAP_RELAX_FACTOR,
     CONCENTRATION_CAP,
@@ -888,7 +889,7 @@ def calculate_weights(
         else:
             boost_tag = " (no headroom)"
 
-    weights[BURN_UID] = weights.get(BURN_UID, 0.0) + max(1.0 - miner_weight, 0.0)
+    weights[BURN_UID] = weights.get(BURN_UID, 0.0) + max(1.0 - miner_weight, BURN_MIN_WEIGHT)
 
     vec = [weights.get(uid, 0.0) for uid in all_uids]
     total = sum(vec)
