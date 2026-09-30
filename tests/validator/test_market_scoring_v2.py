@@ -300,16 +300,19 @@ def _boost_log(tokens: float, budget: float, capsys) -> str:
 
 def test_boost_verbose_log_reports_clip_and_fill(capsys):
     """When 75% overshoots remaining emission, log the clipped factor and dollars filled."""
+    from src.validator.market.scoring import BURN_MIN_WEIGHT
+
     budget, tokens = 3507.78, 2079.50
     out = _boost_log(tokens, budget, capsys)
     filled = budget - tokens
+    burn_usd = BURN_MIN_WEIGHT * budget
     assert "configured=1.75x (75%)" in out
     assert "applied=1.69x (69%) (clipped)" in out
     assert f"pre=0.5928 (${tokens:,.2f})" in out
     assert "post=1.0000" in out
     assert f"filled=${filled:,.2f}" in out
     assert f"emission=${budget:,.2f}" in out
-    assert "burn=0.0000 ($0.00)" in out
+    assert f"burn={BURN_MIN_WEIGHT:.4f} (${burn_usd:,.2f})" in out
     assert "share: 1.0000" in out
 
 
@@ -330,7 +333,7 @@ def test_boost_verbose_log_reports_full_boost_and_remaining_burn(capsys):
 
 def test_boost_verbose_log_reports_share_reservation(capsys):
     """budget_share must show the slice vs subnet split, not as emission burn."""
-    from src.validator.market.scoring import BURN_UID, calculate_weights
+    from src.validator.market.scoring import BURN_MIN_WEIGHT, BURN_UID, calculate_weights
 
     slice_budget, tokens, share = 3507.78, 2079.50, 0.95
     miner = {"entity_ids": [1], "tokens": np.array([tokens])}
@@ -346,7 +349,8 @@ def test_boost_verbose_log_reports_share_reservation(capsys):
     assert f"slice=${slice_budget:,.2f}" in out
     assert f"subnet=${subnet:,.2f}" in out
     assert f"reserved=${reserved:,.2f} (other mechanisms at blend, not burn)" in out
-    assert "burn=0.0000 ($0.00)" in out
+    burn_usd = BURN_MIN_WEIGHT * slice_budget
+    assert f"burn={BURN_MIN_WEIGHT:.4f} (${burn_usd:,.2f})" in out
 
 
 def test_as_of_keeps_full_trailing_window():
@@ -358,6 +362,43 @@ def test_as_of_keeps_full_trailing_window():
     assert hist["n_epochs"] == ROLLING_HISTORY_IN_DAYS
     assert hist["epoch_dates"][0] == "2026-05-16"
     assert hist["epoch_dates"][-1] == "2026-06-14"
+
+
+def test_full_slice_reserves_burn_min_weight():
+    """A zero residual still leaves the burn UID above one uint16 tick."""
+    from src.validator.market.scoring import (
+        BURN_MIN_WEIGHT,
+        BURN_UID,
+        U16_QUANT_FLOOR,
+        calculate_weights,
+    )
+
+    budget = 1000.0
+    miner = {"entity_ids": [1, 2], "tokens": np.array([250.0, 750.0])}
+    gp = {"tokens": np.array([0.0])}
+    uids = [1, 2, BURN_UID]
+    weights = calculate_weights(miner, gp, budget, 1000.0, 0.0, [], uids)
+
+    total = 1.0 + BURN_MIN_WEIGHT
+    assert weights[-1] == pytest.approx(BURN_MIN_WEIGHT / total)
+    assert weights[-1] > U16_QUANT_FLOOR
+    assert weights[0] == pytest.approx(0.25 / total)
+    assert weights[1] == pytest.approx(0.75 / total)
+    assert sum(weights) == pytest.approx(1.0)
+
+
+def test_burn_residual_above_floor_is_unchanged():
+    from src.validator.market.scoring import BURN_UID, calculate_weights
+
+    budget = 1000.0
+    tokens = 100.0
+    miner = {"entity_ids": [1], "tokens": np.array([tokens])}
+    gp = {"tokens": np.array([0.0])}
+    weights = calculate_weights(miner, gp, budget, tokens, 0.0, [], [1, BURN_UID])
+
+    miner_w = (tokens / budget) * BOOST
+    assert weights[0] == pytest.approx(miner_w)
+    assert weights[1] == pytest.approx(1.0 - miner_w)
 
 
 def test_burn_uid_collision_rejected():

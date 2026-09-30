@@ -16,7 +16,8 @@ def test_constants_module_loads_known_values() -> None:
     assert constants.ROLLING_HISTORY_IN_DAYS == 30
     assert constants.VOLUME_FEE == 0.01
     assert constants.TOTAL_MINER_ALPHA_PER_DAY == 2952
-    assert constants.BURN_UID == 210
+    assert constants.BURN_UID == 46
+    assert constants.BURN_MIN_WEIGHT == 2.0 * constants.U16_QUANT_FLOOR
     assert isinstance(constants.POLY_BUILDER_CODE, str)
     assert isinstance(constants.POLY_BUILDER_CODE_SELL, str)
     assert constants.PARETO_ALPHA == 0.65
