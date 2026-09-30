@@ -414,8 +414,10 @@ def main():
     )
 
     print_pool_table(miner_history, miners_scores, miner_budget, "MINER POOL", args.top)
-    gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
-    print_pool_table(general_pool_history, general_pool_scores, gp_budget, gp_label, args.top)
+    if ENABLE_GENERAL_POOL_SCORING:
+        print_pool_table(
+            general_pool_history, general_pool_scores, gp_budget, "GENERAL POOL", args.top
+        )
 
     print_mechanism_diagnostics(miner_history, miners_scores, miner_budget)
 

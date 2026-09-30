@@ -696,8 +696,8 @@ def print_pool_stats(
     gp_budget = pool_epoch_fees(general_pool_history) if include_current_epoch else 0.0
     if include_current_epoch:
         print_pool_table(miner_history, miner_scores, miner_budget, "MINER POOL")
-        gp_label = "GENERAL POOL" if ENABLE_GENERAL_POOL_SCORING else "GENERAL POOL (scoring disabled)"
-        print_pool_table(general_pool_history, general_pool_scores, gp_budget, gp_label)
+        if ENABLE_GENERAL_POOL_SCORING:
+            print_pool_table(general_pool_history, general_pool_scores, gp_budget, "GENERAL POOL")
         if MINER_POOL_WEIGHT_BOOST_PERCENTAGE > 0 and miner_scores is not None:
             print(
                 f"* Miner weights are boosted by {MINER_POOL_WEIGHT_BOOST_PERCENTAGE:.0%} "
@@ -706,12 +706,8 @@ def print_pool_stats(
             )
     else:
         print_pool_table(miner_history, None, 0.0, "MINER POOL (trailing)")
-        gp_label = (
-            "GENERAL POOL (trailing)"
-            if ENABLE_GENERAL_POOL_SCORING
-            else "GENERAL POOL (trailing, scoring disabled)"
-        )
-        print_pool_table(general_pool_history, None, 0.0, gp_label)
+        if ENABLE_GENERAL_POOL_SCORING:
+            print_pool_table(general_pool_history, None, 0.0, "GENERAL POOL (trailing)")
 
 
 def print_mechanism_diagnostics(
