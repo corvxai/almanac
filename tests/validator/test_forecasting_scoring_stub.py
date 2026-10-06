@@ -8,8 +8,14 @@ import numpy as np
 import pytest
 
 from src.validator.forecasting.scoring import (
+    ACCURACY_SKILL_ALLOWANCE,
+    ALLOWANCE_MINER_CAP,
+    ALLOWANCE_POOL_SHARE,
     CALIBRATION_BASELINE_ECE,
     EDGE_SIGNAL_GAIN,
+    SKILL_MINER_CAP,
+    SKILL_POOL_SHARE,
+    SKILL_SATURATION,
     PARETO_BOOST,
     PARETO_MU,
     RHO_ALPHA,
@@ -20,6 +26,7 @@ from src.validator.forecasting.scoring import (
     WEIGHT_CALIBRATION,
     WEIGHT_EDGE,
     _accuracy_score,
+    _allocate_slice,
     _apply_pareto,
     _apply_pareto_by_rank,
     _calibration_score,
@@ -68,6 +75,7 @@ def _row(
     predicted_outcome_id: str = "yes",
     resolved_outcome_id: str = "yes",
     miner_hotkey: str | None = None,
+    market_p_win: float | None = None,
 ):
     # ``p_win`` is the probability on the resolved outcome.
     if resolved_outcome_id == "yes":
@@ -91,6 +99,15 @@ def _row(
             "outcomeProbabilities": probs,
             "predictedOutcomeId": predicted_outcome_id,
             "resolvedOutcomeId": resolved_outcome_id,
+            "outcomePricesAtPrediction": (
+                None
+                if market_p_win is None
+                else (
+                    {"yes": market_p_win, "no": 1.0 - market_p_win}
+                    if resolved_outcome_id == "yes"
+                    else {"yes": 1.0 - market_p_win, "no": market_p_win}
+                )
+            ),
         },
     )()
 
@@ -102,15 +119,15 @@ def test_empty_rows_returns_zeros() -> None:
     np.testing.assert_allclose(out, np.zeros(3))
 
 
-def test_perfect_prediction_yields_pareto_leader_score() -> None:
+def test_perfect_prediction_is_paid_from_the_skill_pool() -> None:
     metagraph = _StubMetagraph(uids=[0, 1, 2])
 
     now = datetime.now(timezone.utc)
-    rows = [_row(miner_uid=1, p_win=1.0, now=now) for _ in range(12)]
+    rows = [_row(miner_uid=1, p_win=1.0, market_p_win=0.5, now=now) for _ in range(12)]
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
 
     assert out[0] == 0.0
-    assert out[1] == pytest.approx(PARETO_MU + PARETO_BOOST)
+    assert 0.0 < out[1] < 1.0
     assert out[2] == 0.0
 
 
@@ -205,8 +222,8 @@ def test_time_based_rho_rewards_recent_volume() -> None:
     metagraph = _StubMetagraph(uids=[1, 2])
     now = datetime.now(timezone.utc)
 
-    low_volume = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(18)]
-    high_volume = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(150)]
+    low_volume = [_row(miner_uid=1, p_win=0.9, market_p_win=0.5, now=now) for _ in range(18)]
+    high_volume = [_row(miner_uid=2, p_win=0.9, market_p_win=0.5, now=now) for _ in range(150)]
 
     out = score_agent_predictions(
         metagraph=metagraph,
@@ -220,8 +237,8 @@ def test_inactivity_gate_uses_last_submission_not_scored_at() -> None:
     metagraph = _StubMetagraph(uids=[1, 2])
     now = datetime.now(timezone.utc)
 
-    fresh = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
-    stale = [_row(miner_uid=2, p_win=0.9, now=now) for _ in range(20)]
+    fresh = [_row(miner_uid=1, p_win=0.9, market_p_win=0.5, now=now) for _ in range(20)]
+    stale = [_row(miner_uid=2, p_win=0.9, market_p_win=0.5, now=now) for _ in range(20)]
     for row in fresh:
         row.minerLastPredictedAt = now - timedelta(hours=1)
         row.scoredAt = now - timedelta(hours=120)
@@ -264,7 +281,7 @@ def test_mismatched_hotkey_is_dropped_and_does_not_refresh_inactivity() -> None:
 def test_only_the_registered_hotkey_is_scored() -> None:
     metagraph = _StubMetagraph(uids=[1])
     now = datetime.now(timezone.utc)
-    registered = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
+    registered = [_row(miner_uid=1, p_win=0.9, market_p_win=0.5, now=now) for _ in range(20)]
     other = [
         _row(miner_uid=1, p_win=1.0, now=now, miner_hotkey="other_hotkey")
         for _ in range(20)
@@ -288,7 +305,7 @@ def test_only_the_registered_hotkey_is_scored() -> None:
 def test_null_last_submission_does_not_zero_miner(caplog) -> None:
     metagraph = _StubMetagraph(uids=[1])
     now = datetime.now(timezone.utc)
-    rows = [_row(miner_uid=1, p_win=0.9, now=now) for _ in range(20)]
+    rows = [_row(miner_uid=1, p_win=0.9, market_p_win=0.5, now=now) for _ in range(20)]
     for row in rows:
         row.minerLastPredictedAt = None
 
@@ -322,11 +339,15 @@ def _record(
 
 def test_accuracy_curve_rewards_the_true_probability() -> None:
     now = datetime.now(timezone.utc)
-    # Six wins and four losses of the chosen side. Mean Brier is minimized
-    # by stating 0.60, and the hardness curve preserves that optimum.
+    # Six wins and four losses of the chosen side. The market price on the
+    # winner is 0.5 on every event, so the skill denominator is fixed and
+    # mean Brier is minimized by stating 0.60.
     def stated(q: float) -> list[_Record]:
-        hits = [_record(p_win=q, now=now, p_pred=q, hit=1) for _ in range(6)]
-        misses = [_record(p_win=1.0 - q, now=now, p_pred=q, hit=0) for _ in range(4)]
+        hits = [_record(p_win=q, now=now, p_pred=q, hit=1, market_p_win=0.5) for _ in range(6)]
+        misses = [
+            _record(p_win=1.0 - q, now=now, p_pred=q, hit=0, market_p_win=0.5)
+            for _ in range(4)
+        ]
         return hits + misses
 
     weights = np.ones(10)
@@ -334,31 +355,65 @@ def test_accuracy_curve_rewards_the_true_probability() -> None:
     assert honest > 0.0
     assert honest > _accuracy_score(stated(0.55), weights)
     assert honest > _accuracy_score(stated(0.65), weights)
-    assert _accuracy_score([_record(p_win=1.0, now=now)], np.ones(1)) == pytest.approx(1.0)
+    assert _accuracy_score(
+        [_record(p_win=1.0, now=now, market_p_win=0.5)], np.ones(1)
+    ) == pytest.approx(1.0)
 
-    hit = _record(p_win=1.0, now=now)
-    miss = _record(p_win=0.0, now=now, p_pred=0.0, hit=0)
-    assert _accuracy_score([hit, miss], np.ones(2)) < 0.0
+    # Exact copy, and a perfect copy of a certainty, score the allowance.
+    assert _accuracy_score(
+        [_record(p_win=0.6, now=now, market_p_win=0.6)], np.ones(1)
+    ) == pytest.approx(ACCURACY_SKILL_ALLOWANCE)
+    assert _accuracy_score(
+        [_record(p_win=1.0, now=now, market_p_win=1.0)], np.ones(1)
+    ) == pytest.approx(ACCURACY_SKILL_ALLOWANCE)
+    # One allowance worse than the market is the new zero.
+    # Market brier 0.25; agent brier = 0.25 * (1 + allowance).
+    worse_p = 1.0 - (0.25 * (1.0 + ACCURACY_SKILL_ALLOWANCE)) ** 0.5
+    assert _accuracy_score(
+        [_record(p_win=worse_p, now=now, market_p_win=0.5)], np.ones(1)
+    ) == pytest.approx(0.0, abs=1e-3)
+    # No market price is 0, and the allowance does not apply.
+    assert _accuracy_score([_record(p_win=1.0, now=now)], np.ones(1)) == pytest.approx(0.0)
+    # Market was certain and right; agent was certain and wrong.
+    assert _accuracy_score(
+        [_record(p_win=0.0, now=now, market_p_win=1.0)], np.ones(1)
+    ) == pytest.approx(-1.0 + ACCURACY_SKILL_ALLOWANCE)
+
+    # Two events, market 0.90, agent extremized to 0.99. The ratio of means
+    # is negative. The mean of the per-event ratios is positive (~0.39) and
+    # must not be what this pillar returns.
+    win = _record(p_win=0.99, now=now, market_p_win=0.90)
+    lose = _record(p_win=0.01, now=now, market_p_win=0.10)
+    assert _accuracy_score([win, lose], np.ones(2)) < 0.0
+
+
+def test_market_copy_scores_the_allowance_and_a_better_forecast_leads() -> None:
+    metagraph = _StubMetagraph(uids=[1, 2])
+    now = datetime.now(timezone.utc)
+    copies = [_row(miner_uid=1, p_win=0.6, market_p_win=0.6, now=now) for _ in range(12)]
+    better = [_row(miner_uid=2, p_win=0.8, market_p_win=0.6, now=now) for _ in range(12)]
+    out = score_agent_predictions(
+        metagraph=metagraph,
+        scored_predictions=copies + better,
+        now=now,
+    )
+    assert 0.0 < out[0] < out[1]
+
+
+def test_unpriced_forecast_scores_zero() -> None:
+    metagraph = _StubMetagraph(uids=[1])
+    now = datetime.now(timezone.utc)
+    rows = [_row(miner_uid=1, p_win=1.0, now=now) for _ in range(12)]
+    out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
+    assert out[0] == pytest.approx(0.0)
 
 
 def test_baseline_gate_zeros_positive_composite() -> None:
     metagraph = _StubMetagraph(uids=[1])
     now = datetime.now(timezone.utc)
-    # Stated 0.55 and hit half the time. Mean Brier is just over the coin
-    # flip, but the accuracy penalty is small enough that the calibration
-    # excess leaves the pillar blend positive. The gate is what returns 0.
-    hits = [_row(miner_uid=1, p_win=0.55, now=now) for _ in range(5)]
-    misses = [
-        _row(
-            miner_uid=1,
-            p_win=0.45,
-            now=now,
-            predicted_outcome_id="yes",
-            resolved_outcome_id="no",
-        )
-        for _ in range(5)
-    ]
-    rows = hits + misses
+    # Agent Brier is 0.36, worse than a coin flip, but better than a market
+    # that put 0.20 on the winner. Skill and edge would pay; the gate returns 0.
+    rows = [_row(miner_uid=1, p_win=0.4, market_p_win=0.2, now=now) for _ in range(10)]
     recs = [_parse_record(row, scored_at=row.scoredAt) for row in rows]
     assert all(rec is not None for rec in recs)
     weights = np.ones(len(recs))
@@ -406,6 +461,53 @@ def test_edge_is_centered_on_the_market_and_scaled() -> None:
     assert _edge_score([better], np.ones(1)) == pytest.approx(0.058 * EDGE_SIGNAL_GAIN)
 
     assert _edge_score([_record(p_win=0.7, now=now)], np.ones(1)) == pytest.approx(0.0)
+
+
+def test_allowance_pool_caps_a_single_miner_and_does_not_redistribute() -> None:
+    pre = np.array([0.05, 0.01, 0.0])
+    skill = np.array([0.0, -0.02, np.nan])
+    sig = np.ones(3)
+    weights, pools = _allocate_slice(pre, skill, sig)
+
+    assert pools == ["allow", "allow", "-"]
+    assert weights[0] == pytest.approx(ALLOWANCE_MINER_CAP)
+    assert weights[1] == pytest.approx(ALLOWANCE_POOL_SHARE * 0.01 / 0.06)
+    assert weights.sum() < ALLOWANCE_POOL_SHARE
+
+
+def test_skill_pool_saturates_and_scales_when_oversubscribed() -> None:
+    full = SKILL_MINER_CAP * SKILL_POOL_SHARE
+    pre = np.ones(5)
+    skill = np.full(5, SKILL_SATURATION)
+    sig = np.ones(5)
+    weights, pools = _allocate_slice(pre, skill, sig)
+
+    assert pools == ["skill"] * 5
+    assert weights.sum() == pytest.approx(SKILL_POOL_SHARE)
+    assert weights[0] == pytest.approx(SKILL_POOL_SHARE / 5)
+    assert weights[0] < full
+
+
+def test_skill_claim_shrinks_with_significance() -> None:
+    pre = np.array([0.2])
+    skill = np.array([SKILL_SATURATION])
+    half, _ = _allocate_slice(pre, skill, np.array([0.5]))
+    full, _ = _allocate_slice(pre, skill, np.array([1.0]))
+    assert half[0] == pytest.approx(full[0] * 0.5)
+    assert full[0] == pytest.approx(SKILL_MINER_CAP * SKILL_POOL_SHARE)
+
+
+def test_unspent_slice_goes_to_burn_uid() -> None:
+    from src.validator.forecasting.scoring import BURN_UID
+
+    metagraph = _StubMetagraph(uids=[1, BURN_UID])
+    now = datetime.now(timezone.utc)
+    rows = [_row(miner_uid=1, p_win=0.6, market_p_win=0.6, now=now) for _ in range(12)]
+    out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
+
+    assert out[0] == pytest.approx(ALLOWANCE_MINER_CAP)
+    assert out[1] == pytest.approx(1.0 - ALLOWANCE_MINER_CAP)
+    assert out.sum() == pytest.approx(1.0)
 
 
 def test_unmapped_uid_is_skipped_not_counted() -> None:
