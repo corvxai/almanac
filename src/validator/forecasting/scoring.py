@@ -155,7 +155,7 @@ INACTIVITY_ZERO_HOURS = 72.0          # score forced to 0 after this staleness a
 # ACCURACY_BASELINE_BRIER is the coin-flip gate, not this pillar's denominator.
 ACCURACY_BASELINE_BRIER = 0.25        # Brier of always predicting 0.5
 ACCURACY_HARDNESS_GAMMA = 1.0
-ACCURACY_SKILL_ALLOWANCE = 0.2       # skill added after the ratio; 0.1 worse than the market scores 0
+ACCURACY_SKILL_ALLOWANCE = 0.2       # skill added after the ratio; 0.2 worse than the market scores 0
 
 # Forecasting-slice budget. Shares are of the slice, not of the subnet.
 # The allowance pool is the only budget a miner can draw when they have not
