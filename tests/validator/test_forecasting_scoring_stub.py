@@ -499,12 +499,38 @@ def test_skill_pool_saturates_and_scales_when_oversubscribed() -> None:
     skill = np.full(5, SKILL_SATURATION)
     sig = np.ones(5)
     effective_n = np.full(5, SKILL_MIN_EFFECTIVE_N)
-    weights, pools, _, _ = _allocate_slice(pre, skill, sig, effective_n)
+    weights, pools, allowance_spent, skill_spent = _allocate_slice(
+        pre, skill, sig, effective_n
+    )
 
+    share = min(ALLOWANCE_POOL_SHARE / 5, ALLOWANCE_MINER_CAP)
     assert pools == ["skill"] * 5
-    assert weights.sum() == pytest.approx(SKILL_POOL_SHARE)
-    assert weights[0] == pytest.approx(SKILL_POOL_SHARE / 5)
+    assert weights[0] == pytest.approx(share + SKILL_POOL_SHARE / 5)
     assert weights[0] < full
+    assert skill_spent == pytest.approx(SKILL_POOL_SHARE)
+    assert allowance_spent == pytest.approx(share * 5)
+    assert allowance_spent + skill_spent == pytest.approx(weights.sum())
+
+
+def test_sub_allowance_skill_claims_do_not_shrink_real_skill() -> None:
+    n_skill = 3
+    n_noise = 30
+    n = n_skill + n_noise
+    pre = np.ones(n)
+    skill = np.array([SKILL_SATURATION] * n_skill + [0.002] * n_noise)
+    sig = np.ones(n)
+    effective_n = np.full(n, SKILL_MIN_EFFECTIVE_N)
+    weights, pools, allowance_spent, skill_spent = _allocate_slice(
+        pre, skill, sig, effective_n
+    )
+
+    share = min(ALLOWANCE_POOL_SHARE / n, ALLOWANCE_MINER_CAP)
+    assert pools[:n_skill] == ["skill"] * n_skill
+    assert pools[n_skill:] == ["allow"] * n_noise
+    assert weights[0] == pytest.approx(share + SKILL_POOL_SHARE / n_skill)
+    assert weights[n_skill] == pytest.approx(share)
+    assert skill_spent == pytest.approx(SKILL_POOL_SHARE)
+    assert allowance_spent == pytest.approx(weights.sum() - skill_spent)
 
 
 def test_skill_claim_shrinks_with_significance() -> None:

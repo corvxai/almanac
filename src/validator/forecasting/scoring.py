@@ -609,11 +609,13 @@ def _allocate_slice(
     proportional to that composite and capped at ``ALLOWANCE_MINER_CAP``.
     A miner with positive pre-allowance skill and at least
     ``SKILL_MIN_EFFECTIVE_N`` recency-weighted predictions also has a skill
-    claim, ``min(skill / SKILL_SATURATION, 1) * SKILL_MINER_CAP * SKILL_POOL_SHARE * significance``,
-    scaled down if those claims exceed the skill pool. They are paid the
-    larger of the two, not the sum. The allowance share is funded by the
-    allowance pool, and only the excess by the skill pool. Caps and unused
-    pool budget are not redistributed.
+    claim, ``min(skill / SKILL_SATURATION, 1) * SKILL_MINER_CAP * SKILL_POOL_SHARE * significance``.
+    They are paid the larger of the claim and the allowance share, not the
+    sum. The allowance share is funded by the allowance pool. Only the excess
+    is funded by the skill pool, and only those excesses are scaled when they
+    exceed it. A claim that does not clear the allowance share is paid from
+    the allowance pool and does not enter that scale. Caps and unused pool
+    budget are not redistributed.
 
     Returns weights, pool labels, allowance spent, and skill spent.
     """
@@ -636,10 +638,6 @@ def _allocate_slice(
         else:
             pools[i] = "allow"
 
-    skill_total = float(skill_claims.sum())
-    if skill_total > SKILL_POOL_SHARE:
-        skill_claims *= SKILL_POOL_SHARE / skill_total
-
     allowance_of = np.zeros(n, dtype=float)
     if eligible:
         raw = np.array([pre_pareto[i] for i in eligible], dtype=float)
@@ -649,15 +647,26 @@ def _allocate_slice(
             for i, share in zip(eligible, shares):
                 allowance_of[i] = min(float(share), ALLOWANCE_MINER_CAP)
 
+    # Scale the skill-funded excess only. A claim that falls under the
+    # allowance share is paid entirely from the allowance pool, so counting
+    # it here would shrink real skill miners and then burn the difference.
+    excess = np.zeros(n, dtype=float)
+    for i in eligible:
+        if pools[i] == "skill":
+            excess[i] = max(float(skill_claims[i]) - float(allowance_of[i]), 0.0)
+    excess_total = float(excess.sum())
+    if excess_total > SKILL_POOL_SHARE:
+        excess *= SKILL_POOL_SHARE / excess_total
+
     allowance_spent = 0.0
     skill_spent = 0.0
     for i in eligible:
         share = float(allowance_of[i])
-        claim = float(skill_claims[i])
-        if pools[i] == "skill" and claim >= share:
-            weights[i] = claim
+        extra = float(excess[i])
+        if extra > 0.0:
+            weights[i] = share + extra
             allowance_spent += share
-            skill_spent += claim - share
+            skill_spent += extra
         else:
             weights[i] = share
             pools[i] = "allow"
