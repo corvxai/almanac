@@ -11,9 +11,9 @@ from src.validator.forecasting.scoring import (
     ACCURACY_SKILL_ALLOWANCE,
     ALLOWANCE_MINER_CAP,
     ALLOWANCE_POOL_SHARE,
-    CALIBRATION_BASELINE_ECE,
     EDGE_SIGNAL_GAIN,
     SKILL_MINER_CAP,
+    SKILL_MIN_EFFECTIVE_N,
     SKILL_POOL_SHARE,
     SKILL_SATURATION,
     PARETO_BOOST,
@@ -23,13 +23,11 @@ from src.validator.forecasting.scoring import (
     RHO_THRESHOLD_PREDICTIONS,
     _Record,
     WEIGHT_ACCURACY,
-    WEIGHT_CALIBRATION,
     WEIGHT_EDGE,
     _accuracy_score,
     _allocate_slice,
     _apply_pareto,
     _apply_pareto_by_rank,
-    _calibration_score,
     _edge_score,
     _mean_brier,
     _parse_record,
@@ -123,7 +121,11 @@ def test_perfect_prediction_is_paid_from_the_skill_pool() -> None:
     metagraph = _StubMetagraph(uids=[0, 1, 2])
 
     now = datetime.now(timezone.utc)
-    rows = [_row(miner_uid=1, p_win=1.0, market_p_win=0.5, now=now) for _ in range(12)]
+    # Recent rows decay slightly, so the count has to clear the effective-n floor.
+    rows = [
+        _row(miner_uid=1, p_win=1.0, market_p_win=0.5, now=now)
+        for _ in range(int(SKILL_MIN_EFFECTIVE_N) + 10)
+    ]
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
 
     assert out[0] == 0.0
@@ -380,18 +382,21 @@ def test_accuracy_curve_rewards_the_true_probability() -> None:
     ) == pytest.approx(-1.0 + ACCURACY_SKILL_ALLOWANCE)
 
     # Two events, market 0.90, agent extremized to 0.99. The ratio of means
-    # is negative. The mean of the per-event ratios is positive (~0.39) and
-    # must not be what this pillar returns.
+    # is negative, so accuracy stays below the allowance. The mean of the
+    # per-event ratios is positive (~0.39) and must not be what this returns.
     win = _record(p_win=0.99, now=now, market_p_win=0.90)
     lose = _record(p_win=0.01, now=now, market_p_win=0.10)
-    assert _accuracy_score([win, lose], np.ones(2)) < 0.0
+    assert _accuracy_score([win, lose], np.ones(2)) < ACCURACY_SKILL_ALLOWANCE
 
 
 def test_market_copy_scores_the_allowance_and_a_better_forecast_leads() -> None:
     metagraph = _StubMetagraph(uids=[1, 2])
     now = datetime.now(timezone.utc)
     copies = [_row(miner_uid=1, p_win=0.6, market_p_win=0.6, now=now) for _ in range(12)]
-    better = [_row(miner_uid=2, p_win=0.8, market_p_win=0.6, now=now) for _ in range(12)]
+    qualified = int(SKILL_MIN_EFFECTIVE_N) + 10
+    better = [
+        _row(miner_uid=2, p_win=0.8, market_p_win=0.6, now=now) for _ in range(qualified)
+    ]
     out = score_agent_predictions(
         metagraph=metagraph,
         scored_predictions=copies + better,
@@ -420,33 +425,12 @@ def test_baseline_gate_zeros_positive_composite() -> None:
     assert _mean_brier(recs, weights) >= 0.25
     blend = (
         WEIGHT_ACCURACY * _accuracy_score(recs, weights)
-        + WEIGHT_CALIBRATION * _calibration_score(recs, weights)
         + WEIGHT_EDGE * _edge_score(recs, weights)
     )
     assert blend > 0.0
 
     out = score_agent_predictions(metagraph=metagraph, scored_predictions=rows, now=now)
     assert out[0] == pytest.approx(0.0)
-
-
-def test_calibration_is_excess_over_baseline() -> None:
-    now = datetime.now(timezone.utc)
-    # Stated 0.90 and always won: ECE = 0.10, which is the baseline, so the pillar is 0.
-    at_baseline = [_record(p_win=0.9, now=now, p_pred=0.9, hit=1) for _ in range(20)]
-    assert _calibration_score(at_baseline, np.ones(20)) == pytest.approx(0.0)
-
-    # Stated 0.60 and hit 60% of the time: ECE = 0, excess = the baseline itself.
-    calibrated = []
-    for i in range(10):
-        calibrated.append(_record(p_win=0.6, now=now, p_pred=0.6, hit=1 if i < 6 else 0))
-    assert _calibration_score(calibrated, np.ones(10)) == pytest.approx(CALIBRATION_BASELINE_ECE)
-
-    # Recent misses count more than old hits, so this miner is worse than the unweighted ECE.
-    confident = _record(p_win=0.9, now=now, p_pred=0.9, hit=1)
-    recent_miss = _record(p_win=0.1, now=now, p_pred=0.9, hit=0)
-    unweighted = _calibration_score([confident, recent_miss], np.ones(2))
-    recency = _calibration_score([confident, recent_miss], np.array([0.1, 1.0]))
-    assert recency < unweighted
 
 
 def test_edge_is_centered_on_the_market_and_scaled() -> None:
@@ -464,15 +448,49 @@ def test_edge_is_centered_on_the_market_and_scaled() -> None:
 
 
 def test_allowance_pool_caps_a_single_miner_and_does_not_redistribute() -> None:
-    pre = np.array([0.05, 0.01, 0.0])
+    pre = np.array([0.90, 0.10, 0.0])
     skill = np.array([0.0, -0.02, np.nan])
     sig = np.ones(3)
-    weights, pools = _allocate_slice(pre, skill, sig)
+    effective_n = np.zeros(3)
+    weights, pools, _, _ = _allocate_slice(pre, skill, sig, effective_n)
 
     assert pools == ["allow", "allow", "-"]
     assert weights[0] == pytest.approx(ALLOWANCE_MINER_CAP)
-    assert weights[1] == pytest.approx(ALLOWANCE_POOL_SHARE * 0.01 / 0.06)
+    uncapped = ALLOWANCE_POOL_SHARE * 0.10
+    assert weights[1] == pytest.approx(uncapped)
+    assert uncapped < ALLOWANCE_MINER_CAP
     assert weights.sum() < ALLOWANCE_POOL_SHARE
+
+
+def test_short_positive_skill_draws_allowance_until_the_sample_floor() -> None:
+    pre = np.array([0.20, 0.20])
+    skill = np.full(2, SKILL_SATURATION / 2)
+    sig = np.ones(2)
+    effective_n = np.array([SKILL_MIN_EFFECTIVE_N - 1.0, SKILL_MIN_EFFECTIVE_N])
+    weights, pools, allowance_spent, skill_spent = _allocate_slice(
+        pre, skill, sig, effective_n
+    )
+
+    assert pools == ["allow", "skill"]
+    assert weights[0] == pytest.approx(ALLOWANCE_MINER_CAP)
+    assert weights[1] == pytest.approx(0.5 * SKILL_MINER_CAP * SKILL_POOL_SHARE)
+    assert allowance_spent + skill_spent == pytest.approx(weights.sum())
+
+
+def test_tiny_skill_is_not_paid_less_than_the_same_composite() -> None:
+    pre = np.array([0.10, 0.10])
+    skill = np.array([0.001, -0.002])
+    sig = np.ones(2)
+    effective_n = np.full(2, SKILL_MIN_EFFECTIVE_N)
+    weights, pools, allowance_spent, skill_spent = _allocate_slice(
+        pre, skill, sig, effective_n
+    )
+
+    assert pools == ["allow", "allow"]
+    assert weights[0] == pytest.approx(weights[1])
+    assert weights[0] == pytest.approx(ALLOWANCE_MINER_CAP)
+    assert skill_spent == pytest.approx(0.0)
+    assert allowance_spent == pytest.approx(weights.sum())
 
 
 def test_skill_pool_saturates_and_scales_when_oversubscribed() -> None:
@@ -480,7 +498,8 @@ def test_skill_pool_saturates_and_scales_when_oversubscribed() -> None:
     pre = np.ones(5)
     skill = np.full(5, SKILL_SATURATION)
     sig = np.ones(5)
-    weights, pools = _allocate_slice(pre, skill, sig)
+    effective_n = np.full(5, SKILL_MIN_EFFECTIVE_N)
+    weights, pools, _, _ = _allocate_slice(pre, skill, sig, effective_n)
 
     assert pools == ["skill"] * 5
     assert weights.sum() == pytest.approx(SKILL_POOL_SHARE)
@@ -491,10 +510,15 @@ def test_skill_pool_saturates_and_scales_when_oversubscribed() -> None:
 def test_skill_claim_shrinks_with_significance() -> None:
     pre = np.array([0.2])
     skill = np.array([SKILL_SATURATION])
-    half, _ = _allocate_slice(pre, skill, np.array([0.5]))
-    full, _ = _allocate_slice(pre, skill, np.array([1.0]))
+    qualified = np.array([SKILL_MIN_EFFECTIVE_N])
+    half, _, _, _ = _allocate_slice(pre, skill, np.array([0.5]), qualified)
+    full, _, full_allowance, full_skill = _allocate_slice(
+        pre, skill, np.array([1.0]), qualified
+    )
     assert half[0] == pytest.approx(full[0] * 0.5)
     assert full[0] == pytest.approx(SKILL_MINER_CAP * SKILL_POOL_SHARE)
+    assert full_allowance == pytest.approx(ALLOWANCE_MINER_CAP)
+    assert full_skill == pytest.approx(full[0] - ALLOWANCE_MINER_CAP)
 
 
 def test_unspent_slice_goes_to_burn_uid() -> None:

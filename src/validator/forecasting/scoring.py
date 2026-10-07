@@ -1,18 +1,14 @@
 """Almanac Forecasting scoring from orchestrator scored predictions.
 
-Composite score per miner is a weighted blend of three pillars, computed over
+Composite score per miner is a weighted blend of two pillars, computed over
 that miner's most recent predictions (``MAX_EVENTS_PER_MINER``) within the
 orchestrator fetch window:
 
-    1. Accuracy     (weight 0.50) - Brier skill against the market price
+    1. Accuracy     (weight 0.70) - Brier skill against the market price
                      stored at prediction time, on the same events, plus a
                      small allowance. An exact match scores the allowance.
                      The anchor.
-    2. Calibration  (weight 0) - recency-weighted ECE as excess over a fixed
-                     baseline. Still computed and logged. Weight 0 because a
-                     fixed baseline pays a market copy. It does not enter the
-                     blend.
-    3. Edge         (weight 0.20) - centered market-relative Brier-difference
+    2. Edge         (weight 0.30) - centered market-relative Brier-difference
                      + PnL, scaled so a few points of edge move the composite.
                      0 matches the market at prediction time.
 
@@ -50,10 +46,11 @@ Post-gate scoring details:
       ``minerLastPredictedAt`` (last submission, including unresolved).
       Linear fade beyond ``INACTIVITY_GRACE_HOURS``, hard zero beyond
       ``INACTIVITY_ZERO_HOURS``. Null leaves the multiplier at 1.
-    * The forecasting slice is spent through two pools. Miners who beat the
-      market draw from the skill pool, in proportion to skill and rho, up to
-      a per-miner cap. Miners who are positive only because of the skill
-      allowance share a smaller allowance pool, also capped per miner.
+    * The forecasting slice is spent through two pools. Every positive
+      composite draws an allowance share. A miner who beats the market and
+      reaches ``SKILL_MIN_EFFECTIVE_N`` is paid at least that share; only the
+      amount above it comes from the skill pool. A shorter positive skill
+      draws the allowance share alone.
       Unspent slice weight is added to ``BURN_UID`` when that UID is in the
       metagraph. :func:`_apply_pareto` is not used for the payout.
     * Edge pillar blends centered Brier-difference vs market (60%) with
@@ -99,10 +96,8 @@ DEFAULT_ROLLING_WINDOW_DAYS = 30
 # --------------------------------------------------------------------------- #
 
 # Composite pillar weights. Renormalised over their sum at compute time, so
-# only relative sizes matter. Calibration stays in the blend at weight 0: a
-# fixed ECE baseline pays a market copy. The live blend is accuracy and edge.
+# only relative sizes matter.
 WEIGHT_ACCURACY = 0.70
-WEIGHT_CALIBRATION = 0.0
 WEIGHT_EDGE = 0.30
 
 # Edge pillar internals: blend of Brier-difference vs market and winner-side
@@ -159,19 +154,17 @@ ACCURACY_SKILL_ALLOWANCE = 0.2       # skill added after the ratio; 0.2 worse th
 
 # Forecasting-slice budget. Shares are of the slice, not of the subnet.
 # The allowance pool is the only budget a miner can draw when they have not
-# beaten the market. The skill pool opens per miner as their pre-allowance
-# skill grows, and saturates at SKILL_SATURATION. Caps do not redistribute.
+# beaten the market, or have beaten it on fewer than SKILL_MIN_EFFECTIVE_N
+# recency-weighted predictions. Past that floor the skill pool pays only the
+# amount above the miner's allowance share, and saturates at SKILL_SATURATION.
+# Caps do not redistribute.
 # Anything neither pool spends is burn.
 ALLOWANCE_POOL_SHARE = 0.25
 ALLOWANCE_MINER_CAP = 0.03            # of the slice
 SKILL_POOL_SHARE = 0.75
-SKILL_SATURATION = 0.20               # pre-allowance skill that fills the per-miner cap
+SKILL_SATURATION = 0.10               # 10% lower mean Brier than the market fills the cap
 SKILL_MINER_CAP = 0.40                # of the skill pool, before rho
-
-# Calibration pillar is excess over this ECE (recency-weighted). Kept for the
-# log and for tests. WEIGHT_CALIBRATION is 0, so it does not enter the blend:
-# a fixed baseline below the market's own ECE pays a copy.
-CALIBRATION_BASELINE_ECE = 0.10
+SKILL_MIN_EFFECTIVE_N = 50.0          # below this, positive skill draws allowance
 
 # Edge is centered at 0 (matching the market). The raw Brier-difference / PnL
 # blend is only a few hundredths in practice; mapping it through (x+1)/2 used
@@ -200,12 +193,10 @@ PARETO_SHARPNESS = 10.0   # Higher values make the knee transition steeper.
 PARETO_TAIL = 1.35        # >1 steepens the very top tail; 1 is linear in knee-space.
 
 # Pillar internals.
-NUM_CALIBRATION_BINS = 5          # reliability bins for the calibration pillar
 NEUTRAL_PILLAR_SCORE = 0.0        # edge fallback when no market prices exist
 
 _WEIGHTS = {
     "accuracy": WEIGHT_ACCURACY,
-    "calibration": WEIGHT_CALIBRATION,
     "edge": WEIGHT_EDGE,
 }
 
@@ -310,7 +301,6 @@ def score_agent_predictions(
     # Diagnostics + outputs, aligned to metagraph idx.
     scores = np.zeros(n, dtype=float)
     accuracy = np.zeros(n, dtype=float)
-    calibration = np.zeros(n, dtype=float)
     edge = np.zeros(n, dtype=float)
     rho_by_idx = np.zeros(n, dtype=float)
     effective_n_by_idx = np.zeros(n, dtype=float)
@@ -359,12 +349,10 @@ def score_agent_predictions(
         rec_weights = _recency_weights(recs, now=now)
         skill = _market_skill(recs, rec_weights)
         acc = _accuracy_from_skill(skill)
-        cal = _calibration_score(recs, rec_weights)
         edg = _edge_score(recs, rec_weights)
         mean_brier = _mean_brier(recs, rec_weights)
         mean_brier_by_idx[idx] = mean_brier
         accuracy[idx] = acc
-        calibration[idx] = cal
         edge[idx] = edg
         if skill is not None:
             skill_by_idx[idx] = skill
@@ -395,23 +383,22 @@ def score_agent_predictions(
             gated_inactive += 1
             continue
 
-        composite = (
-            WEIGHT_ACCURACY * acc
-            + WEIGHT_CALIBRATION * cal
-            + WEIGHT_EDGE * edg
-        ) / weight_sum
+        composite = (WEIGHT_ACCURACY * acc + WEIGHT_EDGE * edg) / weight_sum
         composite_by_idx[idx] = float(composite)
         significance_by_idx[idx] = rho * inactivity_mult
         scores[idx] = float(np.clip(composite * significance_by_idx[idx], 0.0, 1.0))
         scored_miners += 1
 
     pre_pareto = scores.copy()
-    scores, pool_by_idx = _allocate_slice(pre_pareto, skill_by_idx, significance_by_idx)
+    scores, pool_by_idx, allowance_spent, skill_spent = _allocate_slice(
+        pre_pareto,
+        skill_by_idx,
+        significance_by_idx,
+        effective_n_by_idx,
+    )
     spent = float(scores.sum())
     burn = max(0.0, 1.0 - spent)
     burn_idx = uid_to_idx.get(BURN_UID)
-    allowance_spent = float(sum(scores[i] for i, pool in enumerate(pool_by_idx) if pool == "allow"))
-    skill_spent = float(sum(scores[i] for i, pool in enumerate(pool_by_idx) if pool == "skill"))
     if burn_idx is not None:
         if scores[burn_idx] > 0.0:
             logger.warning(
@@ -463,7 +450,6 @@ def score_agent_predictions(
         scores=scores,
         pre_pareto=pre_pareto,
         accuracy=accuracy,
-        calibration=calibration,
         edge=edge,
         rho_by_idx=rho_by_idx,
         effective_n_by_idx=effective_n_by_idx,
@@ -503,7 +489,7 @@ def _parse_record(item, scored_at: datetime) -> Optional[_Record]:
         p_pred = _coerce_prob(outcome_probs.get(predicted_outcome_id))
         hit = 1 if predicted_outcome_id == resolved_outcome_id else 0
     else:
-        # Fall back to the winning side; hit is then trivially the p_win calibration.
+        # No chosen side: treat the winner as the pick so hit is 1.
         p_pred = p_win
         hit = 1
     if p_pred is None:
@@ -615,100 +601,72 @@ def _allocate_slice(
     pre_pareto: np.ndarray,
     skill: np.ndarray,
     significance: np.ndarray,
-) -> tuple[np.ndarray, list[str]]:
+    effective_n: np.ndarray,
+) -> tuple[np.ndarray, list[str], float, float]:
     """Map pre-pool composites into forecasting-slice shares.
 
-    A miner with positive pre-allowance skill draws
-    ``min(skill / SKILL_SATURATION, 1) * SKILL_MINER_CAP * SKILL_POOL_SHARE * significance``.
-    Those claims are scaled down if they exceed the skill pool. A miner who is
-    positive only via the allowance shares ``ALLOWANCE_POOL_SHARE`` in
-    proportion to their pre-pool composite, capped at ``ALLOWANCE_MINER_CAP``.
-    Caps and unused pool budget are not redistributed.
+    Every positive composite takes a share of ``ALLOWANCE_POOL_SHARE``,
+    proportional to that composite and capped at ``ALLOWANCE_MINER_CAP``.
+    A miner with positive pre-allowance skill and at least
+    ``SKILL_MIN_EFFECTIVE_N`` recency-weighted predictions also has a skill
+    claim, ``min(skill / SKILL_SATURATION, 1) * SKILL_MINER_CAP * SKILL_POOL_SHARE * significance``,
+    scaled down if those claims exceed the skill pool. They are paid the
+    larger of the two, not the sum. The allowance share is funded by the
+    allowance pool, and only the excess by the skill pool. Caps and unused
+    pool budget are not redistributed.
+
+    Returns weights, pool labels, allowance spent, and skill spent.
     """
     n = len(pre_pareto)
     weights = np.zeros(n, dtype=float)
     pools = ["-"] * n
     skill_claims = np.zeros(n, dtype=float)
-    allowance_idx: list[int] = []
+    eligible: list[int] = []
 
     for i in range(n):
         if pre_pareto[i] <= 0.0 or np.isnan(skill[i]):
             continue
-        if skill[i] > 0.0:
+        eligible.append(i)
+        if skill[i] > 0.0 and float(effective_n[i]) >= SKILL_MIN_EFFECTIVE_N:
             saturated = min(float(skill[i]) / SKILL_SATURATION, 1.0)
             skill_claims[i] = (
                 saturated * (SKILL_MINER_CAP * SKILL_POOL_SHARE) * float(significance[i])
             )
             pools[i] = "skill"
         else:
-            allowance_idx.append(i)
             pools[i] = "allow"
 
     skill_total = float(skill_claims.sum())
     if skill_total > SKILL_POOL_SHARE:
         skill_claims *= SKILL_POOL_SHARE / skill_total
-    weights += skill_claims
 
-    if allowance_idx:
-        raw = np.array([pre_pareto[i] for i in allowance_idx], dtype=float)
+    allowance_of = np.zeros(n, dtype=float)
+    if eligible:
+        raw = np.array([pre_pareto[i] for i in eligible], dtype=float)
         raw_sum = float(raw.sum())
         if raw_sum > 0.0:
             shares = ALLOWANCE_POOL_SHARE * raw / raw_sum
-            for i, share in zip(allowance_idx, shares):
-                weights[i] = min(float(share), ALLOWANCE_MINER_CAP)
-    return weights, pools
+            for i, share in zip(eligible, shares):
+                allowance_of[i] = min(float(share), ALLOWANCE_MINER_CAP)
+
+    allowance_spent = 0.0
+    skill_spent = 0.0
+    for i in eligible:
+        share = float(allowance_of[i])
+        claim = float(skill_claims[i])
+        if pools[i] == "skill" and claim >= share:
+            weights[i] = claim
+            allowance_spent += share
+            skill_spent += claim - share
+        else:
+            weights[i] = share
+            pools[i] = "allow"
+            allowance_spent += share
+    return weights, pools, allowance_spent, skill_spent
 
 
 # --------------------------------------------------------------------------- #
-# Pillar 2: Calibration (reliability of stated confidence)                    #
-# --------------------------------------------------------------------------- #
-
-def _calibration_score(recs: list[_Record], weights: np.ndarray) -> float:
-    """Recency-weighted ECE as excess over ``CALIBRATION_BASELINE_ECE``.
-
-    For each prediction we take the probability the agent placed on the side
-    it actually chose (``p_pred``) and whether that side won (``hit``).
-    Predictions are binned by ``p_pred`` (half-open bins, 1.0 in the top bin);
-    within each bin we compare the recency-weighted mean confidence to the
-    recency-weighted hit rate. ECE is the weight-weighted mean absolute gap;
-    empty bins contribute nothing.
-
-    The pillar is ``baseline - ECE``. A miner at the baseline scores 0.
-    Positive means better calibrated than the baseline; negative means worse.
-
-    ``WEIGHT_CALIBRATION`` is 0, so this value is logged and does not enter
-    the composite.
-    """
-    bin_edges = np.linspace(0.0, 1.0, NUM_CALIBRATION_BINS + 1)
-    preds = np.array([r.p_pred for r in recs], dtype=float)
-    hits = np.array([r.hit for r in recs], dtype=float)
-    weights = np.asarray(weights, dtype=float)
-
-    bin_ids = np.clip(
-        np.digitize(preds, bin_edges[1:-1], right=False),
-        0,
-        NUM_CALIBRATION_BINS - 1,
-    )
-
-    total_w = float(weights.sum())
-    if total_w <= 0.0:
-        return 0.0
-
-    ece = 0.0
-    for b in range(NUM_CALIBRATION_BINS):
-        mask = bin_ids == b
-        bin_w = float(weights[mask].sum())
-        if bin_w <= 0.0:
-            continue
-        mean_p = float(np.average(preds[mask], weights=weights[mask]))
-        mean_h = float(np.average(hits[mask], weights=weights[mask]))
-        ece += (bin_w / total_w) * abs(mean_p - mean_h)
-
-    return float(CALIBRATION_BASELINE_ECE - ece)
-
-
-# --------------------------------------------------------------------------- #
-# Pillar 3: Market-relative edge (Brier-difference + PnL, recency-weighted)   #
+# Pillar 2: Market-relative edge (Brier-difference + PnL, recency-weighted)   #
 # --------------------------------------------------------------------------- #
 
 def _edge_score(recs: list[_Record], weights: np.ndarray) -> float:
@@ -773,10 +731,16 @@ def _validate_weights() -> None:
             f"ALLOWANCE_MINER_CAP must be in (0, ALLOWANCE_POOL_SHARE]; "
             f"got {ALLOWANCE_MINER_CAP}."
         )
-    if not 0.0 < SKILL_MINER_CAP <= 1.0 or SKILL_SATURATION <= 0.0:
+    if (
+        not 0.0 < SKILL_MINER_CAP <= 1.0
+        or SKILL_SATURATION <= 0.0
+        or SKILL_MIN_EFFECTIVE_N < 0.0
+    ):
         raise ValueError(
-            f"SKILL_MINER_CAP must be in (0, 1] and SKILL_SATURATION must be positive; "
-            f"got cap {SKILL_MINER_CAP}, saturation {SKILL_SATURATION}."
+            f"SKILL_MINER_CAP must be in (0, 1], SKILL_SATURATION must be positive, "
+            f"and SKILL_MIN_EFFECTIVE_N must be non-negative; "
+            f"got cap {SKILL_MINER_CAP}, saturation {SKILL_SATURATION}, "
+            f"min effective n {SKILL_MIN_EFFECTIVE_N}."
         )
 
 
@@ -955,7 +919,6 @@ def _log_score_table(
     scores: np.ndarray,
     pre_pareto: np.ndarray,
     accuracy: np.ndarray,
-    calibration: np.ndarray,
     edge: np.ndarray,
     rho_by_idx: np.ndarray,
     effective_n_by_idx: np.ndarray,
@@ -994,10 +957,7 @@ def _log_score_table(
             invalid_preds = f"{invalid_preds}*"
             any_invalid_gate = True
 
-        raw_brier: object = "-"
         recs = records_by_idx[idx]
-        if recs:
-            raw_brier = round(float(np.mean([(1.0 - r.p_win) ** 2 for r in recs])), 3)
 
         w_brier: object = "-"
         w_brier_val = mean_brier_by_idx[idx]
@@ -1046,9 +1006,7 @@ def _log_score_table(
                 pool_by_idx[idx],
                 float(pre_pareto[idx]),
                 float(accuracy[idx]),
-                float(calibration[idx]),
                 float(edge[idx]),
-                raw_brier,
                 w_brier,
                 m_brier,
                 roi,
@@ -1062,7 +1020,6 @@ def _log_score_table(
 
     weight_sum = sum(_WEIGHTS.values())
     w_acc = WEIGHT_ACCURACY / weight_sum * 100.0
-    w_cal = WEIGHT_CALIBRATION / weight_sum * 100.0
     w_edge = WEIGHT_EDGE / weight_sum * 100.0
     headers = [
         "rank",
@@ -1071,9 +1028,7 @@ def _log_score_table(
         "pool",
         "raw",
         f"acc. ({w_acc:.0f}%)",
-        f"calib. ({w_cal:.0f}%)",
         f"edge ({w_edge:.0f}%)",
-        "brier",
         "w_brier",
         "m_brier",
         "roi",
@@ -1084,8 +1039,8 @@ def _log_score_table(
         "invalid",
     ]
     floatfmt = (
-        ".0f", ".0f", ".3f", "", ".3f", ".3f", ".3f", ".3f",
-        ".3f", "", ".3f", ".3f", ".0f", ".3f", ".0f", "", "",
+        ".0f", ".0f", ".3f", "", ".3f", ".3f", ".3f",
+        "", ".3f", ".3f", ".0f", ".3f", ".0f", "", "",
     )
     table = tabulate(
         rows,

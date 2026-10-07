@@ -50,9 +50,11 @@ def _row(
 def test_score_agent_predictions_basic() -> None:
     now = datetime.now(timezone.utc)
     metagraph = _StubMetagraph([0, 1, 2])
-    # Both stay under skill saturation (0.20), so the stronger forecast claims more.
-    rows = [_row(uid=1, p_win=0.52, market_p_win=0.50, now=now) for _ in range(12)] + [
-        _row(uid=2, p_win=0.55, market_p_win=0.50, now=now) for _ in range(12)
+    # 0.51 stays under saturation against a 0.50 market. 0.52 reaches it.
+    # Both clear the sample floor, so the stronger forecast claims more.
+    n = int(scoring.SKILL_MIN_EFFECTIVE_N) + 10
+    rows = [_row(uid=1, p_win=0.51, market_p_win=0.50, now=now) for _ in range(n)] + [
+        _row(uid=2, p_win=0.52, market_p_win=0.50, now=now) for _ in range(n)
     ]
     out = scoring.score_agent_predictions(
         metagraph=metagraph,

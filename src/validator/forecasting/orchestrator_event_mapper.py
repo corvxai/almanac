@@ -51,6 +51,10 @@ def assignment_to_event(
             for o in assignment.event.outcomes
             if isinstance(o, dict)
         ],
+        current_outcome_prices={
+            str(key): float(price)
+            for key, price in assignment.event.currentOutcomePrices.items()
+        },
     )
 
 
