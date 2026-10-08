@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from src.validator.forecasting import scoring
 
@@ -30,6 +29,7 @@ def _row(
     now: datetime,
     invalid: bool = False,
     resolved: bool = True,
+    market_p_win: float | None = None,
 ):
     return SimpleNamespace(
         minerUid=uid,
@@ -41,14 +41,20 @@ def _row(
         outcomeProbabilities={"yes": p_win, "no": 1.0 - p_win},
         predictedOutcomeId="yes",
         resolvedOutcomeId="yes",
+        outcomePricesAtPrediction=(
+            None if market_p_win is None else {"yes": market_p_win, "no": 1.0 - market_p_win}
+        ),
     )
 
 
 def test_score_agent_predictions_basic() -> None:
     now = datetime.now(timezone.utc)
     metagraph = _StubMetagraph([0, 1, 2])
-    rows = [_row(uid=1, p_win=0.60, now=now) for _ in range(12)] + [
-        _row(uid=2, p_win=0.90, now=now) for _ in range(12)
+    # 0.51 stays under saturation against a 0.50 market. 0.52 reaches it.
+    # Both clear the sample floor, so the stronger forecast claims more.
+    n = int(scoring.SKILL_MIN_EFFECTIVE_N) + 10
+    rows = [_row(uid=1, p_win=0.51, market_p_win=0.50, now=now) for _ in range(n)] + [
+        _row(uid=2, p_win=0.52, market_p_win=0.50, now=now) for _ in range(n)
     ]
     out = scoring.score_agent_predictions(
         metagraph=metagraph,
@@ -56,10 +62,8 @@ def test_score_agent_predictions_basic() -> None:
         rolling_window_days=30,
         now=now,
     )
-    # UID 2 has consistently stronger probability on the resolved side than UID 1.
     assert out[0] == 0.0
     assert 0.0 < out[1] < out[2]
-    assert out[2] == pytest.approx(scoring.PARETO_MU + scoring.PARETO_BOOST)
 
 
 def test_score_agent_predictions_filters_invalid_rows() -> None:

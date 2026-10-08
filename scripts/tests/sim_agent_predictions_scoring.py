@@ -63,8 +63,8 @@ DEFAULT_AGENT_PREDICTIONS_FILE = (
 )
 DEFAULT_GRAPH_OUTPUT_DIR = PROJECT_ROOT / "scripts" / "tests"
 GRAPH_SCORE_THRESHOLD = 0.0
-SCORE_TIER_COLORS = ("#FF5733", "#FFC300", "#33FFF5", "#33FF57")
-SCORE_TIER_LABELS = ("Bottom quartile", "Lower-mid quartile", "Upper-mid quartile", "Top quartile")
+POOL_COLORS = {"allow": "#4DA3FF", "skill": "#3DDC57"}
+POOL_LABELS = {"allow": "Allow pool", "skill": "Skill pool"}
 
 # Mock data generation constants.
 MOCK_RANDOM_SEED = 29
@@ -104,7 +104,7 @@ def _miner_profile(uid: int) -> dict[str, float | str]:
     """Stable per-miner traits for diverse scoring-pillar exercise.
 
     Archetypes (approximate population shares):
-      - market_hugger (12%): copies market; passes gates but middling raw.
+      - market_hugger (12%): copies market; accuracy skill and edge are ~0.
       - skilled_contrarian (14%): opposes mispriced markets and leans to truth.
       - skilled_independent (8%): truth-seeking without always fighting market.
       - bad_contrarian (22%): opposes market with negative skill; baseline-gated.
@@ -430,77 +430,72 @@ def _normalise_weights(vec: np.ndarray) -> np.ndarray:
     return clipped / total
 
 
-def _score_tier(index: int, count: int) -> int:
-    if count <= 1:
-        return len(SCORE_TIER_COLORS) - 1
-    quartile = int((index / (count - 1)) * len(SCORE_TIER_COLORS))
-    return min(quartile, len(SCORE_TIER_COLORS) - 1)
-
-
 def graph_results(
-    uids: list[int],
+    _uids: list[int],
     pre_pareto_scores: np.ndarray,
     post_pareto_scores: np.ndarray,
+    pools: list[str],
     *,
     output_dir: Path = DEFAULT_GRAPH_OUTPUT_DIR,
     score_threshold: float = GRAPH_SCORE_THRESHOLD,
 ) -> Path:
-    """Graph pre-Pareto composite and normalized metagraph weights.
+    """Graph the composite score and the post-Pareto slice weight.
 
-    Miners are sorted by post-Pareto score (ascending, matching the sportstensor
-    sim). Zero/low scores below ``score_threshold`` are omitted from the plot.
+    Each panel is sorted low to high on its own y values. The top panel is
+    the composite before rho, on a 0–1 score scale. Points are colored by
+    pool: blue for allowance, green for skill. Miners outside both pools,
+    including burn, are omitted.
     """
-    uid_array = np.asarray(uids, dtype=int)
     pre_scores = np.asarray(pre_pareto_scores, dtype=float)
     post_scores = np.asarray(post_pareto_scores, dtype=float)
+    pool_array = np.asarray(pools, dtype=object)
     weights = _normalise_weights(post_scores)
 
-    sorted_indices = np.argsort(post_scores)
-    sorted_uids = uid_array[sorted_indices]
-    sorted_pre = pre_scores[sorted_indices]
-    sorted_post = post_scores[sorted_indices]
-    sorted_weights = weights[sorted_indices]
-
-    keep = sorted_post > score_threshold
-    sorted_uids = sorted_uids[keep]
-    sorted_pre = sorted_pre[keep]
-    sorted_post = sorted_post[keep]
-    sorted_weights = sorted_weights[keep]
+    keep = np.array(
+        [
+            pool in POOL_COLORS and post > score_threshold
+            for pool, post in zip(pool_array, post_scores)
+        ],
+        dtype=bool,
+    )
+    pre_scores = pre_scores[keep]
+    weights = weights[keep]
+    kept_pools = pool_array[keep]
+    pool_counts = {pool: int((kept_pools == pool).sum()) for pool in POOL_COLORS}
 
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.style.use("dark_background")
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-    tier_counts = [0] * len(SCORE_TIER_COLORS)
-    for idx in range(len(sorted_uids)):
-        tier_counts[_score_tier(idx, len(sorted_uids))] += 1
-
-    for ax, y_values, title, ylabel in (
-        (axes[0], sorted_pre, "Pre-Pareto Composite Scores", "Composite score"),
-        (axes[1], sorted_weights, "Normalized Metagraph Weights", "Weight"),
-    ):
-        for tier, color in enumerate(SCORE_TIER_COLORS):
-            tier_indices = [
-                i for i in range(len(sorted_uids)) if _score_tier(i, len(sorted_uids)) == tier
-            ]
-            if not tier_indices:
+    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+    panels = (
+        (axes[0], pre_scores, "Composite score", "Score", "Miners (sorted by composite score)"),
+        (axes[1], weights, "Post-Pareto Scores", "Weight", "Miners (sorted by post-Pareto score)"),
+    )
+    for ax, y_values, title, ylabel, xlabel in panels:
+        order = np.argsort(y_values)
+        ordered_y = y_values[order]
+        ordered_pools = kept_pools[order]
+        for pool, color in POOL_COLORS.items():
+            pool_indices = [i for i, name in enumerate(ordered_pools) if name == pool]
+            if not pool_indices:
                 continue
             ax.scatter(
-                np.array(tier_indices),
-                np.array(y_values)[tier_indices],
-                label=f"{SCORE_TIER_LABELS[tier]} ({tier_counts[tier]} UIDs)",
+                np.array(pool_indices),
+                ordered_y[pool_indices],
+                label=f"{POOL_LABELS[pool]} ({pool_counts[pool]} UIDs)",
                 color=color,
                 s=12,
                 alpha=0.85,
             )
         ax.set_ylabel(ylabel, fontsize=12, color="white")
+        ax.set_xlabel(xlabel, fontsize=12, color="white")
         ax.set_title(title, fontsize=14, color="white")
         ax.grid(True, linestyle="--", alpha=0.3, color="gray")
-        ax.legend(title="Score rank", fontsize=9, facecolor="gray", edgecolor="white")
+        ax.legend(title="Pool", fontsize=9, facecolor="gray", edgecolor="white")
 
-    axes[1].set_xlabel("Miners (sorted by post-Pareto score)", fontsize=12, color="white")
+    axes[0].set_ylim(0.0, 1.0)
     fig.suptitle(
-        "Almanac Forecasting scoring simulation: pre-Pareto composite vs metagraph weights",
+        "Almanac Forecasting scoring simulation: composite score vs post-Pareto weight",
         fontsize=15,
         color="white",
         y=0.98,
@@ -686,6 +681,9 @@ def main() -> int:
                 len(seen),
                 latest_hotkey_by_uid[uid][1],
             )
+    if forecasting_scoring.BURN_UID not in latest_hotkey_by_uid:
+        metagraph_uids.append(forecasting_scoring.BURN_UID)
+        metagraph_hotkeys.append("burn")
     metagraph = SimpleNamespace(uids=metagraph_uids, hotkeys=metagraph_hotkeys)
     now_utc = datetime.now(timezone.utc)
     scoring_result = forecasting_scoring.score_agent_predictions(
@@ -695,7 +693,7 @@ def main() -> int:
         now=now_utc,
         return_pre_pareto=True,
     )
-    scores, pre_pareto_scores = scoring_result
+    scores, _pre_pareto_scores, pools, composite_scores = scoring_result
     logger.info(
         "scoring simulation summary: rows=%d miners=%d (non-zero scores=%d)",
         len(rows),
@@ -713,8 +711,9 @@ def main() -> int:
     if not args.no_graph:
         graph_path = graph_results(
             metagraph_uids,
-            pre_pareto_scores,
+            composite_scores,
             scores,
+            pools,
             output_dir=args.graph_output_dir,
         )
         print(f"Wrote scoring visualization to {graph_path}")

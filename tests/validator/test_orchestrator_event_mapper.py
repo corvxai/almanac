@@ -68,7 +68,7 @@ def test_assignment_to_event_maps_core_fields() -> None:
     assert event.event_id == uuid5(NAMESPACE_URL, "polymarket:2411919")
 
 
-def test_assignment_to_event_passes_outcomes_but_strips_prices() -> None:
+def test_assignment_to_event_passes_outcomes_and_prices() -> None:
     assignment = _assignment()
     event = assignment_to_event(assignment)
 
@@ -82,9 +82,8 @@ def test_assignment_to_event_passes_outcomes_but_strips_prices() -> None:
             "name": "No",
         },
     ]
-    # Prices remain on the assignment for submit/scoring; agent Event is bare.
-    assert assignment.event.currentOutcomePrices
-    assert event.current_outcome_prices == {}
+    assert event.current_outcome_prices == assignment.event.currentOutcomePrices
+    assert event.current_outcome_prices is not assignment.event.currentOutcomePrices
 
 
 def test_assignment_to_event_fallbacks_description_and_source_id() -> None:
