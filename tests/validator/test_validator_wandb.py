@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import sys
 from types import SimpleNamespace
 
@@ -25,6 +26,19 @@ def _bt_objects():
         metagraph=SimpleNamespace(hotkeys=["other_hotkey", "hotkey_test"]),
         network="finney",
     )
+
+
+def test_run_logs_weights_version_key_before_the_loop(caplog) -> None:
+    cfg = AppConfig()
+    cfg.loop.wandb_enabled = False
+    cfg.bittensor.weights_version_key = 7
+    validator = Validator(config=cfg, store=None, bt_objects=_bt_objects(), metadata_manager=None)
+    validator._stopped = True  # noqa: SLF001 — banner logs before the sleep loop
+
+    with caplog.at_level(logging.INFO, logger="almanac.validator"):
+        validator.run()
+
+    assert "weights_version_key=7" in caplog.text
 
 
 def test_wandb_disables_itself_without_api_key(monkeypatch) -> None:
@@ -85,6 +99,7 @@ def test_wandb_run_initializes_rotates_and_finishes(monkeypatch) -> None:
         "type": "validator",
         "netuid": cfg.bittensor.netuid,
         "network": "finney",
+        "weights_version_key": cfg.bittensor.weights_version_key,
     }
 
     now[0] += datetime.timedelta(days=1)
