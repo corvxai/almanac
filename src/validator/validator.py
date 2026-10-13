@@ -346,6 +346,7 @@ class Validator:
             return
 
         logger.info("=========== STARTING ALMANAC VALIDATOR LOOP ===========")
+        self._log_weights_version_key()
         logger.info(
             "Scoring%s will run once per hour at minute %d (UTC). "
             "Almanac Market enabled=%s, Almanac Forecasting enabled=%s",
@@ -410,6 +411,7 @@ class Validator:
                 "type": "validator",
                 "netuid": self._config.bittensor.netuid,
                 "network": self._bt.network,
+                "weights_version_key": self._config.bittensor.weights_version_key,
             },
             allow_val_change=True,
             anonymous="allow",
@@ -668,6 +670,7 @@ class Validator:
         to ``set_weights`` (or ``None`` when submission was skipped because
         no mechanism produced a positive weight).
         """
+        self._log_weights_version_key()
         self._bt.metagraph = self._bt.subtensor.subnets.metagraph(
             self._config.bittensor.netuid
         )
@@ -818,6 +821,10 @@ class Validator:
         except Exception:
             logger.exception("Almanac Forecasting scoring failed for this epoch.")
             return None
+
+    def _log_weights_version_key(self) -> None:
+        """Stable token for log scrapers watching which code generation is running."""
+        logger.info("weights_version_key=%s", self._config.bittensor.weights_version_key)
 
     def _set_weights(self, weights: np.ndarray) -> None:
         import bittensor as bt

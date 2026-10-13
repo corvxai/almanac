@@ -15,6 +15,7 @@ elsewhere by sn41's own simulator scripts; we only need to confirm the
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,7 +147,7 @@ def store(tmp_path: Path) -> JsonTraceStore:
     return JsonTraceStore(data_dir=tmp_path)
 
 
-def test_market_only_scoring_step_sets_weights_from_market_vector(monkeypatch, store):
+def test_market_only_scoring_step_sets_weights_from_market_vector(monkeypatch, store, caplog):
     bt = _bt_objects(uids=[0, 1, 2])
     cfg = _config(market=True, forecasting=False)
 
@@ -156,8 +157,10 @@ def test_market_only_scoring_step_sets_weights_from_market_vector(monkeypatch, s
     )
 
     v = Validator(config=cfg, store=store, bt_objects=bt, metadata_manager=None)
-    weights = v.run_scoring_step()
+    with caplog.at_level(logging.INFO, logger="almanac.validator"):
+        weights = v.run_scoring_step()
 
+    assert f"weights_version_key={cfg.bittensor.weights_version_key}" in caplog.text
     assert bt.metagraph.synced == 1
     assert bt.subtensor.calls
     np.testing.assert_allclose(weights, np.array([0.1, 0.4, 0.5]))
