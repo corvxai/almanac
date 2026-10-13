@@ -165,6 +165,7 @@ SKILL_POOL_SHARE = 0.75
 SKILL_SATURATION = 0.10               # 10% lower mean Brier than the market fills the cap
 SKILL_MINER_CAP = 0.40                # of the skill pool, before rho
 SKILL_MIN_EFFECTIVE_N = 50.0          # below this, positive skill draws allowance
+SKILL_GATE_FREEZE_HOURS = 48.0
 
 # Edge is centered at 0 (matching the market). The raw Brier-difference / PnL
 # blend is only a few hundredths in practice; mapping it through (x+1)/2 used
@@ -304,6 +305,7 @@ def score_agent_predictions(
     edge = np.zeros(n, dtype=float)
     rho_by_idx = np.zeros(n, dtype=float)
     effective_n_by_idx = np.zeros(n, dtype=float)
+    gate_effective_n_by_idx = np.zeros(n, dtype=float)
     latest_age_hours_by_idx = np.full(n, np.nan, dtype=float)
     mean_brier_by_idx = np.full(n, np.nan, dtype=float)
     skill_by_idx = np.full(n, np.nan, dtype=float)
@@ -358,6 +360,9 @@ def score_agent_predictions(
             skill_by_idx[idx] = skill
 
         effective_n = float(rec_weights.sum())
+        last_scored_at = max(r.scored_at for r in recs)
+        gate_ref = max(last_scored_at, now - timedelta(hours=SKILL_GATE_FREEZE_HOURS))
+        gate_effective_n = float(_recency_weights(recs, now=gate_ref).sum())
         rho = compute_significance_score(
             num_miner_predictions=effective_n,
             num_threshold_predictions=RHO_THRESHOLD_PREDICTIONS,
@@ -366,6 +371,7 @@ def score_agent_predictions(
         latest_age_hours = _submission_age_hours(last_predicted_by_idx[idx], now=now)
         inactivity_mult = _inactivity_multiplier(latest_age_hours)
         effective_n_by_idx[idx] = effective_n
+        gate_effective_n_by_idx[idx] = gate_effective_n
         rho_by_idx[idx] = rho
         if latest_age_hours is None:
             missing_last_predicted += 1
@@ -395,6 +401,7 @@ def score_agent_predictions(
         skill_by_idx,
         significance_by_idx,
         effective_n_by_idx,
+        gate_effective_n=gate_effective_n_by_idx,
     )
     spent = float(scores.sum())
     burn = max(0.0, 1.0 - spent)
@@ -602,6 +609,7 @@ def _allocate_slice(
     skill: np.ndarray,
     significance: np.ndarray,
     effective_n: np.ndarray,
+    gate_effective_n: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, list[str], float, float]:
     """Map pre-pool composites into forecasting-slice shares.
 
@@ -620,6 +628,7 @@ def _allocate_slice(
     Returns weights, pool labels, allowance spent, and skill spent.
     """
     n = len(pre_pareto)
+    gate_n = effective_n if gate_effective_n is None else gate_effective_n
     weights = np.zeros(n, dtype=float)
     pools = ["-"] * n
     skill_claims = np.zeros(n, dtype=float)
@@ -629,7 +638,7 @@ def _allocate_slice(
         if pre_pareto[i] <= 0.0 or np.isnan(skill[i]):
             continue
         eligible.append(i)
-        if skill[i] > 0.0 and float(effective_n[i]) >= SKILL_MIN_EFFECTIVE_N:
+        if skill[i] > 0.0 and float(gate_n[i]) >= SKILL_MIN_EFFECTIVE_N:
             saturated = min(float(skill[i]) / SKILL_SATURATION, 1.0)
             skill_claims[i] = (
                 saturated * (SKILL_MINER_CAP * SKILL_POOL_SHARE) * float(significance[i])
