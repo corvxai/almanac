@@ -52,6 +52,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.core.config import AppConfig
 from src.gateway.signing import load_hotkey
 from src.validator.forecasting.orchestrator_api import (
+    SCORED_PREDICTIONS_TIMEOUT_SECONDS,
     ScoredPredictionItem,
     ScoredPredictionsPage,
     fetch_all_scored_predictions,
@@ -564,8 +565,11 @@ def main() -> int:
     parser.add_argument(
         "--timeout-seconds",
         type=float,
-        default=15.0,
-        help="HTTP timeout for live orchestrator fetch.",
+        default=SCORED_PREDICTIONS_TIMEOUT_SECONDS,
+        help=(
+            "HTTP timeout for live orchestrator fetch "
+            f"(default: {SCORED_PREDICTIONS_TIMEOUT_SECONDS:g})."
+        ),
     )
     parser.add_argument(
         "--log-level",
