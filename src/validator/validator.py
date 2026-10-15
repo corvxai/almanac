@@ -24,6 +24,7 @@ mechanism is enabled.
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import logging
 import os
@@ -46,6 +47,7 @@ from src.validator.forecasting.proxy_socket import (
 from src.gateway.client import build_remote_providers
 from src.gateway.constants import gateway_service_url
 from src.gateway.signing import load_hotkey
+from src.storage.json_store import _atomic_write_text
 from src.storage.store import TraceStore
 from src.validator.forecasting.assignment_pipeline import (
     build_prediction_submit_payload,
@@ -65,6 +67,7 @@ from src.validator.forecasting.orchestrator_api import (
     submit_validator_prediction,
 )
 from src.validator.forecasting import scoring as forecasting_scoring
+from src.validator.market.constants import BURN_UID
 
 logger = logging.getLogger("almanac.validator")
 
@@ -668,7 +671,8 @@ class Validator:
         Exposed as a public method so tests can drive a single tick
         without sleeping. Returns the final weight vector that was sent
         to ``set_weights`` (or ``None`` when submission was skipped because
-        no mechanism produced a positive weight).
+        no mechanism produced a positive weight, or an enabled mechanism
+        had no snapshot young enough to reuse).
         """
         self._log_weights_version_key()
         self._bt.metagraph = self._bt.subtensor.subnets.metagraph(
@@ -689,6 +693,38 @@ class Validator:
         if loop_cfg.forecasting_enabled:
             weights_forecasting = self._score_agent_predictions()
 
+        if weights_market is not None:
+            self._record_weight_snapshot("market", weights_market)
+        if weights_forecasting is not None:
+            self._record_weight_snapshot("forecasting", weights_forecasting)
+
+        market_stale_age: datetime.timedelta | None = None
+        forecasting_stale_age: datetime.timedelta | None = None
+        if loop_cfg.market_enabled and weights_market is None:
+            restored = self._restore_weight_snapshot("market")
+            if restored is not None:
+                weights_market = restored.vector
+                market_stale_age = restored.age
+        if loop_cfg.forecasting_enabled and weights_forecasting is None:
+            restored = self._restore_weight_snapshot("forecasting")
+            if restored is not None:
+                weights_forecasting = restored.vector
+                forecasting_stale_age = restored.age
+
+        unavailable: list[str] = []
+        if loop_cfg.market_enabled and weights_market is None:
+            unavailable.append("market")
+        if loop_cfg.forecasting_enabled and weights_forecasting is None:
+            unavailable.append("forecasting")
+        if unavailable:
+            noun = "snapshot" if len(unavailable) == 1 else "snapshots"
+            logger.warning(
+                "Skipping set_weights: %s %s unavailable.",
+                " and ".join(unavailable),
+                noun,
+            )
+            return None
+
         blend_cfg = BlendConfig(
             market_enabled=loop_cfg.market_enabled,
             forecasting_enabled=loop_cfg.forecasting_enabled,
@@ -696,17 +732,20 @@ class Validator:
             forecasting_share=loop_cfg.forecasting_weight_share,
         )
 
-        if weights_market is None and weights_forecasting is None:
-            logger.warning("Both mechanism score paths returned no data this epoch; skipping set_weights.")
-            return None
-
         weights = combine_weights(weights_market, weights_forecasting, blend_cfg)
         if not np.any(weights > 0):
             logger.warning(
                 "All blended weights are zero this epoch; skipping set_weights."
             )
             return None
-        self._log_blended_weights(weights, weights_market, weights_forecasting, blend_cfg)
+        self._log_blended_weights(
+            weights,
+            weights_market,
+            weights_forecasting,
+            blend_cfg,
+            market_stale_age=market_stale_age,
+            forecasting_stale_age=forecasting_stale_age,
+        )
 
         if loop_cfg.set_weights_enabled:
             self._set_weights(weights)
@@ -724,10 +763,10 @@ class Validator:
         weights_market: Optional[np.ndarray],
         weights_forecasting: Optional[np.ndarray],
         blend_cfg: BlendConfig,
+        market_stale_age: datetime.timedelta | None = None,
+        forecasting_stale_age: datetime.timedelta | None = None,
     ) -> None:
         """Log the post-blend weight vector (compute only; does not touch chain)."""
-        from src.validator.market.constants import BURN_UID
-
         market_present = blend_cfg.market_enabled and weights_market is not None
         forecasting_present = blend_cfg.forecasting_enabled and weights_forecasting is not None
         market_sum = float(np.asarray(weights_market).sum()) if market_present else 0.0
@@ -749,11 +788,11 @@ class Validator:
             "Blended weight summary: market=%s (share=%.4f, raw_sum=%.4f, effective=%.4f) | "
             "forecasting=%s (share=%.4f, raw_sum=%.4f, effective=%.4f) | "
             "BURN_UID=%d weight=%.4f | non_zero_uids=%d | final_sum=%.6f",
-            "present" if market_present else "absent",
+            _weight_source_label(market_present, market_stale_age),
             blend_cfg.market_share,
             market_sum,
             effective.get("market", 0.0),
-            "present" if forecasting_present else "absent",
+            _weight_source_label(forecasting_present, forecasting_stale_age),
             blend_cfg.forecasting_share,
             forecasting_sum,
             effective.get("forecasting", 0.0),
@@ -822,6 +861,112 @@ class Validator:
             logger.exception("Almanac Forecasting scoring failed for this epoch.")
             return None
 
+    def _record_weight_snapshot(self, mechanism: str, weights: np.ndarray) -> None:
+        """Persist one mechanism's weight vector. A write failure stays off the chain path."""
+        try:
+            self._write_weight_snapshot(mechanism, weights)
+        except Exception:
+            logger.exception("Failed to save %s weight snapshot.", mechanism)
+
+    def _write_weight_snapshot(self, mechanism: str, weights: np.ndarray) -> None:
+        if not np.all(np.isfinite(np.asarray(weights, dtype=float))):
+            logger.error("Not saving %s weight snapshot: vector has non-finite weights.", mechanism)
+            return
+        entries = _weight_snapshot_entries(self._bt.metagraph, weights)
+        if entries is None:
+            logger.error(
+                "Not saving %s weight snapshot: vector length %d does not match the metagraph.",
+                mechanism,
+                len(np.asarray(weights)),
+            )
+            return
+        saved_at = self._clock()
+        if saved_at.tzinfo is None:
+            saved_at = saved_at.replace(tzinfo=datetime.timezone.utc)
+        path = self._weight_snapshot_path(mechanism)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(
+            path,
+            json.dumps({"saved_at": saved_at.isoformat(), "entries": entries}, indent=2) + "\n",
+        )
+        logger.info("Saved %s weight snapshot (%d uids).", mechanism, len(entries))
+
+    def _weight_snapshot_path(self, mechanism: str) -> Path:
+        netuid = self._config.bittensor.netuid
+        return self._config.storage.data_dir / f"weight_snapshot_{mechanism}_{netuid}.json"
+
+    def _restore_weight_snapshot(self, mechanism: str) -> _RestoredSnapshot | None:
+        """Load a fresh snapshot aligned to the current metagraph.
+
+        ``None`` means the file is missing, older than the reuse window, or
+        cannot be applied. Callers then skip ``set_weights``.
+        """
+        path = self._weight_snapshot_path(mechanism)
+        if not path.is_file():
+            logger.warning("%s weight snapshot is missing.", mechanism)
+            return None
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("%s weight snapshot could not be read: %s", mechanism, exc)
+            return None
+        if not isinstance(payload, dict):
+            logger.warning("%s weight snapshot could not be read: payload is not an object.", mechanism)
+            return None
+        saved_at = _parse_snapshot_time(payload.get("saved_at"))
+        entries = payload.get("entries")
+        if saved_at is None or not isinstance(entries, list):
+            logger.warning(
+                "%s weight snapshot could not be read: saved_at or entries is invalid.",
+                mechanism,
+            )
+            return None
+
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=datetime.timezone.utc)
+        age = now - saved_at
+        if age < datetime.timedelta(0):
+            logger.warning(
+                "%s weight snapshot is dated %s, after the current time %s.",
+                mechanism,
+                saved_at.isoformat(),
+                now.isoformat(),
+            )
+            return None
+        if age >= WEIGHT_SNAPSHOT_MAX_AGE:
+            logger.warning(
+                "%s weight snapshot is %.2fh old; limit is %dh.",
+                mechanism,
+                age.total_seconds() / 3600.0,
+                int(WEIGHT_SNAPSHOT_MAX_AGE.total_seconds() // 3600),
+            )
+            return None
+
+        aligned = _align_snapshot_weights(self._bt.metagraph, entries)
+        if aligned is None:
+            logger.warning(
+                "%s weight snapshot could not be aligned to the metagraph "
+                "(invalid entry, or dropped weight with no BURN_UID %d slot).",
+                mechanism,
+                BURN_UID,
+            )
+            return None
+        vector, dropped, dropped_weight = aligned
+        if dropped:
+            logger.warning(
+                "%s weight snapshot dropped %d uid(s) whose hotkey changed or left the "
+                "metagraph; %.4f weight moved to BURN_UID %d.",
+                mechanism,
+                dropped,
+                dropped_weight,
+                BURN_UID,
+            )
+        if float(vector.sum()) <= 0.0:
+            logger.warning("%s weight snapshot has no remaining weight.", mechanism)
+            return None
+        return _RestoredSnapshot(vector=vector, age=age)
+
     def _log_weights_version_key(self) -> None:
         """Stable token for log scrapers watching which code generation is running."""
         logger.info("weights_version_key=%s", self._config.bittensor.weights_version_key)
@@ -851,6 +996,124 @@ class Validator:
                 error.code if error else "unknown",
                 error.remediation if error else result.message,
             )
+
+
+WEIGHT_SNAPSHOT_MAX_AGE = datetime.timedelta(hours=6)
+
+
+@dataclass(frozen=True)
+class _RestoredSnapshot:
+    vector: np.ndarray
+    age: datetime.timedelta
+
+
+def _weight_source_label(present: bool, stale_age: datetime.timedelta | None) -> str:
+    if not present:
+        return "absent"
+    if stale_age is None:
+        return "present"
+    return f"stale age={stale_age.total_seconds() / 3600.0:.2f}h"
+
+
+def _parse_snapshot_time(value: object) -> datetime.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def _align_snapshot_weights(metagraph, entries: list) -> tuple[np.ndarray, int, float] | None:
+    """Place snapshot weights on the current metagraph and burn what no longer fits.
+
+    A saved UID is dropped when its hotkey changed or it left the metagraph.
+    Its weight goes to ``BURN_UID`` rather than being spread over the other
+    miners by normalisation, which would lift them past the scorers' caps.
+
+    ``None`` means the file or the metagraph cannot be lined up, or there is
+    dropped weight but no ``BURN_UID`` slot to hold it. Otherwise returns the
+    vector, the dropped UID count, and the dropped weight.
+    """
+    neurons = list(metagraph)
+    hotkeys = list(getattr(metagraph, "hotkeys", []) or [])
+    if len(hotkeys) != len(neurons):
+        return None
+    by_uid: dict[int, tuple[str, float]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        uid = entry.get("uid")
+        hotkey = entry.get("hotkey")
+        if isinstance(uid, bool) or not isinstance(uid, int) or not isinstance(hotkey, str):
+            return None
+        try:
+            weight = float(entry["weight"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(weight):
+            return None
+        by_uid[uid] = (hotkey, weight)
+
+    vector = np.zeros(len(neurons), dtype=float)
+    burn_idx: int | None = None
+    placed: set[int] = set()
+    dropped = 0
+    dropped_weight = 0.0
+    for idx, neuron in enumerate(neurons):
+        uid = int(neuron.uid)
+        if uid == BURN_UID:
+            burn_idx = idx
+        saved = by_uid.get(uid)
+        if saved is None:
+            continue
+        placed.add(uid)
+        saved_hotkey, weight = saved
+        current_hotkey = hotkeys[idx]
+        if not isinstance(current_hotkey, str):
+            current_hotkey = str(current_hotkey)
+        if saved_hotkey != current_hotkey:
+            dropped += 1
+            dropped_weight += max(weight, 0.0)
+            continue
+        vector[idx] = weight
+    for uid, (_, weight) in by_uid.items():
+        if uid not in placed:
+            dropped += 1
+            dropped_weight += max(weight, 0.0)
+
+    if dropped_weight > 0.0:
+        if burn_idx is None:
+            return None
+        vector[burn_idx] += dropped_weight
+    return vector, dropped, dropped_weight
+
+
+def _weight_snapshot_entries(metagraph, weights: np.ndarray) -> list[dict[str, object]] | None:
+    """Zip a score vector with the UID and hotkey at each metagraph slot.
+
+    Index ``i`` is the same slot ``set_weights`` submits. ``None`` means the
+    vector cannot be lined up with both neurons and hotkeys.
+    """
+    neurons = list(metagraph)
+    hotkeys = list(getattr(metagraph, "hotkeys", []) or [])
+    vector = np.asarray(weights, dtype=float)
+    if len(neurons) != len(vector) or len(hotkeys) != len(vector):
+        return None
+    entries: list[dict[str, object]] = []
+    for idx, neuron in enumerate(neurons):
+        hotkey = hotkeys[idx]
+        entries.append(
+            {
+                "uid": int(neuron.uid),
+                "hotkey": hotkey if isinstance(hotkey, str) else str(hotkey),
+                "weight": float(vector[idx]),
+            }
+        )
+    return entries
 
 
 # ---------------------------------------------------------------------------

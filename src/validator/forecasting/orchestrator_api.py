@@ -20,6 +20,15 @@ AGENT_AND_EVENT_ENDPOINT = "/v1/validators/agent-and-event"
 PREDICTION_ENDPOINT = "/v1/validators/prediction"
 SCORED_PREDICTIONS_ENDPOINT = "/v1/validators/scored-predictions"
 DEFAULT_TIMEOUT_SECONDS = 15.0
+# Scored-predictions pages are much heavier than assignment polls. Keep the
+# assignment timeout at DEFAULT_TIMEOUT_SECONDS; this walk has its own budget.
+# The walk runs on the validator's main loop, so a hung page blocks assignment
+# polling for up to max_attempts * read timeout. Connect fails fast because a
+# slow connect means the host is down, not that the page is large.
+SCORED_PREDICTIONS_TIMEOUT_SECONDS = 30.0
+SCORED_PREDICTIONS_CONNECT_TIMEOUT_SECONDS = 5.0
+SCORED_PREDICTIONS_PAGE_LIMIT = 200
+SCORED_PREDICTIONS_MAX_ATTEMPTS = 3
 AUTH_DOMAIN = "sub41-gateway-v1"
 
 logger = logging.getLogger("forecasting.orchestrator")
@@ -387,7 +396,7 @@ def fetch_scored_predictions_page(
     limit: int = 1000,
     cursor: str | None = None,
     include_trace_summary: bool = True,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float | httpx.Timeout = DEFAULT_TIMEOUT_SECONDS,
     http_client: httpx.Client | None = None,
 ) -> ScoredPredictionsPage:
     """Fetch one page from ``GET /v1/validators/scored-predictions``."""
@@ -426,32 +435,130 @@ def fetch_scored_predictions_page(
         raise RuntimeError(f"invalid scored predictions page payload: {exc}") from exc
 
 
+def _scored_predictions_error_is_retryable(exc: Exception) -> bool:
+    """Timeouts, connection failures, 401, 429, and 5xx are worth another try."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in (401, 429) or status >= 500
+    return False
+
+
+def _scored_predictions_error_label(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
+
+
+def _fetch_scored_predictions_page_retrying(
+    *,
+    base_url: str,
+    loaded_hotkey: LoadedKeypair,
+    days: int,
+    limit: int,
+    cursor: str | None,
+    include_trace_summary: bool,
+    timeout: httpx.Timeout,
+    http_client: httpx.Client,
+    page_index: int,
+    max_attempts: int,
+    retry_backoff_seconds: float,
+) -> ScoredPredictionsPage:
+    """Fetch one page, retrying the same cursor with a freshly signed request."""
+    for attempt in range(1, max_attempts + 1):
+        started = time.perf_counter()
+        try:
+            page = fetch_scored_predictions_page(
+                base_url=base_url,
+                loaded_hotkey=loaded_hotkey,
+                days=days,
+                limit=limit,
+                cursor=cursor,
+                include_trace_summary=include_trace_summary,
+                timeout_seconds=timeout,
+                http_client=http_client,
+            )
+        except Exception as exc:
+            if attempt >= max_attempts or not _scored_predictions_error_is_retryable(exc):
+                raise
+            logger.warning(
+                "scored predictions page %d attempt %d/%d failed (%s); retrying same cursor",
+                page_index,
+                attempt,
+                max_attempts,
+                _scored_predictions_error_label(exc),
+            )
+            if retry_backoff_seconds > 0:
+                time.sleep(retry_backoff_seconds)
+            continue
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "scored predictions page %d: %d rows in %.2fs",
+            page_index,
+            len(page.items),
+            elapsed,
+        )
+        return page
+    raise RuntimeError("scored predictions retry loop exited without a page")
+
+
 def fetch_all_scored_predictions(
     *,
     base_url: str,
     loaded_hotkey: LoadedKeypair,
     days: int = 30,
-    page_limit: int = 50,
+    page_limit: int = SCORED_PREDICTIONS_PAGE_LIMIT,
     include_trace_summary: bool = True,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float = SCORED_PREDICTIONS_TIMEOUT_SECONDS,
     http_client: httpx.Client | None = None,
+    max_attempts: int = SCORED_PREDICTIONS_MAX_ATTEMPTS,
+    retry_backoff_seconds: float = 1.0,
 ) -> list[ScoredPredictionItem]:
-    """Fetch all pages from ``GET /v1/validators/scored-predictions``."""
+    """Fetch all pages from ``GET /v1/validators/scored-predictions``.
+
+    Pages share one HTTP client. A failed page is retried with a new signature
+    and the same cursor. If that page still fails, this raises and the caller
+    scores none of the pages already read.
+
+    ``timeout_seconds`` bounds reads, writes, and pool waits. Connecting is
+    capped at ``SCORED_PREDICTIONS_CONNECT_TIMEOUT_SECONDS``.
+    """
+    timeout = httpx.Timeout(
+        timeout_seconds,
+        connect=min(SCORED_PREDICTIONS_CONNECT_TIMEOUT_SECONDS, timeout_seconds),
+    )
+    owns_client = http_client is None
+    client = http_client or httpx.Client(timeout=timeout)
     all_items: list[ScoredPredictionItem] = []
     cursor: str | None = None
-    while True:
-        page = fetch_scored_predictions_page(
-            base_url=base_url,
-            loaded_hotkey=loaded_hotkey,
-            days=days,
-            limit=page_limit,
-            cursor=cursor,
-            include_trace_summary=include_trace_summary,
-            timeout_seconds=timeout_seconds,
-            http_client=http_client,
+    page_index = 0
+    try:
+        while True:
+            page_index += 1
+            page = _fetch_scored_predictions_page_retrying(
+                base_url=base_url,
+                loaded_hotkey=loaded_hotkey,
+                days=days,
+                limit=page_limit,
+                cursor=cursor,
+                include_trace_summary=include_trace_summary,
+                timeout=timeout,
+                http_client=client,
+                page_index=page_index,
+                max_attempts=max_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
+            )
+            all_items.extend(page.items)
+            if not page.nextCursor:
+                break
+            cursor = page.nextCursor
+        logger.info(
+            "scored predictions fetch complete: %d rows across %d pages",
+            len(all_items),
+            page_index,
         )
-        all_items.extend(page.items)
-        if not page.nextCursor:
-            break
-        cursor = page.nextCursor
-    return all_items
+        return all_items
+    finally:
+        if owns_client:
+            client.close()

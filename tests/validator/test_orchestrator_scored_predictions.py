@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from src.core.constants import ORCHESTRATOR_API_URL
 from src.validator.forecasting.orchestrator_api import (
+    SCORED_PREDICTIONS_CONNECT_TIMEOUT_SECONDS,
     SCORED_PREDICTIONS_ENDPOINT,
+    SCORED_PREDICTIONS_PAGE_LIMIT,
+    SCORED_PREDICTIONS_TIMEOUT_SECONDS,
     AUTH_DOMAIN,
     fetch_all_scored_predictions,
     fetch_scored_predictions_page,
@@ -16,9 +21,11 @@ from src.validator.forecasting.orchestrator_api import (
 class _FakeKeypair:
     def __init__(self) -> None:
         self.last_message: bytes | None = None
+        self.messages: list[bytes] = []
 
     def sign(self, message: bytes) -> bytes:
         self.last_message = message
+        self.messages.append(message)
         return bytes.fromhex("aabb")
 
 
@@ -163,3 +170,153 @@ def test_fetch_all_scored_predictions_paginates_to_completion() -> None:
     assert items[0].outcomePricesAtPrediction == {"yes": 0.58, "no": 0.42}
     assert items[1].outcomePricesAtPrediction == {"yes": 0.4, "no": 0.6}
     assert seen_cursors == [None, "next1"]
+    assert not client.is_closed
+
+
+def _scored_item(agent_prediction_id: str) -> dict[str, object]:
+    return {
+        "agentPredictionId": agent_prediction_id,
+        "minerHotkey": "5F3sa2TJAWMqDhXG6jhV4N8ko9wqXxv6cM4x2eRk9WQh7YbA",
+        "minerUid": 184,
+        "marketId": "m1",
+        "sourceMarketId": "s1",
+        "predictedOutcomeId": "yes",
+        "predictedAt": "2026-06-08T10:00:00.000Z",
+        "confidence": 0.8,
+        "outcomePricesAtPrediction": {"yes": 0.58, "no": 0.42},
+        "outcomeProbabilities": {"yes": 0.8, "no": 0.2},
+        "resolvedOutcomeId": "yes",
+        "finalOutcomePrices": {"yes": 1, "no": 0},
+        "scoredAt": "2026-06-08T15:59:40.000Z",
+        "resolutionStatus": "resolved",
+    }
+
+
+def _page(agent_prediction_id: str, next_cursor: str | None) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"items": [_scored_item(agent_prediction_id)], "nextCursor": next_cursor},
+    )
+
+
+def test_fetch_all_scored_predictions_retries_same_cursor_with_a_new_signature(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    loaded_hotkey = _loaded()
+    seen_cursors: list[str | None] = []
+    seen_limits: list[str] = []
+    timeouts: list[object] = []
+    attempts = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        seen_cursors.append(request.url.params.get("cursor"))
+        seen_limits.append(request.url.params["limit"])
+        if attempts["n"] == 1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        if attempts["n"] == 2:
+            return httpx.Response(401, json={"detail": "unauthorized"})
+        return _page("ap_1", None)
+
+    class _RecordingClient(httpx.Client):
+        def get(self, *args, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            return super().get(*args, **kwargs)
+
+    client = _RecordingClient(transport=httpx.MockTransport(_handler))
+    with caplog.at_level(logging.INFO, logger="forecasting.orchestrator"):
+        items = fetch_all_scored_predictions(
+            base_url=ORCHESTRATOR_API_URL,
+            loaded_hotkey=loaded_hotkey,  # type: ignore[arg-type]
+            http_client=client,
+            retry_backoff_seconds=0,
+        )
+
+    assert [it.agentPredictionId for it in items] == ["ap_1"]
+    assert seen_cursors == [None, None, None]
+    assert seen_limits == ["200", "200", "200"]
+    assert timeouts == [
+        httpx.Timeout(
+            SCORED_PREDICTIONS_TIMEOUT_SECONDS,
+            connect=SCORED_PREDICTIONS_CONNECT_TIMEOUT_SECONDS,
+        )
+    ] * 3
+    assert len(loaded_hotkey.keypair.messages) == 3
+    assert len(set(loaded_hotkey.keypair.messages)) == 3
+    assert "page 1 attempt 1/3 failed (ReadTimeout)" in caplog.text
+    assert "page 1 attempt 2/3 failed (HTTP 401)" in caplog.text
+    assert "scored predictions page 1: 1 rows in" in caplog.text
+    assert not client.is_closed
+
+
+def test_fetch_all_scored_predictions_does_not_retry_client_errors() -> None:
+    loaded_hotkey = _loaded()
+    attempts = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(400, json={"detail": "bad request"})
+
+    client = httpx.Client(transport=httpx.MockTransport(_handler))
+    with pytest.raises(httpx.HTTPStatusError):
+        fetch_all_scored_predictions(
+            base_url=ORCHESTRATOR_API_URL,
+            loaded_hotkey=loaded_hotkey,  # type: ignore[arg-type]
+            http_client=client,
+            retry_backoff_seconds=0,
+        )
+    assert attempts["n"] == 1
+
+
+def test_fetch_all_scored_predictions_failure_discards_earlier_pages() -> None:
+    loaded_hotkey = _loaded()
+    attempts = {"n": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if request.url.params.get("cursor") is None:
+            return _page("ap_1", "next1")
+        return httpx.Response(503, json={"detail": "unavailable"})
+
+    client = httpx.Client(transport=httpx.MockTransport(_handler))
+    with pytest.raises(httpx.HTTPStatusError):
+        fetch_all_scored_predictions(
+            base_url=ORCHESTRATOR_API_URL,
+            loaded_hotkey=loaded_hotkey,  # type: ignore[arg-type]
+            http_client=client,
+            max_attempts=2,
+            retry_backoff_seconds=0,
+        )
+    # Page 1 once, then page 2 twice. Nothing is returned to score.
+    assert attempts["n"] == 3
+
+
+def test_fetch_all_scored_predictions_opens_one_client_for_the_walk(monkeypatch) -> None:
+    loaded_hotkey = _loaded()
+    opened: list[httpx.Client] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("cursor") is None:
+            return _page("ap_1", "next1")
+        return _page("ap_2", None)
+
+    class _TrackingClient(httpx.Client):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, transport=httpx.MockTransport(_handler), **kwargs)
+            opened.append(self)
+
+    monkeypatch.setattr(
+        "src.validator.forecasting.orchestrator_api.httpx.Client",
+        _TrackingClient,
+    )
+    items = fetch_all_scored_predictions(
+        base_url=ORCHESTRATOR_API_URL,
+        loaded_hotkey=loaded_hotkey,  # type: ignore[arg-type]
+        retry_backoff_seconds=0,
+    )
+    assert [it.agentPredictionId for it in items] == ["ap_1", "ap_2"]
+    assert len(opened) == 1
+    assert opened[0].timeout.read == SCORED_PREDICTIONS_TIMEOUT_SECONDS
+    assert opened[0].timeout.connect == SCORED_PREDICTIONS_CONNECT_TIMEOUT_SECONDS
+    assert opened[0].is_closed
+    assert SCORED_PREDICTIONS_PAGE_LIMIT == 200
