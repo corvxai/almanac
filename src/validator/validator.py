@@ -71,6 +71,11 @@ from src.validator.market.constants import BURN_UID
 
 logger = logging.getLogger("almanac.validator")
 
+# No new assignments across the scoring minute, so a sandbox run plus the
+# 60s loop sleep cannot jump over it. Lead time covers the 240s sandbox timeout.
+_ASSIGNMENT_BLACKOUT_BEFORE_MINUTES = 5
+_ASSIGNMENT_BLACKOUT_AFTER_MINUTES = 2
+
 
 @dataclass
 class BlendConfig:
@@ -468,8 +473,21 @@ class Validator:
         )
         return now - self._last_assignment_execution_at < cooldown
 
+    def _assignment_scoring_blackout_active(self, now: datetime.datetime) -> bool:
+        # Scoring minute is chosen from 10..25, so this window stays inside the hour.
+        delta = now.minute - self._scoring_minute
+        return -_ASSIGNMENT_BLACKOUT_BEFORE_MINUTES <= delta <= _ASSIGNMENT_BLACKOUT_AFTER_MINUTES
+
     def _poll_orchestrator_assignment(self) -> None:
         now = self._clock()
+        if self._assignment_scoring_blackout_active(now):
+            logger.info(
+                "Skipping agent and event assignment execution: scoring blackout "
+                "(minute=%d, scoring_minute=%d).",
+                now.minute,
+                self._scoring_minute,
+            )
+            return
         if self._assignment_execution_cooldown_active(now):
             elapsed = (now - self._last_assignment_execution_at).total_seconds()
             logger.info(
