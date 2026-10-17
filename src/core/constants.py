@@ -47,7 +47,7 @@ class BittensorDefaults:
     # Must be an integer, so 1.1 is not a valid value.
     # bt.SetWeights defaults to 0; on commit-reveal that fails only at reveal time,
     # so commits succeed while the applied weight row never updates.
-    weights_version_key: int = 4
+    weights_version_key: int = 5
 
 
 @dataclass(frozen=True)
