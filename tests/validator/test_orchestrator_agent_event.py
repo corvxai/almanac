@@ -235,7 +235,15 @@ def test_validator_polling_calls_assignment_handler(monkeypatch) -> None:
     cfg.loop.forecasting_enabled = True
     cfg.loop.wandb_enabled = False
 
-    validator = Validator(config=cfg, store=None, bt_objects=_bt_objects(), metadata_manager=None)
+    now = datetime.datetime(2026, 6, 5, 12, 0, tzinfo=datetime.timezone.utc)
+    validator = Validator(
+        config=cfg,
+        store=None,
+        bt_objects=_bt_objects(),
+        metadata_manager=None,
+        clock=lambda: now,
+    )
+    validator._scoring_minute = 15
     cfg.validator.orchestrator_api_url = ORCHESTRATOR_API_URL
 
     fake_loaded = SimpleNamespace(
@@ -280,6 +288,47 @@ def test_validator_polling_calls_assignment_handler(monkeypatch) -> None:
     validator._poll_orchestrator_assignment()
     assert len(seen) == 1
     assert seen[0].agentPredictionId == "pred_123"
+
+
+def test_validator_polling_skips_assignments_around_scoring_minute(monkeypatch) -> None:
+    cfg = AppConfig()
+    cfg.loop.loop_enabled = False
+    cfg.loop.forecasting_enabled = True
+    cfg.loop.wandb_enabled = False
+
+    now = {"t": datetime.datetime(2026, 6, 5, 12, 0, tzinfo=datetime.timezone.utc)}
+    validator = Validator(
+        config=cfg,
+        store=None,
+        bt_objects=_bt_objects(),
+        metadata_manager=None,
+        clock=lambda: now["t"],
+    )
+    validator._scoring_minute = 15
+    cfg.validator.orchestrator_api_url = ORCHESTRATOR_API_URL
+
+    fake_loaded = SimpleNamespace(
+        keypair=_FakeKeypair(),
+        hotkey_ss58="5ValidatorHotkey",
+        coldkey_ss58=None,
+    )
+    monkeypatch.setattr("src.validator.validator.load_hotkey", lambda _cfg: fake_loaded)
+
+    fetch_calls: list[int] = []
+    monkeypatch.setattr(
+        "src.validator.validator.fetch_agent_event_assignment",
+        lambda **kw: fetch_calls.append(now["t"].minute) or AgentAndEventResponse(
+            assignment=None,
+            reason="none_available",
+        ),
+    )
+
+    # 5 minutes before through 2 minutes after are quiet. Just outside, polling runs.
+    for minute, expect_fetch in ((9, True), (10, False), (15, False), (17, False), (18, True)):
+        fetch_calls.clear()
+        now["t"] = now["t"].replace(minute=minute)
+        validator._poll_orchestrator_assignment()
+        assert (len(fetch_calls) == 1) is expect_fetch
 
 
 def test_validator_polling_skips_during_assignment_execution_cooldown(monkeypatch) -> None:
