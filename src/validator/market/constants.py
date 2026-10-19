@@ -85,7 +85,7 @@ MINER_WEIGHT_PERCENTAGE = 1 - GENERAL_POOL_WEIGHT_PERCENTAGE
 # Set to 0 to disable.
 MINER_POOL_WEIGHT_BOOST_PERCENTAGE = 0.75
 
-TOTAL_MINER_ALPHA_PER_DAY = 2952  # 7200 alpha per day for entire subnet * 0.41 (41% for miners)
+TOTAL_MINER_ALPHA_PER_DAY = 3600  # 7200 alpha per day for entire subnet * 0.5 (50% for miners -- used to be 2952 aka 41% pre-etao)
 
 # Burn UID
 BURN_UID = 46
