@@ -21,7 +21,7 @@ class PolymarketTradeFetcher:
     """Fetches trade data and PnL information from Polymarket API"""
     
     def __init__(self):
-        self.base_url = "https://data-api.polymarket.com"
+        self.base_url = "https://data-api.polymarket.com/v2"
         self.gamma_url = "https://gamma-api.polymarket.com"
         self.session = requests.Session()
         self.session.headers.update({
@@ -30,55 +30,68 @@ class PolymarketTradeFetcher:
         })
         # Cache for market data to avoid repeated API calls
         self.market_cache = {}
+
+    def _unwrap_page(self, payload) -> Tuple[List[Dict], Optional[str]]:
+        """v2 envelope is {data, pagination}. Stop paging when next_cursor is null."""
+        if not isinstance(payload, dict):
+            return [], None
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            rows = []
+        pagination = payload.get("pagination")
+        next_cursor = pagination.get("next_cursor") if isinstance(pagination, dict) else None
+        return rows, next_cursor
         
     def fetch_trades(self, 
                     user_address: str,
                     limit: int = 100,
-                    offset: int = 0,
+                    cursor: Optional[str] = None,
                     side: Optional[str] = None,
                     before: Optional[int] = None,
-                    after: Optional[int] = None) -> List[Dict]:
+                    after: Optional[int] = None) -> Tuple[List[Dict], Optional[str]]:
         """
         Fetch trades for a given user address using data-api
         """
         params = {
             'user': user_address.lower(),  # Ensure lowercase address
-            'limit': min(limit, 10000),
-            'offset': offset
+            'limit': min(limit, 1000),
         }
+        if cursor:
+            params['cursor'] = cursor
         
         if side:
             params['side'] = side
+        # v1 callers passed before/after; the documented window params are end/start.
         if before:
-            params['before'] = before
+            params['end'] = before
         if after:
-            params['after'] = after
+            params['start'] = after
             
         try:
             response = self.session.get(f"{self.base_url}/trades", params=params)
             response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else []
+            return self._unwrap_page(response.json())
         except requests.exceptions.RequestException as e:
             print(f"Error fetching trades: {e}")
-            return []
+            return [], None
     
     def fetch_user_activity(self,
                            user_address: str,
                            activity_type: str = "TRADE",
                            limit: int = 1000,
-                           offset: int = 0,
+                           cursor: Optional[str] = None,
                            start: Optional[int] = None,
-                           end: Optional[int] = None) -> List[Dict]:
+                           end: Optional[int] = None) -> Tuple[List[Dict], Optional[str]]:
         """
         Fetch user activity from the activity endpoint
         """
         params = {
             'user': user_address.lower(),
             'type': activity_type,
-            'limit': min(limit, 10000),
-            'offset': offset
+            'limit': min(limit, 1000),
         }
+        if cursor:
+            params['cursor'] = cursor
         
         if start:
             params['start'] = start
@@ -88,33 +101,45 @@ class PolymarketTradeFetcher:
         try:
             response = self.session.get(f"{self.base_url}/activity", params=params)
             response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else []
+            return self._unwrap_page(response.json())
         except requests.exceptions.RequestException as e:
             print(f"Error fetching activity: {e}")
-            return []
+            return [], None
     
     def fetch_positions(self, 
                        user_address: str,
                        limit: int = 100,
-                       offset: int = 0) -> List[Dict]:
+                       cursor: Optional[str] = None,
+                       status: Optional[str] = None,
+                       sort_by: Optional[str] = None,
+                       sort_direction: Optional[str] = None,
+                       markets: Optional[List[str]] = None) -> Tuple[List[Dict], Optional[str]]:
         """
-        Fetch current positions for a user to get PnL data
+        Fetch positions for a user to get PnL data.
+        status defaults to OPEN on the server. CLOSED replaces /closed-positions.
         """
         params = {
             'user': user_address.lower(),
             'limit': min(limit, 500),
-            'offset': offset
         }
+        if cursor:
+            params['cursor'] = cursor
+        if status:
+            params['status'] = status
+        if sort_by:
+            params['sortBy'] = sort_by
+        if sort_direction:
+            params['sortDirection'] = sort_direction
+        if markets:
+            params['condition'] = ','.join(markets)
             
         try:
             response = self.session.get(f"{self.base_url}/positions", params=params)
             response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, list) else []
+            return self._unwrap_page(response.json())
         except requests.exceptions.RequestException as e:
             print(f"Error fetching positions: {e}")
-            return []
+            return [], None
     
     def fetch_all_trades(self, 
                         user_address: str,
@@ -124,30 +149,27 @@ class PolymarketTradeFetcher:
         Fetch all trades for a user, handling pagination
         """
         all_trades = []
-        offset = 0
         limit = 1000
+        cursor = None
         
         # Convert dates to timestamps if provided
         after = int(start_date.timestamp()) if start_date else None
         before = int(end_date.timestamp()) if end_date else None
         
         while True:
-            print(f"Fetching trades batch: offset={offset}")
-            trades = self.fetch_trades(
+            print(f"Fetching trades batch: cursor={'yes' if cursor else 'start'}")
+            trades, cursor = self.fetch_trades(
                 user_address=user_address,
                 limit=limit,
-                offset=offset,
+                cursor=cursor,
                 before=before,
                 after=after
             )
             
-            if not trades:
-                break
-                
-            all_trades.extend(trades)
-            offset += len(trades)
-            
-            if len(trades) < limit:
+            if trades:
+                all_trades.extend(trades)
+            # A short page is not the end; next_cursor is null on the last page.
+            if not cursor:
                 break
                 
             time.sleep(0.1)  # Be respectful to the API
@@ -160,23 +182,19 @@ class PolymarketTradeFetcher:
         Fetch all positions for a user, handling pagination
         """
         all_positions = []
-        offset = 0
         limit = 500
+        cursor = None
         
         while True:
-            positions = self.fetch_positions(
+            positions, cursor = self.fetch_positions(
                 user_address=user_address,
                 limit=limit,
-                offset=offset
+                cursor=cursor
             )
             
-            if not positions:
-                break
-                
-            all_positions.extend(positions)
-            offset += len(positions)
-            
-            if len(positions) < limit:
+            if positions:
+                all_positions.extend(positions)
+            if not cursor:
                 break
                 
             time.sleep(0.1)
@@ -186,44 +204,33 @@ class PolymarketTradeFetcher:
     def fetch_closed_positions(self, 
                               user_address: str,
                               limit: int = 100,
-                              offset: int = 0,
-                              sort_by: str = 'REALIZEDPNL',
+                              cursor: Optional[str] = None,
+                              sort_by: str = 'REALIZED_PNL',
                               sort_direction: str = 'DESC',
-                              markets: Optional[List[str]] = None) -> List[Dict]:
+                              markets: Optional[List[str]] = None) -> Tuple[List[Dict], Optional[str]]:
         """
         Fetch closed positions for a user to get realized PnL data
         
         Args:
             user_address: Polygon wallet address
-            limit: Number of results per page (max 500)
-            offset: Number of results to skip
-            sort_by: Sort criteria (REALIZEDPNL, TITLE, PRICE, AVGPRICE)
+            limit: Number of results per page (local cap 500; v2 allows 1000)
+            cursor: Opaque cursor from the previous page
+            sort_by: Sort criteria (v1 REALIZEDPNL is REALIZED_PNL)
             sort_direction: Sort direction (ASC, DESC)
             markets: List of condition IDs to filter by
             
         Returns:
-            List of closed position dictionaries with realized PnL
+            Closed position rows and the next cursor
         """
-        params = {
-            'user': user_address.lower(),
-            'limit': min(limit, 500),  # API max is 500 for closed positions
-            'offset': offset,
-            'sortBy': sort_by,
-            'sortDirection': sort_direction
-        }
-        
-        # Add market filter if provided
-        if markets:
-            # Join multiple condition IDs with comma as per API docs
-            params['market'] = ','.join(markets)
-            
-        try:
-            response = self.session.get(f"{self.base_url}/closed-positions", params=params)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching closed positions: {e}")
-            return []
+        return self.fetch_positions(
+            user_address=user_address,
+            limit=limit,
+            cursor=cursor,
+            status='CLOSED',
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            markets=markets,
+        )
     
     def fetch_all_closed_positions(self, 
                                  user_address: str,
@@ -246,8 +253,8 @@ class PolymarketTradeFetcher:
             # If no specific markets, fetch all closed positions
             return self._fetch_all_closed_positions_paginated(user_address, max_positions)
         
-        # Batch markets to avoid URL length limits and API restrictions
-        batch_size = 25  # Conservative batch size for market parameter
+        # v2 accepts at most 20 condition ids per request (v1 batches were 25).
+        batch_size = 20
         market_batches = [markets[i:i + batch_size] for i in range(0, len(markets), batch_size)]
         
         print(f"Fetching closed positions in {len(market_batches)} batches of up to {batch_size} markets each")
@@ -275,7 +282,7 @@ class PolymarketTradeFetcher:
         seen_assets = set()
         unique_positions = []
         for pos in all_positions:
-            asset = pos.get('asset')
+            asset = pos.get('token_id')
             if asset and asset not in seen_assets:
                 seen_assets.add(asset)
                 unique_positions.append(pos)
@@ -290,8 +297,8 @@ class PolymarketTradeFetcher:
         Internal method to fetch closed positions with pagination
         """
         all_positions = []
-        offset = 0
         limit = 100  # Smaller batches for closed positions
+        cursor = None
         
         while True:
             if max_positions and len(all_positions) >= max_positions:
@@ -300,21 +307,17 @@ class PolymarketTradeFetcher:
             remaining = max_positions - len(all_positions) if max_positions else None
             current_limit = min(limit, remaining) if remaining else limit
             
-            positions = self.fetch_closed_positions(
+            positions, cursor = self.fetch_closed_positions(
                 user_address=user_address,
                 limit=current_limit,
-                offset=offset,
+                cursor=cursor,
                 markets=markets
             )
             
-            if not positions:
-                break
-                
-            all_positions.extend(positions)
-            offset += len(positions)
-            
-            # If we got fewer positions than requested, we've reached the end
-            if len(positions) < current_limit:
+            if positions:
+                all_positions.extend(positions)
+            # A short page is not the end; next_cursor is null on the last page.
+            if not cursor:
                 break
                 
             # Small delay to be respectful to the API
@@ -330,23 +333,23 @@ class PolymarketTradeFetcher:
         """
         Process trades and positions into the required CSV format
         """
-        # Create position lookup by asset
-        position_map = {pos['asset']: pos for pos in positions if 'asset' in pos}
+        # Create position lookup by token (v1 asset)
+        position_map = {pos['token_id']: pos for pos in positions if 'token_id' in pos}
         
-        # Create closed position lookup by asset (prioritize this for PnL data)
+        # Create closed position lookup by token (prioritize this for PnL data)
         closed_position_map = {}
         if closed_positions:
-            closed_position_map = {pos['asset']: pos for pos in closed_positions if 'asset' in pos}
+            closed_position_map = {pos['token_id']: pos for pos in closed_positions if 'token_id' in pos}
         
         csv_records = []
         
         for trade in trades:
             # Generate unique trade ID (using hash of key fields)
-            trade_id_source = f"{trade.get('transactionHash', '')}{trade.get('timestamp', '')}{trade.get('asset', '')}"
+            trade_id_source = f"{trade.get('transaction_hash', '')}{trade.get('timestamp', '')}{trade.get('token_id', '')}"
             trade_id = hashlib.md5(trade_id_source.encode()).hexdigest()[:12]
             
             # Get position data if available
-            asset = trade.get('asset', '')
+            asset = trade.get('token_id', '')
             position = position_map.get(asset, {})
             closed_position = closed_position_map.get(asset, {})
             
@@ -354,21 +357,21 @@ class PolymarketTradeFetcher:
             if closed_position:
                 # Use closed position data (most accurate for historical PnL)
                 is_settled = True  # Closed positions are always settled
-                pnl = closed_position.get('realizedPnl', 0)
-                avg_price = closed_position.get('avgPrice', 0)
-                total_bought = closed_position.get('totalBought', 0)
-                date_settled = closed_position.get('endDate', '')
+                pnl = closed_position.get('realized_pnl') or 0
+                avg_price = closed_position.get('avg_price') or 0
+                total_bought = closed_position.get('total_size') or 0
+                date_settled = closed_position.get('end_date', '')
                 market_title = closed_position.get('title', trade.get('title', ''))
             elif position:
                 # Use current position data
                 is_settled = position.get('redeemable', False)
                 if is_settled:
-                    pnl = position.get('realizedPnl', 0)
+                    pnl = position.get('realized_pnl') or 0
                 else:
-                    pnl = position.get('cashPnl', 0)
-                avg_price = position.get('avgPrice', 0)
-                total_bought = position.get('totalBought', 0)
-                date_settled = position.get('endDate', '')
+                    pnl = position.get('unrealized_pnl') or 0
+                avg_price = position.get('avg_price') or 0
+                total_bought = position.get('total_size') or 0
+                date_settled = position.get('end_date', '')
                 market_title = position.get('title', trade.get('title', ''))
             else:
                 # No position data - cannot calculate PnL
@@ -380,8 +383,8 @@ class PolymarketTradeFetcher:
                 market_title = trade.get('title', '')
             
             # Calculate basic trade metrics
-            size = float(trade.get('size', 0))
-            price = float(trade.get('price', 0))
+            size = float(trade.get('size') or 0)
+            price = float(trade.get('price') or 0)
             volume = size * price
             
             # Determine if trade was correct (for settled markets)
@@ -397,7 +400,7 @@ class PolymarketTradeFetcher:
             csv_record = {
                 'trade_id': trade_id,
                 'miner_id': miner_id,
-                'market_id': trade.get('slug', trade.get('conditionId', 'unknown')),
+                'market_id': trade.get('slug', trade.get('condition_id', 'unknown')),
                 'date_created': date_created,
                 'volume': round(volume, 2),
                 'pnl': round(pnl, 2),
@@ -409,7 +412,7 @@ class PolymarketTradeFetcher:
                 # Additional fields for analysis
                 'outcome': trade.get('outcome', ''),
                 'market_title': market_title,
-                'transaction_hash': trade.get('transactionHash', ''),
+                'transaction_hash': trade.get('transaction_hash', ''),
                 'avg_price': round(avg_price, 4),
                 'total_bought': round(total_bought, 2)
             }
@@ -571,7 +574,7 @@ def main():
     print(f"Fetched {len(trades)} trades")
     
     # Extract condition IDs from trades for closed positions query
-    condition_ids = [trade.get('conditionId') for trade in trades if trade.get('conditionId')]
+    condition_ids = [trade.get('condition_id') for trade in trades if trade.get('condition_id')]
     print(f"Found {len(condition_ids)} unique condition IDs from trades")
     
     # Fetch closed positions using condition IDs from trades

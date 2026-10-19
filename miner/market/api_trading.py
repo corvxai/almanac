@@ -80,14 +80,16 @@ MARKET_API_URL = "https://api.almanac.market/api"
 #MARKET_API_URL = "http://localhost:3001/api"
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
-# Polymarket data-api: redeemable positions (aligned with Almanac ClaimProceedsModal)
+# Polymarket data-api v2: redeemable positions (aligned with Almanac ClaimProceedsModal).
+# v1 sortBy=CASHPNL is UNREALIZED_PNL. The mixed query had no sort, so v1 defaulted
+# to TOKENS; v2 REDEEMABLE defaults to CURRENT_VALUE, so TOKENS is set explicitly.
 POLY_POSITIONS_WINNERS_URL = (
-    "https://data-api.polymarket.com/positions"
-    "?user={proxy_lc}&sizeThreshold=.1&redeemable=true&limit=100&offset=0&sortBy=CASHPNL"
+    "https://data-api.polymarket.com/v2/positions"
+    "?user={proxy_lc}&filter_amount=.1&status=REDEEMABLE&limit=100&sort_by=UNREALIZED_PNL"
 )
 POLY_POSITIONS_MIXED_URL = (
-    "https://data-api.polymarket.com/positions"
-    "?user={proxy_lc}&sizeThreshold=.1&redeemable=true&limit=50"
+    "https://data-api.polymarket.com/v2/positions"
+    "?user={proxy_lc}&filter_amount=.1&status=REDEEMABLE&limit=50&sort_by=TOKENS"
 )
 MAX_TOTAL_REDEMPTIONS = 20
 MAX_LOSING_POSITIONS_TO_CLOSE = 15
@@ -1416,7 +1418,7 @@ def cancel_order(order_id: str):
         return None
 
 def _redeemable_row_current_value(p: dict) -> float:
-    v = p.get("currentValue")
+    v = p.get("current_value")
     try:
         return float(v) if v is not None else 0.0
     except (TypeError, ValueError):
@@ -1428,14 +1430,14 @@ def _claim_plan_position_name(p: dict) -> str:
     t = (p.get("title") or p.get("question") or "").strip()
     if t:
         return _truncate_text(t, 52)
-    cid = str(p.get("conditionId") or "")
+    cid = str(p.get("condition_id") or "")
     return _truncate_text(cid, 18) if cid else "—"
 
 
 def _claim_plan_roi_percent_str(p: dict, bet: float, won: float) -> str:
-    """ROI for display; prefer API percentPnl, else derive from initial vs current."""
+    """ROI for display; prefer API percent_pnl, else derive from initial vs current."""
     pct = None
-    raw = p.get("percentPnl")
+    raw = p.get("percent_pnl")
     if raw is not None:
         try:
             pct = float(raw)
@@ -1449,15 +1451,16 @@ def _claim_plan_roi_percent_str(p: dict, bet: float, won: float) -> str:
 
 
 def _redeemable_row_is_valid(p: dict) -> bool:
-    return bool(p.get("conditionId")) and p.get("outcomeIndex") is not None
+    return bool(p.get("condition_id")) and p.get("outcome_index") is not None
 
 
 def _polymarket_get_positions_list(url: str) -> list:
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-        data = response.json()
-        return data if isinstance(data, list) else []
+        payload = response.json()
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        return rows if isinstance(rows, list) else []
     except Exception as exc:
         print(f"Polymarket data-api error: {exc}")
         return []
@@ -1465,11 +1468,11 @@ def _polymarket_get_positions_list(url: str) -> list:
 
 def aggregate_claimable_bets(bets: list, include_losing_positions: bool) -> list:
     """
-    Group by conditionId. Per group:
-      indexSets = sorted unique of (outcomeIndex + 1) for each bet in group
-      negativeRisk = any bet.negativeRisk
-      if negativeRisk: yesAmount/noAmount = floor(sum(size per outcome 0/1) * 1e6) as strings
-    If include_losing_positions is False: drop rows with currentValue <= VALUE_WINNER_MIN.
+    Group by condition_id. Per group:
+      indexSets = sorted unique of (outcome_index + 1) for each bet in group
+      negativeRisk = any bet.negative_risk
+      if negativeRisk: yesAmount/noAmount = floor(sum(current_size per outcome 0/1) * 1e6) as strings
+    If include_losing_positions is False: drop rows with current_value <= VALUE_WINNER_MIN.
     """
     filtered = []
     for bet in bets:
@@ -1481,24 +1484,24 @@ def aggregate_claimable_bets(bets: list, include_losing_positions: bool) -> list
 
     by_condition: dict[str, list] = {}
     for bet in filtered:
-        cid = bet["conditionId"]
+        cid = bet["condition_id"]
         by_condition.setdefault(cid, []).append(bet)
 
     redemptions = []
     for condition_id, group in by_condition.items():
-        index_sets = sorted({int(b["outcomeIndex"]) + 1 for b in group})
-        neg = any(b.get("negativeRisk") for b in group)
+        index_sets = sorted({int(b["outcome_index"]) + 1 for b in group})
+        neg = any(b.get("negative_risk") for b in group)
         item = {"conditionId": condition_id, "indexSets": index_sets, "negativeRisk": neg}
         if neg:
             yes_size = sum(
-                float(b.get("size") or 0)
+                float(b.get("current_size") or 0)
                 for b in group
-                if int(b.get("outcomeIndex") or 0) == 0
+                if int(b.get("outcome_index") or 0) == 0
             )
             no_size = sum(
-                float(b.get("size") or 0)
+                float(b.get("current_size") or 0)
                 for b in group
-                if int(b.get("outcomeIndex") or 0) == 1
+                if int(b.get("outcome_index") or 0) == 1
             )
             item["yesAmount"] = str(int(yes_size * 1_000_000))
             item["noAmount"] = str(int(no_size * 1_000_000))
@@ -1549,7 +1552,7 @@ def build_polymarket_claim_plan(proxy_lc: str) -> dict:
                 if not _redeemable_row_is_valid(p):
                     continue
                 try:
-                    sz = float(p.get("size") or 0)
+                    sz = float(p.get("current_size") or 0)
                 except (TypeError, ValueError):
                     continue
                 cv = _redeemable_row_current_value(p)
@@ -1840,8 +1843,8 @@ def claim_proceeds_menu():
         name = _claim_plan_position_name(p)
         try:
             bet = (
-                float(p["initialValue"])
-                if p.get("initialValue") is not None
+                float(p["entry_cost_usdc"])
+                if p.get("entry_cost_usdc") is not None
                 else 0.0
             )
         except (TypeError, ValueError):

@@ -65,7 +65,7 @@ The backend rejects mismatched codes (`INVALID_BUILDER_CODE` / `BUILDER_CODE_NOT
 
 ### 4. Claims route through the deposit batch
 
-`Claim Polymarket Proceeds` still does: data-api plan → `POST /v1/redeem` → execute returned calldata via the Polymarket relayer. What changed:
+`Claim Polymarket Proceeds` still does: Data API v2 plan → `POST /v1/redeem` → execute returned calldata via the Polymarket relayer. The plan is `GET /v2/positions?status=REDEEMABLE` for the session proxy: 100 rows sorted by unrealized PnL, then 50 sorted by tokens for losing cleanup. What changed:
 
 - **Deposit sessions** submit ONE `execute_deposit_wallet_batch` (single EOA signature over the whole batch). The backend routes deposit claims through Polymarket's **CtfCollateralAdapter**, which redeems + wraps + pays **pUSD in one call** — so `selectedCollateral` is pUSD and the old USDC.e auto-wrap correctly self-disables.
 - **Safe sessions** keep the byte-identical legacy Safe multicall path.
