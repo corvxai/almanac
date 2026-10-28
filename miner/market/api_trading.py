@@ -31,16 +31,20 @@ Switch between sets at runtime - sessions are automatically cleared when switchi
 Polygon JSON-RPC defaults to https://polygon.drpc.org (Polygon docs mainnet endpoint); set POLYGON_RPC_URL in api_trading.env to override.
 
 Requirements:
-- Python 3.10+
+- Python 3.11+ (polymarket-client 0.14.0)
 - Almanac account (setup at https://almanac.market)
 - EOA wallet private key for signing transactions
 - Optional: Polymarket API credentials (can be generated via this script)
+
+Orders are signed locally with polymarket-client (SecureClient.create,
+create_limit_order / create_market_order) and submitted to the Almanac API.
+Claims, deposits, and withdrawals still use py-builder-relayer-client.
 
 Python dependencies:
 - requests
 - dotenv
 - tabulate
-- py-clob-client-v2
+- polymarket-client
 - eth-account
 - bittensor
 - web3
@@ -55,8 +59,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
-from py_clob_client_v2 import ClobClient, OrderArgs, MarketOrderArgs, OrderType, PartialCreateOrderOptions
-from py_clob_client_v2.order_builder.constants import BUY, SELL
+from polymarket import ApiKeyCreds, SecureClient
+from polymarket.errors import RequestRejectedError
 from eth_account import Account
 from eth_account.messages import encode_defunct
 import time
@@ -76,7 +80,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE, POLY_BUILDER_CODE_SELL
 
-MARKET_API_URL = "https://api.almanac.market/api"
+#MARKET_API_URL = "https://api.almanac.market/api"
+MARKET_API_URL = "https://dev.almanac.market/api"
 #MARKET_API_URL = "http://localhost:3001/api"
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
@@ -4041,125 +4046,176 @@ def start_trading_flow():
         else:
             print("Invalid choice. Please enter a number from 1 to 7.\n")
 
-def initiate_trading_session():
+def _load_signing_account() -> tuple[str, str] | None:
     """
-    Initiate a trading session with the Almanac API.
-
-    {
-        "signature": "0x...",
-        "message": "Create Almanac trading session",  # human-readable action text
-        "walletAddress": "0x...",
-        "apiCredentials": {
-            "apiKey": "string",
-            "secret": "base64-string",
-            "passphrase": "string"
-        },
-        "userAgent": "optional string"
-    }
-
-    Returns:
-    {
-        'success': True,
-        'data': {
-            'sessionId': '...',
-            'walletAddress': '0x...',
-            'proxyWallet': '0x...',
-            'expiresAt': '2025-11-17T15:10:50.983Z'
-        },
-        'timestamp': '2025-11-16T15:10:50.983Z'
-    }
+    Return (0x private key, checksum EOA) after checking api_trading.env.
+    The checksum address is what the structured session message must name.
     """
     load_dotenv(dotenv_path=str(ENV_PATH))
-
-    # Load wallet address and private key
     wallet_address = _get_credential("EOA_WALLET_ADDRESS")
     if not wallet_address:
         print(f"EOA_WALLET_ADDRESS not found in {ENV_PATH}. Please set it and try again.")
-        return
-    
+        return None
     private_key = _get_credential("EOA_WALLET_PK")
     if not private_key:
         print(f"EOA_WALLET_PK not found in {ENV_PATH}. Please set it and try again.")
-        return
+        return None
     if not private_key.startswith("0x"):
         private_key = "0x" + private_key
-    
-    # Validate address derives cleanly (optional)
     try:
-        addr = Account.from_key(private_key).address.lower()
-        if addr != wallet_address.lower():
-            print(f"Private key does not match wallet address: {addr} != {wallet_address}")
-            return
+        account = Account.from_key(private_key)
     except Exception as exc:
         print(f"Invalid private key: {exc}")
-        return
+        return None
+    if account.address.lower() != wallet_address.lower():
+        print(f"Private key does not match wallet address: {account.address.lower()} != {wallet_address}")
+        return None
+    return private_key, account.address
 
-    # Prepare EIP-191 message (personal_sign). Include nonce/timestamp to prevent replay.
-    action = "Create Almanac trading session"
-    nonce = secrets.token_hex(16)
-    timestamp = int(time.time())
-    #message = f"{action}\nwallet:{wallet_address}\nchainId:{POLYGON_CHAIN_ID}\nnonce:{nonce}\ntimestamp:{timestamp}"
-    message = action
-    msg = encode_defunct(text=message)
-    signed = Account.from_key(private_key).sign_message(msg)
+
+def _session_message(action: str, eoa_address: str) -> str:
+    """
+    Five-line message verified by Almanac session login.
+
+    The wallet line is the EOA, not the trading wallet. A fresh nonce and
+    timestamp are required; the fixed one-line phrase is not sent.
+    """
+    return "\n".join([
+        action,
+        f"wallet:{eoa_address}",
+        f"chainId:{POLYGON_CHAIN_ID}",
+        f"nonce:{secrets.token_hex(16)}",
+        f"timestamp:{int(time.time())}",
+    ])
+
+
+def _personal_signature(private_key: str, message: str) -> str:
+    signed = Account.from_key(private_key).sign_message(encode_defunct(text=message))
     signature = signed.signature.hex() if hasattr(signed.signature, "hex") else signed.signature
     if not isinstance(signature, str):
         signature = str(signature)
     if not signature.startswith("0x"):
         signature = "0x" + signature
+    return signature
 
-    api_keys = {
-        "apiKey": _get_credential("POLYMARKET_API_KEY"),
-        "secret": _get_credential("POLYMARKET_API_SECRET"),
-        "passphrase": _get_credential("POLYMARKET_API_PASSPHRASE")
-    }
 
-    response = requests.post(f'{MARKET_API_URL}/v1/trading/sessions',
-        headers={'Content-Type': 'application/json'},
-        json={
-        'signature': signature,
-        'message': message,  # full message that was signed (contains action+nonce+timestamp)
-        'walletAddress': wallet_address,
-        'nonce': nonce,
-        'timestamp': timestamp,
-        'apiCredentials': api_keys
-    })
+def _stored_api_credentials() -> ApiKeyCreds | None:
+    key = _get_credential("POLYMARKET_API_KEY")
+    secret = _get_credential("POLYMARKET_API_SECRET")
+    passphrase = _get_credential("POLYMARKET_API_PASSPHRASE")
+    if key and secret and passphrase:
+        return ApiKeyCreds(key=key, secret=secret, passphrase=passphrase)
+    return None
+
+
+def _fetch_proxy_address(eoa_address: str) -> str | None:
+    """GET /wallet/proxy/:eoa → data.proxyAddress. Does not deploy a wallet."""
+    try:
+        response = requests.get(f"{MARKET_API_URL}/wallet/proxy/{eoa_address}", timeout=15)
+    except Exception as exc:
+        print(f"Failed to resolve trading wallet: {exc}")
+        return None
     if response.status_code != 200:
-        print(f"Failed to create trading session:")
-        print(json.dumps(response.json(), indent=2))
+        print("Failed to resolve trading wallet:")
+        try:
+            print(json.dumps(response.json(), indent=2))
+        except Exception:
+            print(response.text)
+        return None
+    data = (response.json() or {}).get("data") or {}
+    proxy = data.get("proxyAddress")
+    if not isinstance(proxy, str) or not proxy.startswith("0x") or proxy.lower() == "0x" + "0" * 40:
+        print("No trading wallet address returned for this EOA.")
+        return None
+    return proxy
+
+
+def _credentials_rejected(exc: BaseException) -> bool:
+    status = getattr(exc, "status", None)
+    if status == 401:
+        return True
+    text = str(exc).lower()
+    return "unauthorized" in text or "invalid api key" in text
+
+
+def initiate_trading_session():
+    """
+    Initiate a trading session with the Almanac API.
+
+    The signed message is five lines: action, wallet, chainId, nonce, timestamp.
+    Body fields are signature, message, walletAddress, and apiCredentials.
+    """
+    loaded = _load_signing_account()
+    if not loaded:
+        return None
+    private_key, eoa_address = loaded
+
+    credentials = _stored_api_credentials()
+    if credentials is None:
+        print("Polymarket API credentials are required to open a trading session.")
+        print("Generate them from menu option 2, add them to api_trading.env, and reload.")
+        return None
+
+    message = _session_message("Create Almanac trading session", eoa_address)
+    signature = _personal_signature(private_key, message)
+
+    response = requests.post(
+        f"{MARKET_API_URL}/v1/trading/sessions",
+        headers={"Content-Type": "application/json"},
+        json={
+            "signature": signature,
+            "message": message,
+            "walletAddress": eoa_address,
+            "apiCredentials": {
+                "apiKey": credentials.key,
+                "secret": credentials.secret,
+                "passphrase": credentials.passphrase,
+            },
+        },
+    )
+    if response.status_code != 200:
+        print("Failed to create trading session:")
+        try:
+            print(json.dumps(response.json(), indent=2))
+        except Exception:
+            print(response.text)
         return None
     return response.json()
 
 
-def _extract_signed_order_dict(signed_order) -> dict:
-    """
-    Normalize SDK signed-order objects to a plain dict for Almanac API payloads.
-    """
-    if isinstance(signed_order, dict):
-        data = dict(signed_order)
-    elif hasattr(signed_order, "model_dump"):
-        data = signed_order.model_dump()  # pydantic v2
-    elif hasattr(signed_order, "dict"):
-        data = signed_order.dict()  # pydantic v1
-    elif hasattr(signed_order, "__dict__"):
-        data = dict(signed_order.__dict__)
-    else:
-        raise TypeError("Unsupported signed order type from py-clob-client-v2")
+def _order_side(value) -> str:
+    if hasattr(value, "value"):
+        value = value.value
+    text = str(value).upper()
+    if text.endswith("BUY"):
+        return "BUY"
+    if text.endswith("SELL"):
+        return "SELL"
+    return text
 
-    # Convert enum-like values from SDK models into JSON-friendly primitives.
-    for key, value in list(data.items()):
-        if hasattr(value, "value"):
-            data[key] = value.value
 
-    # Our backend expects side as BUY/SELL in the wire payload.
-    side_val = data.get("side")
-    if isinstance(side_val, str):
-        upper = side_val.upper()
-        data["side"] = "BUY" if upper.endswith("BUY") else ("SELL" if upper.endswith("SELL") else upper)
-    elif isinstance(side_val, int):
-        data["side"] = "BUY" if side_val == 0 else "SELL"
-
-    return data
+def _almanac_signed_order(order) -> dict:
+    """Map polymarket-client's SignedOrder onto the unified body Almanac accepts."""
+    expiration = getattr(order, "expiration", None)
+    payload = {
+        "salt": str(order.salt),
+        "maker": str(order.maker),
+        "signer": str(order.signer),
+        "tokenId": str(order.token_id),
+        "makerAmount": str(order.maker_amount),
+        "takerAmount": str(order.taker_amount),
+        "side": _order_side(order.side),
+        "signatureType": int(order.signature_type),
+        "timestamp": str(order.timestamp),
+        "expiration": 0 if expiration is None else int(expiration),
+        "metadata": str(order.metadata),
+        "builder": str(order.builder),
+        "signature": str(order.signature),
+        "orderType": str(order.order_type),
+    }
+    if getattr(order, "post_only", False):
+        payload["postOnly"] = True
+    return payload
 
 
 def _resolve_builder_code(side_upper: str = "BUY") -> str:
@@ -4207,31 +4263,24 @@ def place_order(
     """
     Place an order for the selected market.
 
-    Expected headers (if supported by server):
-      - x-session-id
-      - x-wallet-address
+    Signs locally with polymarket-client and posts the unified signed order.
+    The SDK chooses signature type from the trading wallet. Tick size and
+    neg-risk are resolved by the SDK; `neg_risk` is kept so callers can still
+    pass the market flag shown in the order summary.
 
-    Request body (signed flow — must match Almanac + CLOB v2 signed order shape):
-      - marketId, orderType, userWalletAddress
-      - signedOrder: v2 order fields from py-clob-client-v2 (includes timestamp/metadata/builder)
-      All order fields and signature are on the SAME object (not signedOrder.orderPayload).
+    Headers: x-session-id, x-wallet-address.
+    Body: marketId, orderType (equal to signedOrder.orderType), signedOrder,
+    userWalletAddress.
     """
     global CURRENT_SESSION
     if not CURRENT_SESSION:
         print("No active trading session. Create a session first.")
         return
 
-    session_id = (
-        CURRENT_SESSION.get("data").get("sessionId")
-    )
-    wallet_address = (
-        CURRENT_SESSION.get("data").get("walletAddress")
-        or _get_credential("EOA_WALLET_ADDRESS")
-    )
-    proxy_address = (
-        CURRENT_SESSION.get("data").get("proxyWallet")
-        or _get_credential("EOA_PROXY_FUNDER")
-    )
+    session_data = CURRENT_SESSION.get("data") or {}
+    session_id = session_data.get("sessionId")
+    wallet_address = session_data.get("walletAddress") or _get_credential("EOA_WALLET_ADDRESS")
+    proxy_address = session_data.get("proxyWallet")
 
     headers = {"Content-Type": "application/json"}
     if session_id:
@@ -4245,175 +4294,130 @@ def place_order(
             print("Sell size is below 0.01 shares after aligning to the exchange grid. Nothing to sell.")
             return
 
-    private_key = _get_credential("EOA_WALLET_PK")
-    if not private_key:
-        print("EOA_WALLET_PK is required to sign CLOB v2 orders.")
+    loaded = _load_signing_account()
+    if not loaded:
         return
-    if not private_key.startswith("0x"):
-        private_key = "0x" + private_key
+    private_key, eoa_address = loaded
 
     if chosen_token_id is None:
         print("No token ID selected for this order. Please choose a market outcome first.")
         return
 
-    token_id = str(chosen_token_id)
-    if order_type in ("FOK", "FAK"):
-        adjusted_price = price + PRICE_BUFFER_ADJUSTMENT if side_upper == "BUY" else max(0.01, price - PRICE_BUFFER_ADJUSTMENT)
-    else:
-        adjusted_price = price
-
-    use_proxy_funder = bool(proxy_address and wallet_address and proxy_address.lower() != wallet_address.lower())
-    session_sig = _session_data().get("signatureType")
-    wallet_kind = _session_wallet_kind()
-    if use_proxy_funder and (wallet_kind == "deposit" or session_sig == 3):
-        # Deposit wallet (POLY_1271): the SDK sets maker = signer = funder, i.e.
-        # both are the deposit-wallet address; the EOA key still signs (ERC-1271).
-        signature_type_candidates = [3]
-    elif use_proxy_funder and session_sig in (1, 2):
-        signature_type_candidates = [int(session_sig)]
-    elif use_proxy_funder:
-        # Legacy backends without signatureType on the session: retry 1 → 2.
-        signature_type_candidates = [1, 2]
-    else:
-        signature_type_candidates = [None]
-    last_response = None
-    builder_code = _resolve_builder_code(side_upper)
-
-    for idx, sig_type in enumerate(signature_type_candidates):
-        signed_flow_payload = None
-        try:
-            client_kwargs = {
-                "host": POLYMARKET_CLOB_HOST,
-                "chain_id": POLYGON_CHAIN_ID,
-                "key": private_key,
-            }
-            if use_proxy_funder:
-                client_kwargs["funder"] = proxy_address
-                if sig_type is not None:
-                    client_kwargs["signature_type"] = sig_type
-
-            client = ClobClient(**client_kwargs)
-
-            tick_size = "0.01"
-            try:
-                dynamic_tick_size = client.get_tick_size(token_id)
-                if dynamic_tick_size:
-                    tick_size = str(dynamic_tick_size)
-            except Exception:
-                pass
-
-            try:
-                dynamic_neg_risk = client.get_neg_risk(token_id)
-                if isinstance(dynamic_neg_risk, bool):
-                    neg_risk = dynamic_neg_risk
-            except Exception:
-                pass
-
-            options = PartialCreateOrderOptions(tick_size=tick_size, neg_risk=bool(neg_risk))
-            if order_type in ("FOK", "FAK"):
-                # CLOB v2 market orders require BUY amount in USDC (2dp max) and enforce stricter precision.
-                market_amount = round(float(size) * float(adjusted_price), 2) if side_upper == "BUY" else round(float(size), 4)
-                market_order_args = MarketOrderArgs(
-                    token_id=token_id,
-                    amount=market_amount,
-                    side=BUY if side_upper == "BUY" else SELL,
-                    price=float(adjusted_price),
-                    order_type=OrderType.FOK if order_type == "FOK" else OrderType.FAK,
-                    builder_code=builder_code,
-                )
-                signed_order = client.create_market_order(order_args=market_order_args, options=options)
-            else:
-                order_args = OrderArgs(
-                    token_id=token_id,
-                    price=float(adjusted_price),
-                    size=float(size),
-                    side=BUY if side_upper == "BUY" else SELL,
-                    builder_code=builder_code,
-                )
-                signed_order = client.create_order(order_args=order_args, options=options)
-            order_fields_for_api = _extract_signed_order_dict(signed_order)
-
-            for key in ("salt", "tokenId", "makerAmount", "takerAmount", "expiration", "timestamp"):
-                if key in order_fields_for_api and order_fields_for_api[key] is not None:
-                    order_fields_for_api[key] = str(order_fields_for_api[key])
-            for key in ("metadata", "builder"):
-                if key in order_fields_for_api and isinstance(order_fields_for_api[key], bytes):
-                    order_fields_for_api[key] = "0x" + order_fields_for_api[key].hex()
-
-            signed_flow_payload = {
-                "marketId": market_id,
-                "signedOrder": order_fields_for_api,
-                "orderType": order_type,
-                "userWalletAddress": wallet_address,
-            }
-        except Exception:
-            signed_flow_payload = None
-            import traceback
-            traceback.print_exc()
-
-        if signed_flow_payload is None:
-            if idx == len(signature_type_candidates) - 1:
-                print("Failed to build signed order payload. Aborting without sending.")
-                return
-            continue
-
-        try:
-            resp = requests.post(
-                f"{MARKET_API_URL}/v1/trading/orders",
-                headers=headers,
-                json=signed_flow_payload,
-                timeout=30,
-            )
-            last_response = resp
-        except Exception as exc:
-            if idx == len(signature_type_candidates) - 1:
-                print(f"Order error: {exc}")
-                return
-            continue
-
-        if resp.status_code == 200:
-            print("Order placed:")
-            print(json.dumps(resp.json(), indent=2))
-            return
-
-        try:
-            body = resp.json() or {}
-        except Exception:
-            body = {}
-
-        if resp.status_code == 403 and str(body.get("error") or "").upper() == "MIGRATION_REQUIRED":
-            details = body.get("details") or {}
-            print("Order rejected: Safe-wallet trading has ended (MIGRATION_REQUIRED).")
-            print(f"  Cutoff: {details.get('cutoffDate') or 'see almanac.market'}")
-            print("  Migrate once in the web app at https://almanac.market, then use")
-            print("  'Refresh Trading Session'. Cancels, withdrawals, and claims still work.")
-            return
-
-        # Some backends still verify proxy orders using signatureType=2; retry once.
-        should_retry_invalid_sig = False
-        try:
-            details = body.get("details") if isinstance(body, dict) else {}
-            error_text = str((details or {}).get("error") or body.get("error") or "").lower()
-            should_retry_invalid_sig = "invalid signature" in error_text
-        except Exception:
-            should_retry_invalid_sig = False
-
-        if should_retry_invalid_sig and idx < len(signature_type_candidates) - 1:
-            continue
-
-        print("Failed to place order:")
-        try:
-            print(json.dumps(resp.json(), indent=2))
-        except Exception:
-            print(resp.text)
+    credentials = _stored_api_credentials()
+    if credentials is None:
+        print("Polymarket API credentials are required to sign orders.")
+        print("Generate them from menu option 2, save them in api_trading.env, and reload.")
         return
 
-    if last_response is not None:
-        print("Failed to place order:")
-        try:
-            print(json.dumps(last_response.json(), indent=2))
-        except Exception:
-            print(last_response.text)
+    trading_wallet = proxy_address or _fetch_proxy_address(eoa_address)
+    if not trading_wallet:
+        fallback = _get_credential("EOA_PROXY_FUNDER")
+        if fallback:
+            print(
+                "Using EOA_PROXY_FUNDER as the trading wallet "
+                "(session proxy and proxy lookup were unavailable)."
+            )
+            trading_wallet = fallback
+        else:
+            print("Could not resolve the trading wallet. Refresh the session or check GET /wallet/proxy.")
+            return
+
+    token_id = str(chosen_token_id)
+    side = "BUY" if side_upper == "BUY" else "SELL"
+    builder_code = _resolve_builder_code(side)
+
+    try:
+        with SecureClient.create(
+            private_key=private_key,
+            wallet=trading_wallet,
+            credentials=credentials,
+        ) as client:
+            if order_type in ("FOK", "FAK"):
+                if side == "BUY":
+                    max_price = price + PRICE_BUFFER_ADJUSTMENT
+                    signed_order = client.create_market_order(
+                        asset_id=token_id,
+                        side=side,
+                        amount=round(float(size) * float(max_price), 2),
+                        max_price=max_price,
+                        order_type=order_type,
+                        builder_code=builder_code,
+                    )
+                else:
+                    signed_order = client.create_market_order(
+                        asset_id=token_id,
+                        side=side,
+                        shares=float(size),
+                        min_price=max(0.01, price - PRICE_BUFFER_ADJUSTMENT),
+                        order_type=order_type,
+                        builder_code=builder_code,
+                    )
+            else:
+                signed_order = client.create_limit_order(
+                    asset_id=token_id,
+                    price=float(price),
+                    size=float(size),
+                    side=side,
+                    builder_code=builder_code,
+                )
+    except RequestRejectedError as exc:
+        if _credentials_rejected(exc):
+            print("Stored Polymarket credentials were rejected. Regenerate them from menu option 2.")
+        else:
+            print(f"Failed to sign order: {exc}")
+        return
+    except Exception:
+        print("Failed to sign order:")
+        import traceback
+        traceback.print_exc()
+        return
+
+    signed_type = str(signed_order.order_type)
+    if signed_type != order_type:
+        print(f"Signed order type {signed_type} does not match {order_type}. Not submitting.")
+        return
+
+    signed_flow_payload = {
+        "marketId": market_id,
+        "signedOrder": _almanac_signed_order(signed_order),
+        "orderType": signed_type,
+        "userWalletAddress": wallet_address,
+    }
+
+    try:
+        resp = requests.post(
+            f"{MARKET_API_URL}/v1/trading/orders",
+            headers=headers,
+            json=signed_flow_payload,
+            timeout=30,
+        )
+    except Exception as exc:
+        print(f"Order error: {exc}")
+        return
+
+    if resp.status_code == 200:
+        print("Order placed:")
+        print(json.dumps(resp.json(), indent=2))
+        return
+
+    try:
+        body = resp.json() or {}
+    except Exception:
+        body = {}
+
+    if resp.status_code == 403 and str(body.get("error") or "").upper() == "MIGRATION_REQUIRED":
+        details = body.get("details") or {}
+        print("Order rejected: Safe-wallet trading has ended (MIGRATION_REQUIRED).")
+        print(f"  Cutoff: {details.get('cutoffDate') or 'see almanac.market'}")
+        print("  Migrate once in the web app at https://almanac.market, then use")
+        print("  'Refresh Trading Session'. Cancels, withdrawals, and claims still work.")
+        return
+
+    print("Failed to place order:")
+    try:
+        print(json.dumps(resp.json(), indent=2))
+    except Exception:
+        print(resp.text)
 
 def search_markets():
     """
@@ -4613,9 +4617,9 @@ def _display_credentials(credentials) -> None:
     print("\nYour Polymarket API credentials:")
     # Convenient copy-paste .env format
     print("Copy as .env lines:")
-    print(f"POLYMARKET_API_KEY={credentials.api_key}")
-    print(f"POLYMARKET_API_SECRET={credentials.api_secret}")
-    print(f"POLYMARKET_API_PASSPHRASE={credentials.api_passphrase}")
+    print(f"POLYMARKET_API_KEY={credentials.key}")
+    print(f"POLYMARKET_API_SECRET={credentials.secret}")
+    print(f"POLYMARKET_API_PASSPHRASE={credentials.passphrase}")
     print("")
 
 def initiate_wallet_session():
@@ -4633,40 +4637,13 @@ def initiate_wallet_session():
         'timestamp': '...'
     }
     """
-    load_dotenv(dotenv_path=str(ENV_PATH))
+    loaded = _load_signing_account()
+    if not loaded:
+        return None
+    private_key, eoa_address = loaded
 
-    # Load wallet address and private key
-    wallet_address = _get_credential("EOA_WALLET_ADDRESS")
-    if not wallet_address:
-        print(f"EOA_WALLET_ADDRESS not found in {ENV_PATH}. Please set it and try again.")
-        return None
-    
-    private_key = _get_credential("EOA_WALLET_PK")
-    if not private_key:
-        print(f"EOA_WALLET_PK not found in {ENV_PATH}. Please set it and try again.")
-        return None
-    if not private_key.startswith("0x"):
-        private_key = "0x" + private_key
-    
-    # Validate address derives cleanly (optional)
-    try:
-        addr = Account.from_key(private_key).address.lower()
-        if addr != wallet_address.lower():
-            print(f"Private key does not match wallet address: {addr} != {wallet_address}")
-            return None
-    except Exception as exc:
-        print(f"Invalid private key: {exc}")
-        return None
-
-    # Prepare EIP-191 message (personal_sign)
-    message = "Create Almanac wallet session"
-    msg = encode_defunct(text=message)
-    signed = Account.from_key(private_key).sign_message(msg)
-    signature = signed.signature.hex() if hasattr(signed.signature, "hex") else signed.signature
-    if not isinstance(signature, str):
-        signature = str(signature)
-    if not signature.startswith("0x"):
-        signature = "0x" + signature
+    message = _session_message("Create Almanac wallet session", eoa_address)
+    signature = _personal_signature(private_key, message)
 
     response = requests.post(
         f'{MARKET_API_URL}/wallet/session',
@@ -4674,7 +4651,7 @@ def initiate_wallet_session():
         json={
             'signature': signature,
             'message': message,
-            'walletAddress': wallet_address,
+            'walletAddress': eoa_address,
             'userAgent': 'Python/1.0'
         }
     )
@@ -4971,29 +4948,27 @@ def link_bittensor_uid():
 
 def generate_polymarket_credentials():
     """
-    Generate Polymarket CLOB API credentials using py-clob-client with EOA_WALLET_PK from api_trading.env.
+    Derive Polymarket CLOB API credentials with polymarket-client.
+
+    SecureClient.create is given the trading wallet explicitly. Omitting it
+    would deploy a deposit wallet.
     """
     global CREDENTIAL_SETS, SELECTED_CREDENTIAL_SET, CURRENT_SESSION, SELECTED_MARKET
     
     print("\nGenerating Polymarket API credentials...")
-    load_dotenv(dotenv_path=str(ENV_PATH))
-    private_key = _get_credential("EOA_WALLET_PK")
-    if not private_key:
-        print(f"EOA_WALLET_PK not found in {ENV_PATH}. Please set it and try again.")
+    loaded = _load_signing_account()
+    if not loaded:
         return
-
-    # Validate address derives cleanly (optional)
-    try:
-        addr = Account.from_key(private_key).address
-        print(f"Using wallet: {addr}")
-    except Exception as exc:
-        print(f"Invalid private key: {exc}")
+    private_key, eoa_address = loaded
+    proxy = _fetch_proxy_address(eoa_address)
+    if not proxy:
         return
+    print(f"Using wallet: {eoa_address}")
+    print(f"Trading wallet: {proxy}")
 
-    # Credential generation is L1 auth by the EOA key alone; no funder needed.
-    client = ClobClient(host=POLYMARKET_CLOB_HOST, key=private_key, chain_id=POLYGON_CHAIN_ID)
     try:
-        credentials = client.create_or_derive_api_key()
+        with SecureClient.create(private_key=private_key, wallet=proxy) as client:
+            credentials = client.credentials
     except Exception as exc:
         print(f"Failed to create Polymarket API credentials: {exc}")
         return

@@ -79,10 +79,10 @@ The backend rejects mismatched codes (`INVALID_BUILDER_CODE` / `BUILDER_CODE_NOT
 ## Requirements
 
 ```bash
-pip install -r requirements.txt   # adds: web3, py-builder-relayer-client, eth-account
+pip install -r requirements.txt   # adds: web3, py-builder-relayer-client, eth-account, polymarket-client
 ```
 
-`requirements.txt` now pins the two feature-critical minimums: `py_clob_client_v2>=1.0.1` (POLY_1271 support) and `py-builder-relayer-client>=0.0.2` (deposit-wallet batch + Polygon deposit contract config).
+The API trading client needs Python 3.11+. `requirements.txt` pins `polymarket-client==0.14.0` (order signing) and `py-builder-relayer-client>=0.0.2` (deposit-wallet batch + Polygon deposit contract config).
 
 `EOA_PROXY_FUNDER` in `api_trading.env` is now fully optional — credential-set detection and Polymarket credential generation no longer require it, and the session's server-derived wallet is always authoritative.
 
@@ -149,13 +149,20 @@ assert data["walletKind"] == "deposit"  # else: migrate on the web first
 cfg = requests.get(f"{API}/v1/trading/config").json()["data"]
 buy_code, sell_code = cfg["builderCodes"]["buy"], cfg["builderCodes"]["sell"]
 
-# 3) Orders — py_clob_client_v2 does the maker/signer swap for you
-from py_clob_client_v2 import ClobClient, OrderArgs
-client = ClobClient(host="https://clob.polymarket.com", chain_id=137,
-                    key=EOA_PRIVATE_KEY, funder=funder, signature_type=3)
-order = client.create_order(OrderArgs(token_id=token_id, price=0.55, size=10,
-                                      side="BUY", builder_code=buy_code), options)
+# 3) Orders — polymarket-client signs. Pass wallet=; do not pass signature_type.
+#    Do not call place_limit_order: that posts straight to the CLOB.
+from polymarket import ApiKeyCreds, SecureClient
+
+with SecureClient.create(
+    private_key=EOA_PRIVATE_KEY,
+    wallet=funder,
+    credentials=ApiKeyCreds(key=api_key, secret=secret, passphrase=passphrase),
+) as client:
+    order = client.create_limit_order(
+        asset_id=token_id, price=0.55, size=10, side="BUY", builder_code=buy_code,
+    )
 # → maker = signer = funder (deposit address), signatureType = 3, EOA-signed
+# POST /v1/trading/orders with orderType == order.order_type beside signedOrder.
 ```
 
 ## Files changed on this branch
@@ -164,6 +171,6 @@ order = client.create_order(OrderArgs(token_id=token_id, price=0.55, size=10,
 |---|---|
 | `miner/market/api_trading.py` | session wallet-kind helpers + migration warnings; runtime `/v1/trading/config` fetch (60s cache); side-aware builder codes; sig-type 3 order path; `MIGRATION_REQUIRED` handling; `_execute_relay_batch` (Safe multicall vs deposit batch, delegatecall guard); claim/withdraw/auto-wrap routed through it; combined single-batch auto-wrap; kind-aware menu labels; `EOA_PROXY_FUNDER` made optional (credential sets + credential generation) |
 | `miner/market/api_trading.env.example` | `EOA_PROXY_FUNDER` documented as offline fallback (deposit address after migration) |
-| `requirements.txt` | pin `py_clob_client_v2>=1.0.1`, `py-builder-relayer-client>=0.0.2` |
+| `requirements.txt` | pin `polymarket-client==0.14.0` (Python 3.11+), `py-builder-relayer-client>=0.0.2` |
 | `miner/README.md` | cutover note + pointer to this document |
 | `miner/market/DEPOSIT_WALLETS.md` | this document |
