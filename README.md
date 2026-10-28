@@ -265,7 +265,7 @@ No long-running miner process is required for dApp trading after metadata regist
 
 #### 5. Trade via API (optional)
 
-For programmatic / automated trading:
+For programmatic / automated trading. This client needs **Python 3.11+** (`polymarket-client` 0.14.0).
 
 1. Complete steps 1–3 above
 2. Copy the env template and fill credentials:
@@ -291,7 +291,7 @@ Multiple wallets are supported with prefixes (`WALLET1_…`, `WALLET2_…`, etc.
 python3 scripts/run_api_trading.py
 ```
 
-The client can generate Polymarket API credentials, open Almanac trading sessions, search markets, place signed CLOB orders, and submit proxy-signed EIP-712 orders.
+The client signs orders locally with `polymarket-client` (`SecureClient.create`, `create_limit_order` / `create_market_order`) and posts the unified signed order to the Almanac API. It can generate Polymarket API credentials, open Almanac trading sessions, and search markets. Claims, deposits, and withdrawals still use the Polymarket relayer client.
 
 Code lives under `miner/market/` (`miner.py`, `api_trading.py`).
 

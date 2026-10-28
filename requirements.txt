@@ -19,8 +19,11 @@ scipy
 pandas
 tabulate
 requests
-py_clob_client_v2>=1.0.1
+polymarket-client==0.14.0
 eth-account
 web3
 py-builder-relayer-client>=0.0.2
+# Relayer imports this, but neither 0.0.2 nor 0.0.3 declares it.
+# It used to arrive as a dependency of py-clob-client-v2.
+poly_eip712_structs>=0.0.1
 psycopg2-binary>=2.9,<3
