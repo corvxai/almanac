@@ -71,7 +71,7 @@ The validator's high-level, continuously looping execution:
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.11+ (`polymarket-client` in `requirements.txt` requires it)
 - `pip`
 - Docker Engine + Docker Compose plugin
 ```bash
@@ -186,7 +186,7 @@ There are **two independent miner tracks**. Pick one (you can do both with the s
 
 Both tracks need:
 
-1. **Python 3.10+** and repo deps:
+1. **Python 3.11+** and repo deps:
 
 ```bash
 git clone https://github.com/corvxai/almanac.git
@@ -294,6 +294,8 @@ python3 scripts/run_api_trading.py
 The client signs orders locally with `polymarket-client` (`SecureClient.create`, `create_limit_order` / `create_market_order`) and posts the unified signed order to the Almanac API. It can generate Polymarket API credentials, open Almanac trading sessions, and search markets. Claims, deposits, and withdrawals still use the Polymarket relayer client.
 
 Code lives under `miner/market/` (`miner.py`, `api_trading.py`).
+
+Writing your own client in another language (Go, Rust, …)? [`miner/market/ORDER_PAYLOADS.md`](miner/market/ORDER_PAYLOADS.md) documents the order struct, both signature schemes (Safe and deposit wallet), the request body, and byte-exact test vectors — no Python SDK required.
 
 ---
 

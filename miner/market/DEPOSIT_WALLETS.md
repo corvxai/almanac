@@ -133,7 +133,7 @@ Claim succeeded (relayer confirmed on-chain).
 
 ## For bot authors using the API directly
 
-The same rules apply outside this CLI — the full contract (order-struct diff, error codes, checklist) is in the Almanac docs: **Guide → Migrating from Safe Wallets to Deposit Wallets**. Short version:
+The same rules apply outside this CLI — the full contract (order-struct diff, error codes, checklist) is in the Almanac docs: **Guide → Migrating from Safe Wallets to Deposit Wallets**. Not using Python? [`ORDER_PAYLOADS.md`](ORDER_PAYLOADS.md) specifies the struct, signing, and test vectors for any language. Short version with the Python SDK:
 
 ```python
 import requests
@@ -165,11 +165,17 @@ with SecureClient.create(
 # POST /v1/trading/orders with orderType == order.order_type beside signedOrder.
 ```
 
+Notes from the live backend contract:
+
+- `SecureClient.create(wallet=…)` is not a pure signer: it probes the stored credentials on the CLOB and asks the relayer whether the wallet is deployed; an undeployed deposit wallet makes it try to deploy (needs a builder `api_key`). Reuse one client per wallet, and derive credentials with `wallet=<EOA>` so no relayer call is made.
+- Market-order caps (`max_price` / `min_price`) are validated against the tick grid with `Decimal(str(value))`; compute them in `Decimal`, not float (`0.57 + 0.01` is off-grid).
+- `POST /v1/trading/orders` may answer `503 SUBMIT_TIMEOUT` / `503 SUBMIT_UPSTREAM_ERROR` with an `orderHash`: the order may have been accepted. Poll `GET /v1/trading/orders/:hash` (same session headers) until `live` / `matched` / `cancelled` before resubmitting. `503 ORDER_NOT_SUBMITTED` and `400 ORDER_UNMATCHED` mean nothing was placed and a resubmit is safe.
+
 ## Files changed on this branch
 
 | File | Change |
 |---|---|
-| `miner/market/api_trading.py` | session wallet-kind helpers + migration warnings; runtime `/v1/trading/config` fetch (60s cache); side-aware builder codes; sig-type 3 order path; `MIGRATION_REQUIRED` handling; `_execute_relay_batch` (Safe multicall vs deposit batch, delegatecall guard); claim/withdraw/auto-wrap routed through it; combined single-batch auto-wrap; kind-aware menu labels; `EOA_PROXY_FUNDER` made optional (credential sets + credential generation) |
+| `miner/market/api_trading.py` | session wallet-kind helpers + migration warnings; runtime `/v1/trading/config` fetch (60s cache); side-aware builder codes; sig-type 3 order path; `MIGRATION_REQUIRED` handling; `_execute_relay_batch` (Safe multicall vs deposit batch, delegatecall guard); claim/withdraw/auto-wrap routed through it; combined single-batch auto-wrap; kind-aware menu labels; `EOA_PROXY_FUNDER` made optional (credential sets + credential generation); cached `SecureClient` per wallet with stale-credential detection; `Decimal` tick-safe market-order caps; outcome-unknown handling (`SUBMIT_TIMEOUT` / `SUBMIT_UPSTREAM_ERROR` → reconcile on `GET /orders/:hash`; `ORDER_UNMATCHED` / `ORDER_NOT_SUBMITTED` → safe to resubmit) |
 | `miner/market/api_trading.env.example` | `EOA_PROXY_FUNDER` documented as offline fallback (deposit address after migration) |
 | `requirements.txt` | pin `polymarket-client==0.14.0` (Python 3.11+), `py-builder-relayer-client>=0.0.2` |
 | `miner/README.md` | cutover note + pointer to this document |

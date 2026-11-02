@@ -8,7 +8,7 @@ with `miner/cli.py`.
 
 ### 1. Install Forecasting deps
 
-From the repo root (Python 3.10+):
+From the repo root (Python 3.11+; `polymarket-client` requires it):
 
 ```bash
 pip install -r requirements.txt

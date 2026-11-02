@@ -60,7 +60,13 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from polymarket import ApiKeyCreds, SecureClient
-from polymarket.errors import RequestRejectedError
+from polymarket.errors import (
+    InsufficientLiquidityError,
+    RequestRejectedError,
+    SigningError,
+    UserInputError,
+)
+from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP
 from eth_account import Account
 from eth_account.messages import encode_defunct
 import time
@@ -84,6 +90,8 @@ from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, 
 MARKET_API_URL = "https://dev.almanac.market/api"
 #MARKET_API_URL = "http://localhost:3001/api"
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
+# POST /prices rejects more than 500 book entries. Each token is sent twice (BUY and SELL).
+CLOB_PRICES_TOKEN_BATCH = 250
 POLYGON_CHAIN_ID = 137
 # Polymarket data-api v2: redeemable positions (aligned with Almanac ClaimProceedsModal).
 # v1 sortBy=CASHPNL is UNREALIZED_PNL. The mixed query had no sort, so v1 defaulted
@@ -763,45 +771,63 @@ def _display_markets_for_event(event: dict) -> list:
 def fetch_clob_prices(token_ids: list) -> dict | None:
     """
     Fetch latest prices from the CLOB API for given token IDs.
-    
+
+    Large events (player props, spreads, totals) can have hundreds of tokens.
+    Requests are split into batches of CLOB_PRICES_TOKEN_BATCH so a single
+    payload stays within the CLOB 500-entry limit.
+
     Args:
         token_ids: List of token ID strings
-        
+
     Returns:
         Dictionary mapping token IDs to price data:
         {
             "token_id_1": {"BUY": "0.45", "SELL": "0.44"},
             "token_id_2": {"BUY": "0.52", "SELL": "0.51"}
         }
-        Returns None if the request fails.
+        Returns None if every batch fails. Partial results are returned when
+        some batches succeed.
     """
     if not token_ids:
         return None
-    
+
+    merged: dict = {}
     try:
-        # Build BookParams array with both BUY and SELL side for each token
-        book_params = []
-        for token_id in token_ids:
-            book_params.append({"token_id": token_id, "side": "BUY"})
-            book_params.append({"token_id": token_id, "side": "SELL"})
-        
-        # Make POST request to CLOB API
-        response = requests.post(
-            f"{POLYMARKET_CLOB_HOST}/prices",
-            json=book_params,
-            headers={"Content-Type": "application/json"},
-            timeout=10
-        )
-        
-        if response.status_code != 200:
-            print(f"Warning: Failed to fetch CLOB prices (status {response.status_code})")
-            return None
-        
-        prices_data = response.json()
-        return prices_data
+        for start in range(0, len(token_ids), CLOB_PRICES_TOKEN_BATCH):
+            batch = token_ids[start:start + CLOB_PRICES_TOKEN_BATCH]
+            book_params = []
+            for token_id in batch:
+                book_params.append({"token_id": token_id, "side": "BUY"})
+                book_params.append({"token_id": token_id, "side": "SELL"})
+
+            response = requests.post(
+                f"{POLYMARKET_CLOB_HOST}/prices",
+                json=book_params,
+                headers={"Content-Type": "application/json"},
+                timeout=10
+            )
+
+            if response.status_code != 200:
+                detail = ""
+                try:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        detail = body.get("error") or ""
+                except Exception:
+                    detail = ""
+                if not detail:
+                    detail = (response.text or "").strip()
+                suffix = f": {detail}" if detail else ""
+                print(f"Warning: Failed to fetch CLOB prices (status {response.status_code}{suffix})")
+                continue
+
+            prices_data = response.json()
+            if isinstance(prices_data, dict):
+                merged.update(prices_data)
     except Exception as exc:
         print(f"Warning: Error fetching CLOB prices: {exc}")
-        return None
+
+    return merged or None
 
 def _update_all_markets_prices_from_clob(markets: list) -> list:
     """
@@ -1154,12 +1180,9 @@ def _place_order_now(market: dict, chosen_outcome_name: str | None = None, chose
     # Apply the same price adjustment logic that place_order() uses. Only for Market Orders (FOK, FAK).
     # This ensures the order summary shows the actual values that will be sent to the API
     if order_type in ("FOK", "FAK"):
-        if side_upper == "BUY":
-            adjusted_price = price + PRICE_BUFFER_ADJUSTMENT
-            price_note = f"(+${PRICE_BUFFER_ADJUSTMENT} buffer for {side_upper} orders)"
-        else:  # SELL
-            adjusted_price = max(0.01, price - PRICE_BUFFER_ADJUSTMENT)
-            price_note = f"(-${PRICE_BUFFER_ADJUSTMENT} buffer for {side_upper} orders)"
+        adjusted_price = float(_buffered_market_price(price, side_upper))
+        sign = "+" if side_upper == "BUY" else "-"
+        price_note = f"({sign}${PRICE_BUFFER_ADJUSTMENT} buffer for {side_upper} orders)"
     else:
         adjusted_price = price
         price_note = ""
@@ -4108,8 +4131,11 @@ def _stored_api_credentials() -> ApiKeyCreds | None:
     return None
 
 
-def _fetch_proxy_address(eoa_address: str) -> str | None:
-    """GET /wallet/proxy/:eoa → data.proxyAddress. Does not deploy a wallet."""
+def _fetch_proxy_wallet(eoa_address: str) -> dict | None:
+    """
+    GET /wallet/proxy/:eoa → {"address", "walletKind", "deployed", "needsDeploy"}.
+    Live resolution on the backend; never deploys anything.
+    """
     try:
         response = requests.get(f"{MARKET_API_URL}/wallet/proxy/{eoa_address}", timeout=15)
     except Exception as exc:
@@ -4127,7 +4153,12 @@ def _fetch_proxy_address(eoa_address: str) -> str | None:
     if not isinstance(proxy, str) or not proxy.startswith("0x") or proxy.lower() == "0x" + "0" * 40:
         print("No trading wallet address returned for this EOA.")
         return None
-    return proxy
+    return {
+        "address": proxy,
+        "walletKind": data.get("walletKind"),
+        "deployed": bool(data.get("deployed", data.get("hasProxy", False))),
+        "needsDeploy": bool(data.get("needsDeploy", False)),
+    }
 
 
 def _credentials_rejected(exc: BaseException) -> bool:
@@ -4136,6 +4167,81 @@ def _credentials_rejected(exc: BaseException) -> bool:
         return True
     text = str(exc).lower()
     return "unauthorized" in text or "invalid api key" in text
+
+
+# One SecureClient per (credential set, EOA, trading wallet, API key). Building
+# a client costs a CLOB credential probe, a relayer /deployed call, and the
+# market-metadata cache is per instance, so a fresh client per order is slow
+# and rate-limit hungry. The key changes whenever the operator switches sets
+# or rotates credentials, which drops the old client.
+_SIGNING_CLIENT_CACHE: dict = {"key": None, "client": None}
+
+
+def _drop_signing_client() -> None:
+    client = _SIGNING_CLIENT_CACHE.get("client")
+    _SIGNING_CLIENT_CACHE["key"] = None
+    _SIGNING_CLIENT_CACHE["client"] = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _signing_client(private_key: str, eoa_address: str, trading_wallet: str, credentials: ApiKeyCreds):
+    """
+    Cached SecureClient bound to the session's trading wallet.
+
+    Returns None (after printing why) when the client cannot be built or when
+    the SDK silently re-derived credentials because the stored triple is no
+    longer active on the CLOB. In that case the Almanac session still carries
+    the stored triple, so every order would be rejected upstream; the operator
+    must update api_trading.env and refresh the session instead.
+    """
+    cache_key = (SELECTED_CREDENTIAL_SET, eoa_address.lower(), trading_wallet.lower(), credentials.key)
+    if _SIGNING_CLIENT_CACHE["key"] == cache_key and _SIGNING_CLIENT_CACHE["client"] is not None:
+        return _SIGNING_CLIENT_CACHE["client"]
+    _drop_signing_client()
+
+    try:
+        client = SecureClient.create(
+            private_key=private_key,
+            wallet=trading_wallet,
+            credentials=credentials,
+        )
+    except UserInputError as exc:
+        # The SDK checks the wallet with the relayer and, for an undeployed
+        # deposit wallet, tries to deploy it (which needs a builder api_key we
+        # do not have). Either way the fix is on the web app, not here.
+        print(f"Trading wallet {trading_wallet} is not usable for signing: {exc}")
+        print("  If the wallet is new, finish setup (deploy + approvals) at https://almanac.market,")
+        print("  then use 'Refresh Trading Session'.")
+        return None
+    except RequestRejectedError as exc:
+        if _credentials_rejected(exc):
+            print("Stored Polymarket credentials were rejected. Regenerate them from menu option 2.")
+        else:
+            print(f"Polymarket rejected the signing client setup: {exc}")
+        return None
+    except Exception as exc:
+        print(f"Failed to set up the signing client: {exc}")
+        return None
+
+    if client.credentials.key != credentials.key:
+        print("Stored Polymarket API credentials are no longer active on the CLOB; the SDK derived a new key.")
+        print("  The Almanac session still uses the stored triple, so orders would be rejected.")
+        print("  Update POLYMARKET_API_KEY/SECRET/PASSPHRASE in api_trading.env with:")
+        _display_credentials(client.credentials)
+        print("  then reload the environment and 'Refresh Trading Session'.")
+        try:
+            client.close()
+        except Exception:
+            pass
+        return None
+
+    _SIGNING_CLIENT_CACHE["key"] = cache_key
+    _SIGNING_CLIENT_CACHE["client"] = client
+    return client
 
 
 def initiate_trading_session():
@@ -4239,6 +4345,27 @@ def _resolve_builder_code(side_upper: str = "BUY") -> str:
     return ZERO_BYTES32
 
 
+def _buffered_market_price(price: float, side_upper: str) -> Decimal:
+    """
+    Price cap for a FOK/FAK market order: BUY pays up to price + buffer, SELL
+    accepts down to price - buffer (floored at 0.01).
+
+    polymarket-client validates max_price / min_price against the market's tick
+    grid using Decimal(str(value)), so float arithmetic such as 0.57 + 0.01 =
+    0.5800000000000001 is rejected as off-grid. Do the sum in Decimal and keep
+    the operand with the most decimals (never fewer than two).
+    """
+    p = Decimal(str(price))
+    buf = Decimal(str(PRICE_BUFFER_ADJUSTMENT))
+    places = max(2, -p.as_tuple().exponent, -buf.as_tuple().exponent)
+    quantum = Decimal(1).scaleb(-places)
+    if side_upper == "BUY":
+        adjusted = p + buf
+    else:
+        adjusted = max(Decimal("0.01"), p - buf)
+    return adjusted.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
 def _normalize_sell_size_for_clob(size: float) -> float:
     """
     Polymarket-style orders encode sell `makerAmount` from round(size, 2) * 1e6.
@@ -4309,7 +4436,15 @@ def place_order(
         print("Generate them from menu option 2, save them in api_trading.env, and reload.")
         return
 
-    trading_wallet = proxy_address or _fetch_proxy_address(eoa_address)
+    trading_wallet = proxy_address
+    if not trading_wallet:
+        resolved = _fetch_proxy_wallet(eoa_address)
+        if resolved:
+            if resolved["needsDeploy"] or not resolved["deployed"]:
+                print(f"Trading wallet {resolved['address']} is not deployed yet.")
+                print("  Finish wallet setup at https://almanac.market, then use 'Refresh Trading Session'.")
+                return
+            trading_wallet = resolved["address"]
     if not trading_wallet:
         fallback = _get_credential("EOA_PROXY_FUNDER")
         if fallback:
@@ -4326,47 +4461,61 @@ def place_order(
     side = "BUY" if side_upper == "BUY" else "SELL"
     builder_code = _resolve_builder_code(side)
 
+    client = _signing_client(private_key, eoa_address, trading_wallet, credentials)
+    if client is None:
+        return
+
     try:
-        with SecureClient.create(
-            private_key=private_key,
-            wallet=trading_wallet,
-            credentials=credentials,
-        ) as client:
-            if order_type in ("FOK", "FAK"):
-                if side == "BUY":
-                    max_price = price + PRICE_BUFFER_ADJUSTMENT
-                    signed_order = client.create_market_order(
-                        asset_id=token_id,
-                        side=side,
-                        amount=round(float(size) * float(max_price), 2),
-                        max_price=max_price,
-                        order_type=order_type,
-                        builder_code=builder_code,
-                    )
-                else:
-                    signed_order = client.create_market_order(
-                        asset_id=token_id,
-                        side=side,
-                        shares=float(size),
-                        min_price=max(0.01, price - PRICE_BUFFER_ADJUSTMENT),
-                        order_type=order_type,
-                        builder_code=builder_code,
-                    )
-            else:
-                signed_order = client.create_limit_order(
+        if order_type in ("FOK", "FAK"):
+            cap = _buffered_market_price(price, side)
+            if side == "BUY":
+                spend = (Decimal(str(size)) * cap).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+                signed_order = client.create_market_order(
                     asset_id=token_id,
-                    price=float(price),
-                    size=float(size),
                     side=side,
+                    amount=spend,
+                    max_price=cap,
+                    order_type=order_type,
                     builder_code=builder_code,
                 )
+            else:
+                signed_order = client.create_market_order(
+                    asset_id=token_id,
+                    side=side,
+                    shares=Decimal(str(size)),
+                    min_price=cap,
+                    order_type=order_type,
+                    builder_code=builder_code,
+                )
+        else:
+            signed_order = client.create_limit_order(
+                asset_id=token_id,
+                price=Decimal(str(price)),
+                size=Decimal(str(size)),
+                side=side,
+                builder_code=builder_code,
+            )
+    except UserInputError as exc:
+        # Price off the market's tick grid, size below the minimum, cap not
+        # preservable, etc. Nothing was sent.
+        print(f"Order not signed: {exc}")
+        return
+    except InsufficientLiquidityError as exc:
+        print(f"Order not signed: the order book cannot fill this market order ({exc}).")
+        print("  Lower the size, widen the price buffer, or place a GTC limit order instead.")
+        return
+    except SigningError as exc:
+        print(f"Failed to sign order: {exc}")
+        return
     except RequestRejectedError as exc:
         if _credentials_rejected(exc):
+            _drop_signing_client()
             print("Stored Polymarket credentials were rejected. Regenerate them from menu option 2.")
         else:
-            print(f"Failed to sign order: {exc}")
+            print(f"Polymarket rejected an order-metadata request: {exc}")
         return
     except Exception:
+        _drop_signing_client()
         print("Failed to sign order:")
         import traceback
         traceback.print_exc()
@@ -4391,21 +4540,139 @@ def place_order(
             json=signed_flow_payload,
             timeout=30,
         )
+    except requests.exceptions.Timeout:
+        # The request left this machine; the backend may have forwarded it.
+        # Only the order hash can tell, and the backend did not get to send it.
+        print("Order request timed out before the backend answered.")
+        print("  The order may still have been placed. Check 'View Open Orders' / positions")
+        print("  before submitting it again.")
+        return
     except Exception as exc:
         print(f"Order error: {exc}")
         return
 
-    if resp.status_code == 200:
-        print("Order placed:")
-        print(json.dumps(resp.json(), indent=2))
-        return
+    _handle_order_response(resp, headers, side)
 
+
+# Outcome-unknown answers: the order reached (or may have reached) the CLOB and
+# the backend could not learn the result in time. Resubmitting can double-fill;
+# the backend expects the client to reconcile on GET /orders/:hash first.
+_OUTCOME_UNKNOWN_CODES = {"SUBMIT_TIMEOUT", "SUBMIT_UPSTREAM_ERROR"}
+# Definite "not placed" answers: resubmitting is safe.
+_SAFE_TO_RESUBMIT_CODES = {"ORDER_NOT_SUBMITTED", "ORDER_UNMATCHED"}
+ORDER_RECONCILE_MAX_SECONDS = 60
+
+
+def _retry_after_seconds(resp, default: float = 1.0) -> float:
+    try:
+        value = float(resp.headers.get("Retry-After", default))
+        return min(max(value, 0.5), 10.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _reconcile_order(order_hash: str, headers: dict, max_seconds: int = ORDER_RECONCILE_MAX_SECONDS) -> str:
+    """
+    Poll GET /v1/trading/orders/:hash until the CLOB gives a terminal answer.
+
+    Returns the final status: live | matched | cancelled | not_found | pending |
+    unknown | lookup_failed. not_found/pending after the deadline mean the
+    answer is still open, not that the order is missing.
+    """
+    deadline = time.time() + max_seconds
+    status = "lookup_failed"
+    delay = 1.0
+    print(f"Reconciling order {order_hash} with the exchange (up to {max_seconds}s)...")
+    while True:
+        try:
+            resp = requests.get(
+                f"{MARKET_API_URL}/v1/trading/orders/{order_hash}",
+                headers=headers,
+                timeout=15,
+            )
+        except Exception as exc:
+            print(f"  lookup error: {exc}")
+            resp = None
+
+        if resp is not None:
+            try:
+                body = resp.json() or {}
+            except Exception:
+                body = {}
+            if resp.status_code == 200:
+                data = body.get("data") or {}
+                status = str(data.get("status") or "unknown")
+                if status in ("live", "matched", "cancelled"):
+                    matched = data.get("sizeMatched")
+                    size_note = f", filled {matched}" if matched not in (None, "") else ""
+                    print(f"  exchange status: {status}{size_note}")
+                    return status
+                if status == "unknown":
+                    print(f"  exchange status unknown (upstream: {data.get('upstreamStatus')}).")
+                    return status
+                print(f"  exchange status: {status}; waiting...")
+                delay = _retry_after_seconds(resp, delay)
+            elif resp.status_code == 503:
+                # UPSTREAM_ERROR / ORDER_LOOKUP_TIMEOUT: retry, never assume missing.
+                print(f"  lookup unavailable ({body.get('error') or resp.status_code}); retrying...")
+                delay = _retry_after_seconds(resp, delay)
+            elif resp.status_code in (400, 401, 403):
+                print(f"  lookup refused ({body.get('error') or resp.status_code}): {body.get('userMessage') or ''}")
+                return "lookup_failed"
+            else:
+                print(f"  unexpected lookup response {resp.status_code}; retrying...")
+
+        if time.time() >= deadline:
+            return status
+        time.sleep(min(delay, max(0.5, deadline - time.time())))
+        delay = min(delay * 2, 10.0)
+
+
+def _handle_order_response(resp, headers: dict, side: str) -> None:
+    """Map POST /v1/trading/orders answers to operator guidance; reconcile when told to."""
     try:
         body = resp.json() or {}
     except Exception:
         body = {}
+    code = str(body.get("error") or "").upper()
+    data = body.get("data") or {}
+    order_hash = body.get("orderHash") or data.get("orderHash")
 
-    if resp.status_code == 403 and str(body.get("error") or "").upper() == "MIGRATION_REQUIRED":
+    if resp.status_code == 200:
+        print("Order placed:")
+        print(json.dumps(body, indent=2))
+        if str(data.get("status") or "").lower() == "delayed" and order_hash:
+            print("Order accepted with a matching delay; it is not final yet.")
+            _reconcile_order(order_hash, headers)
+        return
+
+    if code in _OUTCOME_UNKNOWN_CODES:
+        print(f"Order outcome unknown ({code}): {body.get('userMessage') or ''}")
+        print("  Do NOT resubmit yet. A duplicate would place a second order.")
+        if order_hash:
+            print(f"  Order hash: {order_hash}")
+            final = _reconcile_order(order_hash, headers)
+            if final in ("live", "matched"):
+                print("Order was accepted by the exchange. Nothing to resubmit.")
+            elif final == "cancelled":
+                print("Order reached the exchange and was cancelled. Check positions before resubmitting.")
+            else:
+                print("Still no terminal answer. Check 'View Open Orders' and positions before resubmitting.")
+        else:
+            print("  No order hash was returned. Check 'View Open Orders' and positions before resubmitting.")
+        return
+
+    if code in _SAFE_TO_RESUBMIT_CODES:
+        if code == "ORDER_UNMATCHED":
+            print("Order was not placed: the exchange reported it unmatched. Nothing was filled.")
+        else:
+            print("Order was not submitted (backend busy before forwarding).")
+        if order_hash:
+            print(f"  Order hash (for support): {order_hash}")
+        print("  It is safe to submit this order again.")
+        return
+
+    if resp.status_code == 403 and code == "MIGRATION_REQUIRED":
         details = body.get("details") or {}
         print("Order rejected: Safe-wallet trading has ended (MIGRATION_REQUIRED).")
         print(f"  Cutoff: {details.get('cutoffDate') or 'see almanac.market'}")
@@ -4413,11 +4680,25 @@ def place_order(
         print("  'Refresh Trading Session'. Cancels, withdrawals, and claims still work.")
         return
 
+    if resp.status_code == 403 and code == "ORDER_WALLET_MISMATCH":
+        print("Order rejected: the signed maker/signer do not match this session's trading wallet.")
+        print("  Use 'Refresh Trading Session' so the signer picks up the current wallet; if you set")
+        print("  EOA_PROXY_FUNDER in api_trading.env, make sure it is the current deposit wallet.")
+        _drop_signing_client()
+        return
+
+    if resp.status_code == 400 and code == "PROXY_WALLET_NOT_FOUND":
+        print("Order rejected: no trading wallet is known for this EOA.")
+        print("  Finish wallet setup at https://almanac.market, then 'Refresh Trading Session'.")
+        return
+
+    if resp.status_code == 401:
+        print(f"Order rejected ({code or 401}): {body.get('userMessage') or 'session invalid'}")
+        print("  Use 'Refresh Trading Session' and try again.")
+        return
+
     print("Failed to place order:")
-    try:
-        print(json.dumps(resp.json(), indent=2))
-    except Exception:
-        print(resp.text)
+    print(json.dumps(body, indent=2) if body else resp.text)
 
 def search_markets():
     """
@@ -4950,8 +5231,11 @@ def generate_polymarket_credentials():
     """
     Derive Polymarket CLOB API credentials with polymarket-client.
 
-    SecureClient.create is given the trading wallet explicitly. Omitting it
-    would deploy a deposit wallet.
+    CLOB credentials are L1-derived from the EOA key alone, so the client is
+    created with wallet=EOA. Any other wallet makes SecureClient.create check
+    the relayer and, for an undeployed deposit wallet, try to deploy it (which
+    needs a builder api_key); omitting wallet does the same for the default
+    deposit wallet. Neither is wanted here.
     """
     global CREDENTIAL_SETS, SELECTED_CREDENTIAL_SET, CURRENT_SESSION, SELECTED_MARKET
     
@@ -4960,18 +5244,18 @@ def generate_polymarket_credentials():
     if not loaded:
         return
     private_key, eoa_address = loaded
-    proxy = _fetch_proxy_address(eoa_address)
-    if not proxy:
-        return
     print(f"Using wallet: {eoa_address}")
-    print(f"Trading wallet: {proxy}")
 
     try:
-        with SecureClient.create(private_key=private_key, wallet=proxy) as client:
+        with SecureClient.create(private_key=private_key, wallet=eoa_address) as client:
             credentials = client.credentials
+    except RequestRejectedError as exc:
+        print(f"Polymarket rejected the credential request: {exc}")
+        return
     except Exception as exc:
         print(f"Failed to create Polymarket API credentials: {exc}")
         return
+    _drop_signing_client()
 
     _display_credentials(credentials)
     
