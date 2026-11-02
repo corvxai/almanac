@@ -86,8 +86,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.validator.market.constants import VOLUME_FEE, PRICE_BUFFER_ADJUSTMENT, POLY_BUILDER_CODE, POLY_BUILDER_CODE_SELL
 
-#MARKET_API_URL = "https://api.almanac.market/api"
-MARKET_API_URL = "https://dev.almanac.market/api"
+MARKET_API_URL = "https://api.almanac.market/api"
 #MARKET_API_URL = "http://localhost:3001/api"
 POLYMARKET_CLOB_HOST = "https://clob.polymarket.com"
 # POST /prices rejects more than 500 book entries. Each token is sent twice (BUY and SELL).
