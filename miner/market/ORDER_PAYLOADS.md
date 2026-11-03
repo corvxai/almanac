@@ -131,6 +131,34 @@ Success: `{ "success": true, "data": { "orderId": "0x…", "orderHash": "0x…",
 | `400 INVALID_BUILDER_CODE` / `BUILDER_CODE_NOT_ALLOWED_ON_SELL` / `VALIDATION_ERROR` | fix the struct and re-sign (the builder code is inside the signature) |
 | `403 MIGRATION_REQUIRED` | Safe trading has ended; migrate on the web once |
 
+## Relayer calls: builder headers from Almanac
+
+Orders never touch this. It is only for the gasless path — claims, withdrawals, wraps, deploys — which goes through Polymarket's relayer (`https://relayer-v2.polymarket.com`) and needs **builder HMAC headers** on `POST /submit`. The builder key is Almanac's, so you do not compute the HMAC; you ask Almanac for the four headers per request and forward them. `api_trading.py` does this in `AlmanacRelayBuilderConfig`.
+
+```http
+POST /api/v1/auth/builder-sign
+x-session-id: <sessionId>
+x-wallet-address: <walletAddress from the session>
+Content-Type: application/json
+
+{ "method": "POST", "path": "/submit", "body": "<the exact JSON string you will POST to the relayer>" }
+```
+
+Response (200): `{ "POLY_BUILDER_API_KEY", "POLY_BUILDER_TIMESTAMP", "POLY_BUILDER_PASSPHRASE", "POLY_BUILDER_SIGNATURE" }` — set all four as HTTP headers on the relayer request, with the body bytes **identical** to the `body` string you signed (`Content-Type: application/json`). The HMAC is over `timestamp ‖ method ‖ path ‖ body` and the relayer checks it against the raw body it receives, so serialise first, sign that string, send that string. One call per relayer request, immediately before sending; the relayer's timestamp window is short.
+
+Rules (anything else is `400 INVALID_REQUEST`, a pair not listed is `403 FORBIDDEN`, no session is `401`):
+
+| Field | Accepted |
+|---|---|
+| `method` | `GET` or `POST`, exact case |
+| `path` | relayer path only — no host, no query string, no trailing `/`; allowed pairs: `POST /submit`, `GET /deployed`, `GET /v1/account/transactions/params`, `GET /v1/account/transactions/<lowercase uuid>` |
+| `body` | `POST /submit`: a **string** containing one JSON object, ≤ 64 KiB. GET pairs: omit the key (or `""`) |
+| `timestamp` | do not send; it is ignored. The server signs with its own clock and returns it as `POLY_BUILDER_TIMESTAMP` — your clock does not matter |
+
+In practice only `POST /submit` needs headers: the relayer answers `GET /deployed`, `/nonce`, `/transaction?id=` without them (that is how the Python CLI works — a query string would be rejected by the rule above anyway). The GET pairs are allowlisted for clients that mirror Polymarket's JS `RelayClient`, which signs them.
+
+The `/submit` envelope itself (Safe or deposit-wallet batch, signed by your EOA) is Polymarket's format, not Almanac's; take it from `py-builder-relayer-client` (`builder/safe.py`, `builder/deposit_wallet.py`) or `@polymarket/client`. Almanac does not inspect it beyond the rules above.
+
 ## Test vectors
 
 Hardhat/Anvil account #0 (public key material — never fund it), fixed salt/timestamp, placeholder builder `0x11…11`.
@@ -186,4 +214,4 @@ Reproduce vector A's wire signature from the key and the order fields and every 
 
 go-ethereum `signer/core/apitypes`: put `EIP712Domain`, `Order`, `TypedDataSign` in `Types`, `PrimaryType: "TypedDataSign"`, nested `contents` map for the order; `TypedDataAndHash` gives the digest. `uint256` fields accept `*big.Int` or decimal strings; `bytes32` are `0x` hex strings. Sign with `crypto.Sign` and add 27 to byte 64. Append the trailer as raw bytes (`binary.BigEndian.PutUint16` for the length). Use `math/big` or a decimal package for amounts — `float64` produces off-grid prices.
 
-Not covered: Protocol V2 position ids (domain version `"3"`, Exchange V3) — unused by Almanac markets today; session-key signers; gasless deploy/approve/claim/withdraw (done once in the web app).
+Not covered: Protocol V2 position ids (domain version `"3"`, Exchange V3) — unused by Almanac markets today; session-key signers; the relayer batch envelopes for gasless deploy/approve/claim/withdraw (only the Almanac builder-header step is documented above; the web app does these once).
