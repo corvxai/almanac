@@ -2620,13 +2620,13 @@ class AlmanacRelayBuilderConfig:
         body: str | None = None,
         timestamp: int | None = None,
     ):
-        ts = int(time.time()) if timestamp is None else int(timestamp)
-        payload = {
-            "method": method,
-            "path": path,
-            "body": body,
-            "timestamp": ts,
-        }
+        # Almanac signs with its own clock and returns it as POLY_BUILDER_TIMESTAMP;
+        # a client timestamp is ignored. Send only what the SDK's remote signer
+        # sends: {method, path} plus a string `body` for POST /submit.
+        del timestamp
+        payload: dict[str, str] = {"method": method, "path": path}
+        if body is not None:
+            payload["body"] = body
         req_headers = {"Content-Type": "application/json", **self._session_headers}
         try:
             r = requests.post(
