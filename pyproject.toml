@@ -2,7 +2,8 @@
 name = "almanac"
 version = "0.1.0"
 description = "Almanac decentralized agent forecasting and prediction market validator and miner stack"
-requires-python = ">=3.10"
+# polymarket-client (requirements.txt) declares Requires-Python >=3.11.
+requires-python = ">=3.11"
 
 [tool.ruff]
 line-length = 100
