@@ -265,7 +265,7 @@ No long-running miner process is required for dApp trading after metadata regist
 
 #### 5. Trade via API (optional)
 
-For programmatic / automated trading. This client needs **Python 3.11+** (`polymarket-client` 0.14.0).
+For programmatic / automated trading. This client needs **Python 3.11+** (`polymarket-client` 0.16.0).
 
 1. Complete steps 1–3 above
 2. Copy the env template and fill credentials:
@@ -296,6 +296,8 @@ The client signs orders locally with `polymarket-client` (`SecureClient.create`,
 Code lives under `miner/market/` (`miner.py`, `api_trading.py`).
 
 Writing your own client in another language (Go, Rust, …)? [`miner/market/ORDER_PAYLOADS.md`](miner/market/ORDER_PAYLOADS.md) documents the order struct, both signature schemes (Safe and deposit wallet), the request body, and byte-exact test vectors — no Python SDK required.
+
+> **Protocol V2 (Polymarket's second position ledger):** new markets arrive with `version: "v2"` and are traded by `position_ids[i]` on Exchange V3 (EIP-712 domain version `"3"`); existing CTF markets stay `"v1"` and are unchanged. The CLI handles the id and the domain for you. Two things to do once: log in at [almanac.market](https://beta.almanac.market) to grant the four Protocol V2 approvals your deposit wallet needs, and migrate if you still trade from a Safe (Safes cannot trade V2 markets). Details: [`miner/market/DEPOSIT_WALLETS.md`](miner/market/DEPOSIT_WALLETS.md) §6; for your own client, the "Protocol V2 markets" section of `ORDER_PAYLOADS.md`.
 
 ---
 

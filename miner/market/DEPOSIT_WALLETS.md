@@ -76,13 +76,24 @@ The backend rejects mismatched codes (`INVALID_BUILDER_CODE` / `BUILDER_CODE_NOT
 - **Withdraw pUSD** executes through the Safe multicall or the deposit batch depending on the session's wallet kind. Deposit sessions trust the server-derived `proxyWallet` (no client-side Safe derivation).
 - **Deposit funds** already targets the session's trading wallet, which after migration IS the deposit address — menu labels now say "trading wallet" and print the kind so you always know where funds are going.
 
+### 6. Protocol V2 markets (branch `pm_protocol_v2`)
+
+Polymarket is launching **Protocol V2**, a second position ledger beside the CTF. From launch, new markets arrive with `version: "v2"`; every market you traded so far stays `"v1"` and behaves exactly as before. Nothing to configure. What you need to know:
+
+- **One more web login.** V2 orders need four approvals your wallet does not have yet (pUSD and PositionManager, each to Exchange V3 and the Router). Log in once at [almanac.market](https://beta.almanac.market); the approvals panel shows 4 of 11 missing and grants them in one gasless batch. Until then, a V2 BUY is rejected by the exchange for allowance (`400 INSUFFICIENT_BALANCE`). The CLI checks this for you: at session creation it prints either `Protocol V2 approvals: all granted` or the missing ones, and asks before signing a V2 order while any are missing.
+- **Safe wallets cannot trade V2.** A V2 order from a legacy Safe returns `403 MIGRATION_REQUIRED` with `details.reason: "protocol_v2"`, before the cutoff too. The CLI stops before signing and says so. Migrate (step "What you must do" above).
+- **Which id is signed.** On a v2 market the CLI trades `position_ids[i]`; on v1, `clob_token_ids[i]` as always. `polymarket-client` recognises a position id and signs it for Exchange V3 under EIP-712 domain version `"3"` by itself — the struct, your key, builder codes, and order types are unchanged. Positions and orders show the position id in `token_id`.
+- **Claims.** Resolved V2 positions are claimed through the Polymarket **Router** (prepared by Almanac's `POST /v1/redeem`, paid in pUSD) in the same relayer batch as CTF claims. Conditions Almanac cannot prepare are now listed per reason: `not_resolved` (V2 market not resolved on-chain yet), `router_not_approved` (grant the approvals above), `version_unknown` (ledger undecided; Almanac refuses rather than guesses), `no_balance`.
+
+Writing your own client? [`ORDER_PAYLOADS.md`](ORDER_PAYLOADS.md) → "Protocol V2 markets" has the domain row, the approvals table, and test vectors C/D for Exchange V3.
+
 ## Requirements
 
 ```bash
 pip install -r requirements.txt   # adds: web3, py-builder-relayer-client, eth-account, polymarket-client
 ```
 
-The API trading client needs Python 3.11+. `requirements.txt` pins `polymarket-client==0.14.0` (order signing) and `py-builder-relayer-client>=0.0.2` (deposit-wallet batch + Polygon deposit contract config).
+The API trading client needs Python 3.11+. `requirements.txt` pins `polymarket-client==0.16.0` (order signing) and `py-builder-relayer-client>=0.0.2` (deposit-wallet batch + Polygon deposit contract config).
 
 `EOA_PROXY_FUNDER` in `api_trading.env` is now fully optional — credential-set detection and Polymarket credential generation no longer require it, and the session's server-derived wallet is always authoritative.
 
@@ -177,6 +188,15 @@ Notes from the live backend contract:
 |---|---|
 | `miner/market/api_trading.py` | session wallet-kind helpers + migration warnings; runtime `/v1/trading/config` fetch (60s cache); side-aware builder codes; sig-type 3 order path; `MIGRATION_REQUIRED` handling; `_execute_relay_batch` (Safe multicall vs deposit batch, delegatecall guard); claim/withdraw/auto-wrap routed through it; combined single-batch auto-wrap; kind-aware menu labels; `EOA_PROXY_FUNDER` made optional (credential sets + credential generation); cached `SecureClient` per wallet with stale-credential detection; `Decimal` tick-safe market-order caps; outcome-unknown handling (`SUBMIT_TIMEOUT` / `SUBMIT_UPSTREAM_ERROR` → reconcile on `GET /orders/:hash`; `ORDER_UNMATCHED` / `ORDER_NOT_SUBMITTED` → safe to resubmit) |
 | `miner/market/api_trading.env.example` | `EOA_PROXY_FUNDER` documented as offline fallback (deposit address after migration) |
-| `requirements.txt` | pin `polymarket-client==0.14.0` (Python 3.11+), `py-builder-relayer-client>=0.0.2` |
+| `requirements.txt` | pin `polymarket-client==0.16.0` (Python 3.11+), `py-builder-relayer-client>=0.0.2` |
 | `miner/README.md` | cutover note + pointer to this document |
 | `miner/market/DEPOSIT_WALLETS.md` | this document |
+
+Branch `pm_protocol_v2` (section 6 above):
+
+| File | Change |
+|---|---|
+| `miner/market/api_trading.py` | trading id by market `version` (`_trading_ids_for`: `position_ids` on v2, `clob_token_ids` on v1, JSON-string form parsed); position→market match on both id arrays; pre-sign check for V2 orders (Safe session, `protocolV2.tradingEnabled`, the four approvals via `GET /wallet/approvals/:eoa`); session summary prints V2 readiness; `PROTOCOL_V2_DISABLED` and `MIGRATION_REQUIRED` (reason `protocol_v2`) handling; `INSUFFICIENT_BALANCE` on a V2 order re-reads approvals; claim flow prints `skippedRedemptions` by code; `Ver` column; `Protocol:` line in the order summary; Exchange V3 / Router / PositionManager constants |
+| `miner/market/ORDER_PAYLOADS.md` | domain table by `version`; "Protocol V2 markets" section; vectors C (deposit, Exchange V3) and D (Safe, Exchange V3); new response rows |
+| `requirements.txt` | `polymarket-client==0.16.0` |
+| `README.md`, `miner/README.md` | Protocol V2 note + pointer |

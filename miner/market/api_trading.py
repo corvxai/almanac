@@ -20,6 +20,20 @@ sessions. Per-side builder codes are read from GET /v1/trading/config at
 runtime (BUY = fee profile, SELL = zero-fee profile). Migration itself is a
 one-time action in the web app (https://almanac.market) — there is no headless
 migration API; afterwards refresh the trading session here.
+
+Protocol V2 markets:
+Almanac serves markets from two Polymarket ledgers. A market's `version` is
+"v1" (CTF; trade `clob_token_ids[i]`) or "v2" (Protocol V2; trade
+`position_ids[i]`). The id is the only thing that differs on the wire:
+polymarket-client signs a position id for Exchange V3 under domain version
+"3" by itself. V2 orders need the four extra approvals the web app grants
+(pUSD and PositionManager to Exchange V3 and the Router); this client checks
+GET /wallet/approvals before a V2 order and points to the web app. The
+backend refuses V2 orders with 403 PROTOCOL_V2_DISABLED while
+`protocolV2.tradingEnabled` is false on GET /v1/trading/config, and refuses
+them from Safe wallets with 403 MIGRATION_REQUIRED (details.reason
+"protocol_v2"). Claims on resolved V2 positions are prepared by Almanac as
+Router calls and go through the same relayer batch.
 - Link/unlink Bittensor UID to Almanac account
 - Manage multiple credential sets (wallet accounts)
 
@@ -31,7 +45,7 @@ Switch between sets at runtime - sessions are automatically cleared when switchi
 Polygon JSON-RPC defaults to https://polygon.drpc.org (Polygon docs mainnet endpoint); set POLYGON_RPC_URL in api_trading.env to override.
 
 Requirements:
-- Python 3.11+ (polymarket-client 0.14.0)
+- Python 3.11+ (polymarket-client 0.16.0)
 - Almanac account (setup at https://almanac.market)
 - EOA wallet private key for signing transactions
 - Optional: Polymarket API credentials (can be generated via this script)
@@ -190,12 +204,20 @@ COLLATERAL_ONRAMP_WRAP_ABI = [
     }
 ]
 
-# EIP-712 domain contract for Polymarket CTF Exchange -- V2
+# EIP-712 verifying contracts for the Order struct (domain name "Polymarket CTF
+# Exchange", chain 137). Reference only: polymarket-client picks the exchange and
+# domain version from the asset id itself (is_v2_position_id). Market `version`
+# decides which id you hand it.
+#   CTF markets (version "v1"): domain version "2"; CTF Exchange, or the NegRisk
+#   CTF Exchange when the market is neg_risk.
 EIP712_DOMAIN_CONTRACT = "0xE111180000d2663C0091e4f400237545B87B996B"
 EIP712_DOMAIN_NEGRISK_CONTRACT = "0xe2222d279d744050d28e00520010520000310F59"
-# EIP-712 domain contract for Polymarket CTF Exchange -- V1 (DEPRECATED)
-#EIP712_DOMAIN_CONTRACT = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-#EIP712_DOMAIN_NEGRISK_CONTRACT = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+#   Protocol V2 markets (version "v2"): domain version "3"; Exchange V3 for every
+#   V2 order, neg_risk or not.
+EIP712_DOMAIN_V3_CONTRACT = "0xe3333700cA9d93003F00f0F71f8515005F6c00Aa"
+# Protocol V2 contracts the four extra approvals name (granted in the web app).
+PROTOCOL_V2_ROUTER_ADDRESS = "0x12121212006e4CD160D18e3f00711DA5c3372600"
+PROTOCOL_V2_POSITION_MANAGER_ADDRESS = "0x006F54F7f9A22e0000CC2AB60031000000ae9fEF"
 ENV_PATH = Path(__file__).resolve().parent / "api_trading.env"
 
 # Default number of positions to fetch per page
@@ -297,6 +319,207 @@ def _is_deposit_session() -> bool:
     return _session_wallet_kind() == "deposit"
 
 
+# --- Protocol V2 helpers ---------------------------------------------------
+
+def _market_version(market: dict | None) -> str:
+    """
+    "v2" for a Protocol V2 market, otherwise "v1". Almanac serves `version`
+    on every market payload that carries trading ids; a missing or blank
+    value is a CTF market. Only the string "v2" selects `position_ids` — the
+    presence of `position_ids` (many v1 markets have them, not tradable) or
+    the shape of an id never does.
+    """
+    if not isinstance(market, dict):
+        return "v1"
+    value = market.get("version")
+    if isinstance(value, str) and value.strip().lower() == "v2":
+        return "v2"
+    return "v1"
+
+
+def _is_v2_market(market: dict | None) -> bool:
+    return _market_version(market) == "v2"
+
+
+def _parse_id_list(value) -> list:
+    """
+    `clob_token_ids` arrives as a JSON array or as a JSON string of one;
+    `position_ids` is always an array. Return a list of decimal strings.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return []
+    if not isinstance(value, list):
+        return []
+    return [str(v) for v in value if v is not None and str(v).strip()]
+
+
+def _trading_ids_for(market: dict | None) -> list:
+    """
+    The ids to trade, index-aligned with `outcomes`: `position_ids` when the
+    market `version` is "v2", else `clob_token_ids`. Mirrors Almanac's
+    tradingIdsFor() and the integrator docs ("Which id to trade").
+    """
+    if not isinstance(market, dict):
+        return []
+    if _is_v2_market(market):
+        return _parse_id_list(market.get("position_ids") or market.get("positionIds"))
+    return _parse_id_list(market.get("clob_token_ids") or market.get("clobTokenIds"))
+
+
+def _all_known_ids_for(market: dict | None) -> list:
+    """
+    Both id arrays, for matching a position's `token_id` back to its market.
+    Position rows carry no `version`, so an old order or position may be
+    keyed by either kind of id.
+    """
+    if not isinstance(market, dict):
+        return []
+    ids = _parse_id_list(market.get("clob_token_ids") or market.get("clobTokenIds"))
+    for pid in _parse_id_list(market.get("position_ids") or market.get("positionIds")):
+        if pid not in ids:
+            ids.append(pid)
+    return ids
+
+
+def _protocol_v2_trading_enabled() -> bool | None:
+    """
+    `protocolV2.tradingEnabled` from GET /v1/trading/config. None when the
+    config is unavailable or predates the field (the backend 403 is the
+    backstop either way).
+    """
+    cfg = fetch_trading_config()
+    if not isinstance(cfg, dict):
+        return None
+    pv2 = cfg.get("protocolV2")
+    if not isinstance(pv2, dict) or "tradingEnabled" not in pv2:
+        return None
+    return bool(pv2.get("tradingEnabled"))
+
+
+# Labels the backend uses for the four Protocol V2 approvals in
+# GET /wallet/approvals/:eoa (spender ExchangeV3 / Router on the pUSD and
+# PositionManager ledgers). Matched by spender address, label is a fallback.
+_V2_APPROVAL_SPENDERS = {
+    EIP712_DOMAIN_V3_CONTRACT.lower(),
+    PROTOCOL_V2_ROUTER_ADDRESS.lower(),
+}
+_V2_APPROVAL_CACHE: dict = {"key": None, "missing": None, "fetched_at": 0.0}
+V2_APPROVAL_CACHE_TTL_SECONDS = 60
+
+
+def _missing_v2_approvals(eoa_address: str, force: bool = False) -> list | None:
+    """
+    Names of the Protocol V2 approvals the session's trading wallet lacks,
+    from GET /wallet/approvals/:eoa (public). [] means all four are granted.
+    None means the check could not be made (endpoint down, old backend with
+    seven entries only) — callers then let the backend decide.
+    """
+    key = str(eoa_address or "").lower()
+    if not key:
+        return None
+    now = time.time()
+    cached = _V2_APPROVAL_CACHE
+    if (
+        not force
+        and cached["key"] == key
+        and cached["missing"] is not None
+        and now - cached["fetched_at"] < V2_APPROVAL_CACHE_TTL_SECONDS
+    ):
+        return cached["missing"]
+    try:
+        r = requests.get(f"{MARKET_API_URL}/wallet/approvals/{eoa_address}", timeout=15)
+        if r.status_code != 200:
+            return None
+        data = (r.json() or {}).get("data") or {}
+    except Exception:
+        return None
+    status = data.get("approvalStatus")
+    if not isinstance(status, list):
+        return None
+    v2_entries = []
+    for entry in status:
+        if not isinstance(entry, dict):
+            continue
+        spender = str(entry.get("spender") or "").lower()
+        label = str(entry.get("label") or "")
+        if spender in _V2_APPROVAL_SPENDERS or "V3" in label or "Protocol V2" in label:
+            v2_entries.append(entry)
+    if not v2_entries:
+        # Backend without the Protocol V2 entries (or a Safe wallet, which is
+        # never offered them): nothing to report from here.
+        return None
+    missing = []
+    for entry in v2_entries:
+        if entry.get("approved"):
+            continue
+        label = str(entry.get("label") or "").strip()
+        if not label:
+            ledger = {"pusd": "pUSD", "positionManager": "PositionManager"}.get(
+                str(entry.get("ledger") or ""), "token"
+            )
+            label = f"{ledger} → {entry.get('spender')}"
+        missing.append(label)
+    cached["key"] = key
+    cached["missing"] = missing
+    cached["fetched_at"] = now
+    return missing
+
+
+def _print_v2_approvals_hint(missing: list) -> None:
+    print("Protocol V2 approvals are missing on your trading wallet:")
+    for item in missing:
+        print(f"  - {item}")
+    print("  Log in once at https://almanac.market — the approvals panel grants the four")
+    print("  Protocol V2 approvals in one gasless batch. Until then the CLOB rejects V2 orders")
+    print("  for insufficient allowance. CTF markets are unaffected.")
+
+
+def _check_v2_order_preconditions() -> bool:
+    """
+    Everything that would make the backend or the CLOB refuse a Protocol V2
+    order, checked before the operator is asked for size and price and before
+    anything is signed. Returns True when the order may proceed.
+
+    1. Safe wallets cannot trade V2 at all (403 MIGRATION_REQUIRED,
+       details.reason "protocol_v2"); migrating is the only remedy.
+    2. The backend refuses V2 orders while protocolV2.tradingEnabled is false
+       (403 PROTOCOL_V2_DISABLED).
+    3. The four V2 approvals must be on the trading wallet or the CLOB rejects
+       the order for allowance. Missing approvals are a warning, not a stop:
+       the on-chain read may lag a grant made moments ago.
+    """
+    if _session_wallet_kind() == "gnosis_safe":
+        print("This market is a Protocol V2 market. Safe wallets cannot trade Protocol V2 markets")
+        print("  (the backend answers 403 MIGRATION_REQUIRED, reason protocol_v2).")
+        print("  Migrate to a deposit wallet once at https://almanac.market, then 'Refresh Trading Session'.")
+        return False
+
+    enabled = _protocol_v2_trading_enabled()
+    if enabled is False:
+        print("This market is a Protocol V2 market and Protocol V2 trading is not enabled on Almanac yet")
+        print("  (GET /v1/trading/config → protocolV2.tradingEnabled is false; orders would get 403 PROTOCOL_V2_DISABLED).")
+        print("  CTF markets still trade. Try this market again later.")
+        return False
+    if enabled is None:
+        print("Note: could not read protocolV2.tradingEnabled from /v1/trading/config; the backend decides.")
+
+    eoa = _session_data().get("walletAddress") or _get_credential("EOA_WALLET_ADDRESS")
+    missing = _missing_v2_approvals(eoa) if eoa else None
+    if missing:
+        _print_v2_approvals_hint(missing)
+        answer = input("Continue anyway? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Order cancelled.")
+            return False
+    return True
+
+
 def _print_session_wallet_summary(session: dict | None) -> None:
     """Show which trading wallet the session resolved to + migration status."""
     data = (session or {}).get("data") or {}
@@ -317,6 +540,20 @@ def _print_session_wallet_summary(session: dict | None) -> None:
             print(f"⚠️  Safe → deposit-wallet migration required before {cutoff}.")
             print("   Migrate once in the web app at https://almanac.market. The web login ends this")
             print("   CLI session — use 'Refresh Trading Session' afterwards to pick up the deposit wallet.")
+
+    # Protocol V2 readiness. Safe wallets are never offered the V2 approvals
+    # and cannot trade V2 markets; deposit wallets need the four approvals.
+    if kind == "gnosis_safe":
+        print("   Protocol V2 markets (version v2) cannot be traded from a Safe wallet; CTF markets only.")
+    elif kind == "deposit":
+        eoa = data.get("walletAddress")
+        missing = _missing_v2_approvals(eoa, force=True) if eoa else None
+        if missing:
+            _print_v2_approvals_hint(missing)
+        elif missing == []:
+            enabled = _protocol_v2_trading_enabled()
+            state = {True: "enabled", False: "not enabled yet", None: "unknown"}[enabled]
+            print(f"Protocol V2 approvals: all granted. Protocol V2 trading on Almanac: {state}.")
 
 
 def _detect_credential_sets():
@@ -752,14 +989,22 @@ def _display_markets_for_event(event: dict) -> list:
             sports_market_type = sports_market_type.replace("_", " ")
         row.append(sports_market_type)
         
+        # Add Ver column: which Polymarket ledger the market trades on
+        # ("v1" CTF, "v2" Protocol V2). A resolved V2 market is flagged.
+        version_cell = _market_version(m)
+        resolution_status = str(m.get("resolution_status") or m.get("resolutionStatus") or "").lower()
+        if version_cell == "v2" and resolution_status == "resolved":
+            version_cell = "v2 (resolved)"
+        row.append(version_cell)
+        
         # Add Market ID as last column
         row.append(market_id)
         
         table_rows.append(row)
     
-    # Define table headers: #, Market, then Outcome 1, Outcome 2, etc., then Volume, Liquidity, Type, then Market ID
+    # Define table headers: #, Market, then Outcome 1, Outcome 2, etc., then Volume, Liquidity, Type, Ver, then Market ID
     outcome_headers = [f"Outcome {i+1}" for i in range(max_outcomes)]
-    headers = ["#", "Market"] + outcome_headers + ["Volume", "Liquidity", "Type", "Market ID"]
+    headers = ["#", "Market"] + outcome_headers + ["Volume", "Liquidity", "Type", "Ver", "Market ID"]
     
     # Print table
     print(f"\nMarkets ({len(markets)} found):")
@@ -834,7 +1079,8 @@ def _update_all_markets_prices_from_clob(markets: list) -> list:
     Stores original prices in _original_outcome_prices for fallback.
     
     Args:
-        markets: List of market dictionaries with clob_token_ids
+        markets: List of market dictionaries with trading ids (`clob_token_ids`
+            on v1 markets, `position_ids` on v2 markets; see _trading_ids_for)
         
     Returns:
         List of updated market dictionaries with fresh outcome_prices
@@ -842,13 +1088,14 @@ def _update_all_markets_prices_from_clob(markets: list) -> list:
     if not isinstance(markets, list) or not markets:
         return markets
     
-    # Collect all token IDs from all markets
+    # Collect all token IDs from all markets. The CLOB answers /prices for
+    # CTF token ids and V2 position ids alike.
     all_token_ids = []
     market_token_map = {}  # Map token_id -> list of (market_idx, outcome_idx) tuples
     
     for market_idx, market in enumerate(markets):
-        clob_token_ids = market.get("clob_token_ids")
-        if isinstance(clob_token_ids, list) and clob_token_ids:
+        clob_token_ids = _trading_ids_for(market)
+        if clob_token_ids:
             # Store original prices for fallback
             original_prices = market.get("outcome_prices")
             if original_prices:
@@ -873,8 +1120,8 @@ def _update_all_markets_prices_from_clob(markets: list) -> list:
     
     # Update all markets with fetched prices
     for market_idx, market in enumerate(markets):
-        clob_token_ids = market.get("clob_token_ids")
-        if not isinstance(clob_token_ids, list) or not clob_token_ids:
+        clob_token_ids = _trading_ids_for(market)
+        if not clob_token_ids:
             continue
         
         updated_prices = []
@@ -945,7 +1192,7 @@ def _update_market_prices_from_clob(market: dict) -> dict:
     This is a single-market version - use _update_all_markets_prices_from_clob for batch updates.
     
     Args:
-        market: Market dictionary with clob_token_ids
+        market: Market dictionary with trading ids (see _trading_ids_for)
         
     Returns:
         Updated market dictionary with fresh outcome_prices
@@ -963,7 +1210,7 @@ def _display_outcomes_and_choose(market: dict):
     outcomes = market.get("outcomes")
     outcome_prices = market.get("outcome_prices")  # These should be CLOB prices if fetched successfully
     original_prices = market.get("_original_outcome_prices")  # Original prices from API (fallback)
-    clob_token_ids = market.get("clob_token_ids")
+    clob_token_ids = _trading_ids_for(market)  # position_ids on a v2 market, clob_token_ids otherwise
     clob_prices = market.get("_clob_prices")  # Raw CLOB price data
 
     # Check if CLOB fetch was successful
@@ -1089,6 +1336,10 @@ def _place_order_now(market: dict, chosen_outcome_name: str | None = None, chose
     if isinstance(neg_risk, str):
         neg_risk = neg_risk.lower() in ("true", "1", "yes")
     neg_risk = bool(neg_risk)
+    protocol_version = _market_version(market)
+
+    if protocol_version == "v2" and not _check_v2_order_preconditions():
+        return
     
     print("\nPlace order (type 'c' or 'cancel' at any prompt to cancel):")
     
@@ -1201,6 +1452,7 @@ def _place_order_now(market: dict, chosen_outcome_name: str | None = None, chose
     print(f"Market: {market_title}")
     if chosen_outcome_name:
         print(f"Outcome: {chosen_outcome_name}")
+    print(f"Protocol: {protocol_version}" + (" (Protocol V2 position id, Exchange V3)" if protocol_version == "v2" else " (CTF token id)"))
     print(f"Neg Risk: {neg_risk}")
     print(f"Side: {side_upper}")
     print(f"Order Type: {order_type}")
@@ -1232,6 +1484,7 @@ def _place_order_now(market: dict, chosen_outcome_name: str | None = None, chose
         order_type=order_type,
         chosen_outcome_name=chosen_outcome_name,
         chosen_token_id=chosen_token_id,
+        protocol_version=protocol_version,
     )
 
 def fetch_positions(filter_type: str = "all", limit: int = 100, offset: int = 0):
@@ -1676,11 +1929,56 @@ def _post_almanac_redeem_prepare(redemptions: list) -> tuple[bool, str | None, d
             return False, f"Unexpected redeem JSON type: {type(payload).__name__}", None
 
         if not bool(payload.get("success")):
-            return False, json.dumps(payload, indent=2), None
+            # HTTP 200 + success:false means nothing could be prepared. The
+            # backend explains why per condition in skippedRedemptions.
+            lines = [str(payload.get("userMessage") or payload.get("error") or "Redeem returned success:false.")]
+            lines.extend(_format_skipped_redemptions(payload))
+            return False, "\n".join(lines), None
 
         return True, None, payload
     except Exception as exc:
         return False, str(exc), None
+
+
+# skippedRedemptions[].code from POST /v1/redeem (backend redeem.ts /
+# protocolV2Redeem.ts) → operator guidance.
+_SKIPPED_REDEMPTION_HINTS = {
+    "no_balance": "no redeemable balance on-chain for this condition",
+    "not_resolved": "Protocol V2 market not resolved on-chain yet; claim later",
+    "version_unknown": "Almanac could not decide which ledger (CTF or Protocol V2) holds this condition; "
+                       "refused rather than guessed — retry later or contact support",
+    "router_not_approved": "PositionManager is not approved for the Protocol V2 Router; grant the "
+                           "Protocol V2 approvals at https://almanac.market, then claim again",
+    "unsupported_module": "Protocol V2 position id names a module Almanac does not redeem (not binary / neg-risk)",
+    "condition_id_shape": "condition id is not a padded bytes31 Protocol V2 condition",
+    "position_id_shape": "position id does not belong to this condition",
+    "error": "backend error while preparing this condition",
+}
+
+
+def _format_skipped_redemptions(payload: dict | None) -> list[str]:
+    """One line per skipped condition from a POST /v1/redeem response."""
+    if not isinstance(payload, dict):
+        return []
+    skipped = payload.get("skippedRedemptions")
+    if not isinstance(skipped, list) or not skipped:
+        return []
+    lines = [f"Skipped {len(skipped)} condition(s):"]
+    for item in skipped:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("conditionId") or "?")
+        cid_short = f"{cid[:10]}…{cid[-4:]}" if len(cid) > 18 else cid
+        code = str(item.get("code") or "unknown")
+        ledger = str(item.get("ledger") or "")
+        hint = _SKIPPED_REDEMPTION_HINTS.get(code, "")
+        reason = str(item.get("reason") or "").strip()
+        detail = hint or reason
+        if hint and reason and reason.lower() not in hint.lower():
+            detail = f"{hint} ({reason})"
+        ledger_note = f", {ledger}" if ledger else ""
+        lines.append(f"  - {cid_short} [{code}{ledger_note}]: {detail}")
+    return lines
 
 
 def _relay_submit_redeem_transactions(
@@ -1692,6 +1990,9 @@ def _relay_submit_redeem_transactions(
     use one deposit-wallet batch. Deposit claims are routed server-side through
     the CtfCollateralAdapter (redeem + wrap + pUSD in one call), so
     selectedCollateral is pUSD and the USDC.e auto-wrap self-disables.
+    Protocol V2 positions arrive as Router `redeem(bytes31,uint256,uint256)`
+    calls (`to` = 0x1212…2600) that pay pUSD; they ride the same batch and
+    nothing here distinguishes them.
     """
     global CURRENT_SESSION
     load_dotenv(dotenv_path=str(ENV_PATH), override=True)
@@ -1817,6 +2118,17 @@ def request_redeem_transactions(redemptions: list) -> tuple[bool, str | None]:
     ok, err, payload = _post_almanac_redeem_prepare(redemptions)
     if not ok or not payload:
         return False, err
+
+    # Partial preparation: some conditions were skipped (not resolved yet,
+    # ledger undecided, Router approval missing, ...). Say which before the
+    # relayer batch runs for the rest.
+    for line in _format_skipped_redemptions(payload):
+        print(line)
+    prepared = payload.get("redemptions")
+    if isinstance(prepared, list) and any(
+        isinstance(item, dict) and item.get("ledger") == "v2" for item in prepared
+    ):
+        print("Protocol V2 position(s) in this claim redeem through the Polymarket Router and pay pUSD directly.")
 
     txs_raw = payload.get("transactions")
     if isinstance(txs_raw, list) and len(txs_raw) > 0:
@@ -3400,7 +3712,7 @@ def _select_position_for_trade(positions: list):
         print(f"  Outcome: {outcome}")
         print(f"  Current Size: {position_size:.2f}")
         
-        # Fetch market details from API to get outcomes and clob_token_ids
+        # Fetch market details from API to get outcomes and trading ids
         print("\nFetching latest market prices...")
         market_dict = None
         if event_id:
@@ -3412,10 +3724,11 @@ def _select_position_for_trade(positions: list):
                     full_event = event_data.get("data") or event_data
                     markets = full_event.get("markets") or []
                     
-                    # Find the market that matches this position (by token_id or outcome)
+                    # Find the market that matches this position. The position
+                    # row has no `version`, so match token_id against both the
+                    # CTF ids and the V2 position ids of each market.
                     for market in markets:
-                        market_token_ids = market.get("clob_token_ids") or []
-                        if token_id and str(token_id) in [str(tid) for tid in market_token_ids]:
+                        if token_id and str(token_id) in _all_known_ids_for(market):
                             market_dict = market
                             break
                         # Fallback: use first market if we can't match by token
@@ -3430,7 +3743,7 @@ def _select_position_for_trade(positions: list):
                         # Display outcomes with prices
                         outcomes = market_dict.get("outcomes") or []
                         outcome_prices = market_dict.get("outcome_prices") or []
-                        clob_token_ids = market_dict.get("clob_token_ids") or []
+                        clob_token_ids = _trading_ids_for(market_dict)
                         clob_prices = market_dict.get("_clob_prices")
                         
                         if outcomes:
@@ -4385,6 +4698,7 @@ def place_order(
     order_type: str = "GTC",
     chosen_outcome_name: str | None = None,
     chosen_token_id: str | None = None,
+    protocol_version: str = "v1",
 ):
     """
     Place an order for the selected market.
@@ -4393,6 +4707,12 @@ def place_order(
     The SDK chooses signature type from the trading wallet. Tick size and
     neg-risk are resolved by the SDK; `neg_risk` is kept so callers can still
     pass the market flag shown in the order summary.
+
+    `chosen_token_id` is the market's trading id for the outcome: a CTF token
+    id on a v1 market, a Protocol V2 position id on a v2 market (see
+    _trading_ids_for). The SDK recognises a position id and signs it for
+    Exchange V3 under domain version "3"; nothing here branches on it.
+    `protocol_version` only sharpens the error text afterwards.
 
     Headers: x-session-id, x-wallet-address.
     Body: marketId, orderType (equal to signedOrder.orderType), signedOrder,
@@ -4550,7 +4870,7 @@ def place_order(
         print(f"Order error: {exc}")
         return
 
-    _handle_order_response(resp, headers, side)
+    _handle_order_response(resp, headers, side, protocol_version=protocol_version)
 
 
 # Outcome-unknown answers: the order reached (or may have reached) the CLOB and
@@ -4627,7 +4947,7 @@ def _reconcile_order(order_hash: str, headers: dict, max_seconds: int = ORDER_RE
         delay = min(delay * 2, 10.0)
 
 
-def _handle_order_response(resp, headers: dict, side: str) -> None:
+def _handle_order_response(resp, headers: dict, side: str, protocol_version: str = "v1") -> None:
     """Map POST /v1/trading/orders answers to operator guidance; reconcile when told to."""
     try:
         body = resp.json() or {}
@@ -4673,10 +4993,25 @@ def _handle_order_response(resp, headers: dict, side: str) -> None:
 
     if resp.status_code == 403 and code == "MIGRATION_REQUIRED":
         details = body.get("details") or {}
+        if str(details.get("reason") or "").lower() == "protocol_v2":
+            # Safe maker on a Protocol V2 market. Returned in both flag states
+            # (precedence over PROTOCOL_V2_DISABLED): migrating is the only remedy.
+            print("Order rejected: Safe wallets cannot trade Protocol V2 markets (MIGRATION_REQUIRED, reason protocol_v2).")
+            print("  Migrate to a deposit wallet once in the web app at https://almanac.market, then use")
+            print("  'Refresh Trading Session'. CTF markets, cancels, withdrawals, and claims still work.")
+            return
         print("Order rejected: Safe-wallet trading has ended (MIGRATION_REQUIRED).")
         print(f"  Cutoff: {details.get('cutoffDate') or 'see almanac.market'}")
         print("  Migrate once in the web app at https://almanac.market, then use")
         print("  'Refresh Trading Session'. Cancels, withdrawals, and claims still work.")
+        return
+
+    if resp.status_code == 403 and code == "PROTOCOL_V2_DISABLED":
+        # Refused before any CLOB call; nothing was placed.
+        print("Order rejected: Protocol V2 trading is not enabled on Almanac yet (PROTOCOL_V2_DISABLED).")
+        print("  GET /v1/trading/config → protocolV2.tradingEnabled is false. Nothing was sent to the exchange.")
+        print("  CTF markets still trade. Try this market again later.")
+        fetch_trading_config(force=True)
         return
 
     if resp.status_code == 403 and code == "ORDER_WALLET_MISMATCH":
@@ -4694,6 +5029,20 @@ def _handle_order_response(resp, headers: dict, side: str) -> None:
     if resp.status_code == 401:
         print(f"Order rejected ({code or 401}): {body.get('userMessage') or 'session invalid'}")
         print("  Use 'Refresh Trading Session' and try again.")
+        return
+
+    if protocol_version == "v2" and code == "INSUFFICIENT_BALANCE":
+        # The CLOB reports a missing Exchange V3 allowance as a balance error.
+        # pUSD covers BUYs; the V2 approvals are the usual cause on a wallet
+        # that has only the seven CTF approvals.
+        print(f"Order rejected ({code}): {body.get('userMessage') or ''}")
+        eoa = headers.get("x-wallet-address") or _get_credential("EOA_WALLET_ADDRESS")
+        missing = _missing_v2_approvals(eoa, force=True) if eoa else None
+        if missing:
+            _print_v2_approvals_hint(missing)
+        else:
+            print("  On a Protocol V2 market this is either pUSD / share balance or a missing Exchange V3")
+            print("  approval. Check the approvals panel at https://almanac.market (11 entries for a deposit wallet).")
         return
 
     print("Failed to place order:")

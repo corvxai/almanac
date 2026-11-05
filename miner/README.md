@@ -401,5 +401,11 @@ python3 scripts/run_api_trading.py
 > [market/DEPOSIT_WALLETS.md](market/DEPOSIT_WALLETS.md) for what changed in the
 > trading client (nothing to configure — orders, claims, and withdrawals adapt
 > to your wallet kind automatically).
+>
+> **Protocol V2:** Polymarket's new markets carry `version: "v2"` and trade on
+> a second ledger. The CLI picks the right id and signing domain itself; you
+> only need to log in once at almanac.market to grant the four Protocol V2
+> approvals (Safe wallets must migrate first). See
+> [market/DEPOSIT_WALLETS.md](market/DEPOSIT_WALLETS.md) §6.
 
 Account setup and trading happen on [almanac.market](https://almanac.market). The rest of this file is **Forecasting only**.
