@@ -19,7 +19,7 @@ scipy
 pandas
 tabulate
 requests
-polymarket-client==0.14.0
+polymarket-client==0.16.0
 eth-account
 web3
 py-builder-relayer-client>=0.0.2
