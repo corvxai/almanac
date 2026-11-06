@@ -1946,7 +1946,7 @@ _SKIPPED_REDEMPTION_HINTS = {
     "no_balance": "no redeemable balance on-chain for this condition",
     "not_resolved": "Protocol V2 market not resolved on-chain yet; claim later",
     "version_unknown": "Almanac could not decide which ledger (CTF or Protocol V2) holds this condition; "
-                       "refused rather than guessed — retry later or contact support",
+                       "refused rather than guessed. Nothing was claimed, and balances are unaffected",
     "router_not_approved": "PositionManager is not approved for the Protocol V2 Router; grant the "
                            "Protocol V2 approvals at https://almanac.market, then claim again",
     "unsupported_module": "Protocol V2 position id names a module Almanac does not redeem (not binary / neg-risk)",
