@@ -39,6 +39,10 @@ from src.validator.forecasting.trace_assembler import assemble_trace
 
 logger = logging.getLogger("forecasting.orchestrator")
 
+# Callers that omit market_baseline still fetch inside run_agent. A passed
+# value, including None for a failed lookup, is used as-is.
+_MARKET_BASELINE_NOT_PROVIDED: Any = object()
+
 
 class Orchestrator:
     def __init__(
@@ -82,6 +86,7 @@ class Orchestrator:
         agent: BaseAgent,
         *,
         miner_hotkey: str | None = None,
+        market_baseline: Any = _MARKET_BASELINE_NOT_PROVIDED,
     ) -> EvidenceDigest:
         """Execute a single agent on a single event and return the sealed trace.
 
@@ -107,7 +112,9 @@ class Orchestrator:
 
         # Baseline metadata for scoring: pull the latest market signal up-front
         # in a validator-controlled lookup, independent of agent behavior.
-        market_baseline = self._collect_market_baseline(event)
+        # A caller that already fetched passes that result, including None.
+        if market_baseline is _MARKET_BASELINE_NOT_PROVIDED:
+            market_baseline = self._collect_market_baseline(event)
 
         if is_docker:
             self._local_proxy_state.register_run(

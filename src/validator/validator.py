@@ -636,8 +636,13 @@ class Validator:
         self,
         assignment: OrchestratorAssignment,
         digest: EvidenceDigest,
+        outcome_prices_at_prediction: dict[str, float],
     ) -> dict:
-        return build_prediction_submit_payload(assignment, digest)
+        return build_prediction_submit_payload(
+            assignment,
+            digest,
+            outcome_prices_at_prediction,
+        )
 
     def _trace_primary_model_info(self, digest: EvidenceDigest) -> tuple[str | None, str | None]:
         return trace_primary_model_info(digest)
