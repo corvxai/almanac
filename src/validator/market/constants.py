@@ -49,7 +49,7 @@ FEE_FLOOR_MAX_POOL_SHARE = 0.40
 
 # --- dust ------------------------------------------------------------------
 # Total reserve for dormant-but-historically-positive miners.
-DUST_RESERVE_SHARE = 0.02
+DUST_RESERVE_SHARE = 0.0025
 # Worst-ranked dormant miner gets this fraction of the best-ranked one's dust.
 DUST_MIN_RATIO = 0.25
 # Sanity check only: emitted dust weight relative to the largest weight in the
