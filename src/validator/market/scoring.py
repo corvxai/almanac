@@ -721,7 +721,7 @@ def print_mechanism_diagnostics(
         f"alpha={PARETO_ALPHA}  pnl_decay={EDGE_DECAY}  "
         f"cap={CONCENTRATION_CAP:.0%} (relax {CAP_RELAX_FACTOR}x)\n"
         f"fee_floor={FEE_FLOOR_MULTIPLIER:.0%} (gate roi>={FEE_FLOOR_MIN_ROI:.2%})  "
-        f"dust_reserve={DUST_RESERVE_SHARE:.0%}  "
+        f"dust_reserve={DUST_RESERVE_SHARE:.1%}  "
         f"inactivity={INACTIVITY_EPOCHS} epochs"
     )
 
