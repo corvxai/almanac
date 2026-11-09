@@ -298,7 +298,7 @@ def test_build_prediction_submit_payload_binary_fields() -> None:
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9))
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9), {})
     prediction = payload["prediction"]
     assert prediction["predictedOutcomeId"] == "oid_yes"
     assert prediction["outcomeProbabilities"]["oid_yes"] == 0.8
@@ -352,7 +352,7 @@ def test_build_prediction_submit_payload_handles_sparse_reasoning_chain() -> Non
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _SparseDigest(0.4, confidence=0.6))
+    payload = build_prediction_submit_payload(assignment, _SparseDigest(0.4, confidence=0.6), {})
     trace = payload["reasoningTrace"]["trace"]
     assert trace["providerCalls"] == []
     assert trace["steps"] == []
@@ -372,7 +372,7 @@ def test_build_prediction_submit_payload_marks_invalid_when_no_provider_calls() 
         ]
     )
     # Well-formed probability/confidence, but zero validator-recorded provider calls.
-    payload = build_prediction_submit_payload(assignment, _SparseDigest(0.8, confidence=0.9))
+    payload = build_prediction_submit_payload(assignment, _SparseDigest(0.8, confidence=0.9), {})
     prediction = payload["prediction"]
     assert prediction["outcomeProbabilities"]["oid_yes"] == pytest.approx(0.8)
     assert prediction["executionMetadata"]["predictionIsInvalid"] is True
@@ -389,7 +389,7 @@ def test_build_prediction_submit_payload_marks_invalid_when_no_reasoning_steps()
         ]
     )
     payload = build_prediction_submit_payload(
-        assignment, _NoReasoningDigest(0.8, confidence=0.9)
+        assignment, _NoReasoningDigest(0.8, confidence=0.9), {}
     )
     prediction = payload["prediction"]
     assert prediction["executionMetadata"]["predictionIsInvalid"] is True
@@ -457,7 +457,9 @@ def test_build_prediction_submit_payload_marks_invalid_non_numeric_prediction() 
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _Digest("not-a-number", confidence=0.8))
+    payload = build_prediction_submit_payload(
+        assignment, _Digest("not-a-number", confidence=0.8), {}
+    )
     prediction = payload["prediction"]
     assert prediction["predictedOutcomeId"] in {"oid_yes", "oid_no"}
     assert prediction["outcomeProbabilities"]["oid_yes"] == 0.0
@@ -476,7 +478,7 @@ def test_build_prediction_submit_payload_marks_invalid_confidence_out_of_range()
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=5.0))
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=5.0), {})
     prediction = payload["prediction"]
     assert prediction["confidence"] == pytest.approx(0.0)
     assert prediction["executionMetadata"]["predictionIsInvalid"] is True
@@ -531,8 +533,9 @@ def test_submit_payload_unchanged_and_multipoint_with_belief_path() -> None:
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
+    live_prices = {"oid_yes": 0.41, "oid_no": 0.53}
     payload = build_prediction_submit_payload(
-        assignment, _real_digest_with_belief_path(0.62, confidence=0.7)
+        assignment, _real_digest_with_belief_path(0.62, confidence=0.7), live_prices
     )
     prediction = payload["prediction"]
 
@@ -540,8 +543,8 @@ def test_submit_payload_unchanged_and_multipoint_with_belief_path() -> None:
     assert prediction["predictedOutcomeId"] == "oid_yes"
     assert prediction["outcomeProbabilities"]["oid_yes"] == pytest.approx(0.62)
     assert prediction["outcomeProbabilities"]["oid_no"] == pytest.approx(0.38)
-    # (3) market price at prediction (passed straight from the assignment event)
-    assert prediction["outcomePricesAtPrediction"] == assignment.event.currentOutcomePrices
+    # (3) market price at prediction, from the scoring map passed by the caller
+    assert prediction["outcomePricesAtPrediction"] == live_prices
     # (4) validity flag (a well-formed beliefPath + set confidence is valid)
     assert prediction["executionMetadata"]["predictionIsInvalid"] is False
 
@@ -571,6 +574,17 @@ def test_submit_payload_unchanged_and_multipoint_with_belief_path() -> None:
     assert final_step["reasoningTextRef"] == final_belief["textRef"]
 
 
+def test_build_prediction_submit_payload_submits_empty_price_map() -> None:
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9), {})
+    assert payload["prediction"]["outcomePricesAtPrediction"] == {}
+
+
 def test_build_prediction_submit_payload_missing_confidence_stays_valid() -> None:
     # Confidence is optional (stored, unscored). A missing value must NOT invalidate
     # a well-formed prediction: the confidence slot is filled with the sentinel but
@@ -581,7 +595,7 @@ def test_build_prediction_submit_payload_missing_confidence_stays_valid() -> Non
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None))
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None), {})
     prediction = payload["prediction"]
     assert prediction["confidence"] == pytest.approx(0.0)
     assert prediction["executionMetadata"]["predictionIsInvalid"] is False
@@ -599,7 +613,7 @@ def test_confidence_omitted_flag_true_when_confidence_missing() -> None:
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None))
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=None), {})
     prediction = payload["prediction"]
     assert prediction["executionMetadata"]["confidenceOmitted"] is True
     assert prediction["confidence"] == pytest.approx(0.0)  # still a number
@@ -612,7 +626,7 @@ def test_confidence_omitted_flag_false_when_confidence_present() -> None:
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9))
+    payload = build_prediction_submit_payload(assignment, _Digest(0.8, confidence=0.9), {})
     prediction = payload["prediction"]
     assert prediction["executionMetadata"]["confidenceOmitted"] is False
     assert prediction["confidence"] == pytest.approx(0.9)
@@ -667,6 +681,6 @@ def test_max_size_submit_payload_stays_under_gateway_ceiling() -> None:
             {"outcomeId": "oid_no", "name": "No"},
         ]
     )
-    payload = build_prediction_submit_payload(assignment, digest)
+    payload = build_prediction_submit_payload(assignment, digest, {})
     serialized = json.dumps(payload)
     assert len(serialized.encode("utf-8")) < 900_000

@@ -7,6 +7,7 @@ be fetched directly by the validator before agent execution.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 from urllib.parse import urlparse
 
@@ -23,7 +24,13 @@ def fetch_polymarket_baseline(
     *,
     http_client: httpx.Client | None = None,
 ) -> dict[str, Any] | None:
-    """Fetch a validator-side baseline YES/NO price for a Polymarket event."""
+    """Fetch a validator-side baseline YES/NO price for a Polymarket event.
+
+    ``yes_price`` is the rounded YES outcome. ``no_price`` remains its complement
+    and is not the scored NO price. ``yes_outcome_price`` and ``no_outcome_price``
+    are Gamma's ``outcomePrices`` aligned by outcome name. A missing, non-finite,
+    or out-of-range side returns None.
+    """
     if not event.source or event.source.lower() != "polymarket":
         return None
 
@@ -36,16 +43,19 @@ def fetch_polymarket_baseline(
     if market is None:
         return None
 
-    latest_yes = _extract_yes_price(market)
-    if latest_yes is None:
+    named = _named_outcome_prices(market)
+    if named is None:
         return None
+    yes_actual, no_actual = named
 
-    latest_yes = round(max(0.0, min(1.0, latest_yes)), 4)
+    latest_yes = round(max(0.0, min(1.0, yes_actual)), 4)
     payload: dict[str, Any] = {
         "provider": "polymarket",
         "market_slug": market_slug,
         "yes_price": latest_yes,
         "no_price": round(1.0 - latest_yes, 4),
+        "yes_outcome_price": yes_actual,
+        "no_outcome_price": no_actual,
     }
     if event.source_id:
         payload["source_id"] = event.source_id
@@ -94,31 +104,30 @@ def _request_first_market(client: httpx.Client, params: dict[str, Any]) -> dict[
     return None
 
 
-def _extract_yes_price(market: dict[str, Any]) -> float | None:
-    outcomes_raw = market.get("outcomes")
-    prices_raw = market.get("outcomePrices")
+def _named_outcome_prices(market: dict[str, Any]) -> tuple[float, float] | None:
+    """Return Gamma YES and NO prices aligned by outcome name, or None."""
+    outcomes = _coerce_string_list(market.get("outcomes"))
+    prices = _coerce_float_list(market.get("outcomePrices"))
+    if not outcomes or not prices:
+        return None
 
-    outcomes = _coerce_string_list(outcomes_raw)
-    prices = _coerce_float_list(prices_raw)
+    yes_price: float | None = None
+    no_price: float | None = None
+    for name, price in zip(outcomes, prices):
+        label = name.strip().lower()
+        if label == "yes" and yes_price is None:
+            yes_price = price
+        elif label == "no" and no_price is None:
+            no_price = price
+    if yes_price is None or no_price is None:
+        return None
+    if not _in_unit_interval(yes_price) or not _in_unit_interval(no_price):
+        return None
+    return yes_price, no_price
 
-    if prices:
-        yes_idx = None
-        if outcomes:
-            for idx, name in enumerate(outcomes):
-                if name.strip().lower() == "yes":
-                    yes_idx = idx
-                    break
-        if yes_idx is not None and yes_idx < len(prices):
-            return prices[yes_idx]
-        return prices[0]
 
-    for key in ("price", "probability"):
-        value = market.get(key)
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
-    return None
+def _in_unit_interval(value: float) -> bool:
+    return math.isfinite(value) and 0.0 <= value <= 1.0
 
 
 def _coerce_string_list(value: Any) -> list[str] | None:

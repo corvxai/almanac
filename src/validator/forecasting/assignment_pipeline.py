@@ -8,7 +8,7 @@ import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, cast
+from typing import Any, Optional, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from src.agent.base import BaseAgent
@@ -23,10 +23,13 @@ from src.validator.forecasting.orchestrator_api import (
     submit_validator_prediction,
 )
 from src.validator.forecasting.orchestrator_event_mapper import assignment_to_event
+from src.validator.forecasting.polymarket_baseline import fetch_polymarket_baseline
 
 MAX_ASSIGNMENT_AGENT_CODE_BYTES = 2 * 1024 * 1024  # 2MB
 INVALID_PREDICTION_SENTINEL = 0.0
 INVALID_CONFIDENCE_SENTINEL = 0.0
+
+logger = logging.getLogger("forecasting.assignment_pipeline")
 
 
 def _to_camel_case(value: str) -> str:
@@ -278,6 +281,7 @@ def log_prediction_submit_invariants(
 def build_prediction_submit_payload(
     assignment: OrchestratorAssignment,
     digest: EvidenceDigest,
+    outcome_prices_at_prediction: dict[str, float],
 ) -> dict:
     digest_dump = digest.model_dump(mode="json")
     raw_provider_calls = [
@@ -332,7 +336,7 @@ def build_prediction_submit_payload(
             "predictedOutcomeId": predicted_outcome_id,
             "confidence": confidence,
             "outcomeProbabilities": outcome_probs,
-            "outcomePricesAtPrediction": assignment.event.currentOutcomePrices,
+            "outcomePricesAtPrediction": outcome_prices_at_prediction,
             "marketSnapshot": {
                 "source": assignment.event.source,
                 "sourceMarketId": assignment.event.sourceMarketId or assignment.event.marketId,
@@ -389,6 +393,48 @@ def build_prediction_submit_payload(
     }
 
 
+def _unit_price(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0 or number > 1.0:
+        return None
+    return number
+
+
+def _live_outcome_price_map(
+    assignment: OrchestratorAssignment,
+    baseline: dict[str, Any] | None,
+) -> dict[str, float] | None:
+    """Map both Gamma outcome prices onto outcome ids, or None if either side is missing."""
+    if not isinstance(baseline, dict):
+        return None
+    yes_price = _unit_price(baseline.get("yes_outcome_price"))
+    no_price = _unit_price(baseline.get("no_outcome_price"))
+    if yes_price is None or no_price is None:
+        return None
+    try:
+        yes_id, no_id = resolve_binary_outcome_ids(assignment)
+    except RuntimeError:
+        return None
+    if not yes_id or not no_id or yes_id == no_id:
+        return None
+    return {yes_id: yes_price, no_id: no_price}
+
+
+def _fetch_assignment_baseline(event: Event) -> dict[str, Any] | None:
+    try:
+        return fetch_polymarket_baseline(event)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "market baseline fetch failed for event=%s source_id=%s: %s",
+            event.event_id,
+            event.source_id,
+            exc,
+        )
+        return None
+
+
 def process_single_assignment(
     *,
     assignment: OrchestratorAssignment,
@@ -408,12 +454,21 @@ def process_single_assignment(
         raise RuntimeError("assignment has no agent.code")
 
     agent = build_sandbox_assignment_agent(assignment)
+    baseline = _fetch_assignment_baseline(event)
+    live_prices = _live_outcome_price_map(assignment, baseline)
+    if live_prices is not None:
+        event.current_outcome_prices = live_prices
     digest = orchestrator.run_agent(
         event,
         agent,
         miner_hotkey=assignment.miner.minerHotkey,
+        market_baseline=baseline,
     )
-    submit_payload = build_prediction_submit_payload(assignment, digest)
+    submit_payload = build_prediction_submit_payload(
+        assignment,
+        digest,
+        live_prices if live_prices is not None else {},
+    )
 
     submit_ack: SubmitPredictionResponse | None = None
     if submit_prediction:
