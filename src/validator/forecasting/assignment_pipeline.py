@@ -402,23 +402,48 @@ def _unit_price(value: object) -> float | None:
     return number
 
 
+def _named_binary_outcome_ids(
+    assignment: OrchestratorAssignment,
+) -> tuple[str, str] | None:
+    """Yes and No outcome ids by name.
+
+    ``resolve_binary_outcome_ids`` guesses by list order when a name is missing.
+    Gamma prices are matched by name, so that guess can put the YES price on the
+    NO id. A live price map requires both names.
+    """
+    yes_id: str | None = None
+    no_id: str | None = None
+    for outcome in assignment.event.outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        outcome_id = outcome.get("outcomeId")
+        name = str(outcome.get("name", "")).strip().lower()
+        if not isinstance(outcome_id, str) or not outcome_id:
+            continue
+        if name == "yes" and yes_id is None:
+            yes_id = outcome_id
+        elif name == "no" and no_id is None:
+            no_id = outcome_id
+    if not yes_id or not no_id or yes_id == no_id:
+        return None
+    return yes_id, no_id
+
+
 def _live_outcome_price_map(
     assignment: OrchestratorAssignment,
     baseline: dict[str, Any] | None,
 ) -> dict[str, float] | None:
-    """Map both Gamma outcome prices onto outcome ids, or None if either side is missing."""
+    """Map both Gamma outcome prices onto named outcome ids, or None."""
     if not isinstance(baseline, dict):
         return None
     yes_price = _unit_price(baseline.get("yes_outcome_price"))
     no_price = _unit_price(baseline.get("no_outcome_price"))
     if yes_price is None or no_price is None:
         return None
-    try:
-        yes_id, no_id = resolve_binary_outcome_ids(assignment)
-    except RuntimeError:
+    named = _named_binary_outcome_ids(assignment)
+    if named is None:
         return None
-    if not yes_id or not no_id or yes_id == no_id:
-        return None
+    yes_id, no_id = named
     return {yes_id: yes_price, no_id: no_price}
 
 

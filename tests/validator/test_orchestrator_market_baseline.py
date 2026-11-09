@@ -125,7 +125,10 @@ def test_market_baseline_not_added_to_provider_calls() -> None:
 _SYNC_PRICES = {"oid_yes": 0.26, "oid_no": 0.74}
 
 
-def _pipeline_assignment() -> OrchestratorAssignment:
+def _pipeline_assignment(
+    outcomes: list[dict] | None = None,
+    prices: dict[str, float] | None = None,
+) -> OrchestratorAssignment:
     code = "class Agent:\n    pass\n"
     sha = hashlib.sha256(code.encode("utf-8")).hexdigest()
     return OrchestratorAssignment.model_validate(
@@ -144,11 +147,12 @@ def _pipeline_assignment() -> OrchestratorAssignment:
                 "question": "Will X happen?",
                 "description": "Binary event",
                 "endDate": "2026-06-06T16:00:00Z",
-                "outcomes": [
+                "outcomes": outcomes
+                or [
                     {"outcomeId": "oid_yes", "name": "Yes"},
                     {"outcomeId": "oid_no", "name": "No"},
                 ],
-                "currentOutcomePrices": dict(_SYNC_PRICES),
+                "currentOutcomePrices": dict(prices or _SYNC_PRICES),
             },
             "agent": {
                 "agentUploadId": "cmpwwsd4800000razamvsplvc",
@@ -183,7 +187,7 @@ class _SandboxProxy:
         ]
 
 
-def _run_pipeline(baseline: object):
+def _run_pipeline(baseline: object, assignment: OrchestratorAssignment | None = None):
     cfg = AppConfig()
     cfg.validator.sandbox_type = "docker_runc"
     orchestrator = Orchestrator(
@@ -224,7 +228,7 @@ def _run_pipeline(baseline: object):
         ),
     ):
         result = process_single_assignment(
-            assignment=_pipeline_assignment(),
+            assignment=assignment or _pipeline_assignment(),
             config=cfg,
             orchestrator=orchestrator,
             loaded_hotkey=None,
@@ -262,6 +266,41 @@ def test_pipeline_sandbox_event_keeps_sync_prices_when_fetch_fails(baseline: obj
     assert prediction["executionMetadata"]["predictionIsInvalid"] is False
     assert result.digest.execution_context.market_price_at_prediction is None
     assert result.digest.prediction_output.contrarian_flag is False
+
+
+_LIVE_BASELINE = {
+    "yes_price": 0.25,
+    "no_price": 0.75,
+    "yes_outcome_price": 0.25,
+    "no_outcome_price": 0.5,
+}
+
+
+@pytest.mark.parametrize(
+    "outcomes",
+    [
+        pytest.param(
+            [{"outcomeId": "no_token"}, {"outcomeId": "yes_token"}],
+            id="no_names",
+        ),
+        pytest.param(
+            [{"outcomeId": "no_token", "name": ""}, {"outcomeId": "yes_token", "name": "Yes"}],
+            id="only_yes_named",
+        ),
+    ],
+)
+def test_pipeline_unnamed_outcomes_do_not_attach_gamma_prices_by_order(outcomes: list[dict]) -> None:
+    # Gamma name-matching would be YES 0.25 / NO 0.5. Order fallback would call
+    # the first id YES and store {no_token: 0.25, yes_token: 0.5}.
+    sync = {"no_token": 0.4, "yes_token": 0.6}
+    result, event = _run_pipeline(
+        _LIVE_BASELINE,
+        _pipeline_assignment(outcomes=outcomes, prices=sync),
+    )
+    assert event["current_outcome_prices"] == sync
+    prediction = result.submit_payload["prediction"]
+    assert prediction["outcomePricesAtPrediction"] == {}
+    assert prediction["executionMetadata"]["predictionIsInvalid"] is False
 
 
 def test_pipeline_partial_price_map_keeps_sync_prices() -> None:
