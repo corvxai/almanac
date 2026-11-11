@@ -255,6 +255,83 @@ def _load_scored_predictions(path: Path):
     return page.items
 
 
+def _snapshot_exported_at(path: Path) -> datetime | None:
+    """``exportedAt`` of a snapshot file, or ``None`` when it has none."""
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    raw = payload.get("exportedAt") if isinstance(payload, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _print_cluster_report(
+    metagraph_uids: list[int],
+    clusters: dict,
+    scores_off: np.ndarray,
+    scores_on: np.ndarray,
+    *,
+    now: datetime,
+) -> None:
+    """Print duplicate-agent clusters and their slice share with and without
+    the one-claim-per-cluster payout rule."""
+    enforce_from = forecasting_scoring.CLUSTER_ENFORCE_FROM
+    live = now >= enforce_from
+    print(
+        f"\nDuplicate-agent clusters (enforce from {enforce_from.isoformat()}; "
+        f"at now={now.isoformat()} the payout rule is "
+        f"{'ENFORCED' if live else 'not enforced yet'})"
+    )
+    members_by_cluster: dict[int, list[int]] = {}
+    for idx, cid in enumerate(clusters["cluster_id"]):
+        if int(cid) >= 0:
+            members_by_cluster.setdefault(int(cid), []).append(idx)
+    if not members_by_cluster:
+        print("  none")
+    table = []
+    for cid, members in sorted(
+        members_by_cluster.items(), key=lambda kv: (-len(kv[1]), kv[0])
+    ):
+        table.append(
+            [
+                cid,
+                len(members),
+                float(scores_off[members].sum()),
+                float(scores_on[members].sum()),
+                ", ".join(str(u) for u in sorted(metagraph_uids[i] for i in members)),
+            ]
+        )
+    if table:
+        print(
+            forecasting_scoring.tabulate(
+                table,
+                headers=["cluster", "size", "share (not enforced)", "share (enforced)", "uids"],
+                floatfmt=("", "", ".4f", ".4f", ""),
+            )
+        )
+    burn_uid = forecasting_scoring.BURN_UID
+    if burn_uid in metagraph_uids:
+        burn_idx = metagraph_uids.index(burn_uid)
+        print(
+            f"burn: {float(scores_off[burn_idx]):.4f} not enforced, "
+            f"{float(scores_on[burn_idx]):.4f} enforced"
+        )
+    movers = [
+        (float(scores_on[i] - scores_off[i]), uid, float(scores_off[i]), float(scores_on[i]))
+        for i, uid in enumerate(metagraph_uids)
+        if uid != burn_uid and int(clusters["cluster_id"][i]) < 0 and scores_on[i] != scores_off[i]
+    ]
+    movers.sort(reverse=True)
+    if movers:
+        print("unclustered miners whose share changes under enforcement (top 10):")
+        for _delta, uid, before, after in movers[:10]:
+            print(f"  uid {uid}: {before:.4f} -> {after:.4f}")
+
+
 def _mock_hotkey(uid: int) -> str:
     return f"mock_hotkey_{uid:04d}"
 
@@ -689,7 +766,10 @@ def main() -> int:
         metagraph_uids.append(forecasting_scoring.BURN_UID)
         metagraph_hotkeys.append("burn")
     metagraph = SimpleNamespace(uids=metagraph_uids, hotkeys=metagraph_hotkeys)
-    now_utc = datetime.now(timezone.utc)
+    # Score a snapshot as of its export time, so a replay does not drift with
+    # the wall clock (recency weights, inactivity, cluster enforce date).
+    now_utc = _snapshot_exported_at(input_path) or datetime.now(timezone.utc)
+    print(f"Scoring as of now={now_utc.isoformat()}")
     scoring_result = forecasting_scoring.score_agent_predictions(
         metagraph=metagraph,
         scored_predictions=rows,
@@ -697,7 +777,25 @@ def main() -> int:
         now=now_utc,
         return_pre_pareto=True,
     )
-    scores, _pre_pareto_scores, pools, composite_scores = scoring_result
+    scores, _pre_pareto_scores, pools, composite_scores, clusters = scoring_result
+    # Same rows with the cluster payout rule forced off and on, whatever the
+    # enforce date says, so the effect is visible during the notice period.
+    quiet = logging.getLogger("forecasting.scoring")
+    previous_level = quiet.level
+    quiet.setLevel(logging.WARNING)
+    try:
+        scores_off, scores_on = (
+            forecasting_scoring.score_agent_predictions(
+                metagraph=metagraph,
+                scored_predictions=rows,
+                rolling_window_days=forecasting_scoring.DEFAULT_ROLLING_WINDOW_DAYS,
+                now=now_utc,
+                cluster_enforce=enforce,
+            )
+            for enforce in (False, True)
+        )
+    finally:
+        quiet.setLevel(previous_level)
     logger.info(
         "scoring simulation summary: rows=%d miners=%d (non-zero scores=%d)",
         len(rows),
@@ -712,6 +810,7 @@ def main() -> int:
         return 0
 
     print("Per-miner diagnostics table is emitted by almanac.scoring INFO logs.")
+    _print_cluster_report(metagraph_uids, clusters, scores_off, scores_on, now=now_utc)
     if not args.no_graph:
         graph_path = graph_results(
             metagraph_uids,
