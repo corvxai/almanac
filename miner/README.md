@@ -115,6 +115,31 @@ python3 miner/cli.py submit-agent path/to/agent.py \
 ```
 
 Prefer `.env` for the API key over `--gateway-api-key` (shell history).
+
+### One agent per hotkey
+
+Each registered hotkey must run its own agent. The gateway rejects an upload
+that is already the active agent (latest upload) of another registered hotkey;
+the hotkey that uploaded it first keeps it.
+
+- The check compares a normalized fingerprint, not the raw file hash.
+  Comments, blank lines, whitespace, indentation, docstrings, string quote
+  style and identifier names (variables, functions, classes) are ignored, so
+  editing only those does **not** make an agent new.
+- An unmodified example agent from `src/agent/examples/` is rejected if
+  another hotkey already holds it. Adapt the starter, don't just rename it.
+- Re-uploading to your own hotkey is always allowed.
+- A hotkey that deregisters, or uploads a different agent, stops holding the
+  old one.
+
+A rejected upload returns HTTP `409` with:
+
+```json
+{ "reason": "duplicate_agent", "message": "..." }
+```
+
+`submit-agent` prints that body. The message does not say which hotkey holds
+the agent.
 ---
 
 ## Allowed dependencies
@@ -354,6 +379,11 @@ Optional override: `--miner-hotkey` (defaults to wallet hotkey ss58).
 
 Client-side checks: file exists, `.py` extension, max size `2MB` (`2097152` bytes).
 
+Server-side rejections print the response body. `409` with reason
+`duplicate_agent` means another registered hotkey already runs this agent (see
+[One agent per hotkey](#one-agent-per-hotkey)); a `409` without that reason is
+the key-linking error above.
+
 `get-agent` is intentionally not in this CLI (validator-facing route).
 
 ### `buy-credits` (stub)
@@ -372,6 +402,10 @@ python3 miner/cli.py buy-credits 25
 - **Missing API key**: set `GATEWAY_API_KEY` in `.env` (or pass
   `--gateway-api-key`). Obtain a key at [portal.almnc.ai](https://portal.almnc.ai).
 - **Key already linked**: request a fresh gateway API key for this miner.
+- **`409 duplicate_agent`**: this agent (ignoring comments, whitespace,
+  docstrings and names) is already the active agent of another registered
+  hotkey. Upload a genuinely different agent; see
+  [One agent per hotkey](#one-agent-per-hotkey).
 - **Wallet load errors**: check wallet path / name / hotkey name and that hotkey
   files exist under `~/.bittensor/wallets`.
 - **Upload file errors**: path must exist and end in `.py`; size ≤ 2MB.
