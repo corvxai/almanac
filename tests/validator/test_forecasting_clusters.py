@@ -255,6 +255,111 @@ def test_split_claim_is_compared_against_the_allowance() -> None:
     assert skill_spent == 0.0
 
 
+def test_penalty_is_off_by_default() -> None:
+    assert scoring.CLUSTER_PENALTY_PCT == 0.0
+
+
+def test_penalty_cuts_every_cluster_member_and_nobody_else() -> None:
+    pre = np.array([0.5, 0.5, 0.5, 0.5])
+    skill = np.array([0.2, 0.2, 0.2, 0.2])
+    sig = np.array([1.0, 0.5, 1.0, 1.0])
+    eff_n = np.array([100.0, 100.0, 10.0, 100.0])  # third has no skill claim
+    ids = np.array([2, 2, 2, -1])
+
+    base, base_pools, base_allow, base_skill = _allocate_slice(
+        pre, skill, sig, eff_n, cluster_ids=ids
+    )
+    cut, pools, allow_spent, skill_spent = _allocate_slice(
+        pre, skill, sig, eff_n, cluster_ids=ids, cluster_penalty_pct=25.0
+    )
+
+    # Claimants and the allowance-only member alike lose a quarter.
+    np.testing.assert_allclose(cut[:3], base[:3] * 0.75)
+    assert cut[3] == base[3]
+    assert pools == base_pools == ["skill", "skill", "allow", "skill"]
+    # The cut is unspent, not handed to anyone.
+    assert base.sum() - cut.sum() == pytest.approx(0.25 * base[:3].sum())
+    assert allow_spent + skill_spent == pytest.approx(cut.sum())
+    assert allow_spent < base_allow and skill_spent < base_skill
+
+
+def test_penalty_needs_enforcement() -> None:
+    pre = np.array([0.5, 0.5])
+    skill = np.array([0.2, 0.2])
+    sig = np.array([1.0, 1.0])
+    eff_n = np.array([100.0, 100.0])
+
+    base, _, _, _ = _allocate_slice(pre, skill, sig, eff_n)
+    cut, _, _, _ = _allocate_slice(pre, skill, sig, eff_n, cluster_penalty_pct=25.0)
+    np.testing.assert_array_equal(cut, base)
+
+
+def test_penalty_holds_when_the_skill_pool_is_oversubscribed() -> None:
+    # Four full claims (1.2) against a 0.75 pool: the penalty is applied after
+    # the scale, so the cluster is not scaled back up at the others' expense.
+    pre = np.full(4, 0.5)
+    skill = np.full(4, 0.2)
+    sig = np.full(4, 1.0)
+    eff_n = np.full(4, 100.0)
+    ids = np.array([0, -1, -1, 0])
+    sig_split = sig.copy()
+
+    base, _, _, _ = _allocate_slice(pre, skill, sig_split, eff_n, cluster_ids=ids)
+    cut, _, _, _ = _allocate_slice(
+        pre, skill, sig_split, eff_n, cluster_ids=ids, cluster_penalty_pct=40.0
+    )
+    np.testing.assert_allclose(cut[[0, 3]], base[[0, 3]] * 0.6)
+    np.testing.assert_array_equal(cut[[1, 2]], base[[1, 2]])
+
+
+def test_full_penalty_zeroes_the_cluster() -> None:
+    pre = np.array([0.5, 0.5, 0.5])
+    skill = np.array([0.2, 0.2, 0.2])
+    sig = np.ones(3)
+    eff_n = np.full(3, 100.0)
+    cut, _, _, _ = _allocate_slice(
+        pre, skill, sig, eff_n, cluster_ids=np.array([1, 1, -1]), cluster_penalty_pct=100.0
+    )
+    assert cut[:2].tolist() == [0.0, 0.0]
+    assert cut[2] > 0.0
+
+
+def test_penalty_override_end_to_end() -> None:
+    uids = [3, 8, 21, 40]
+    rows = [r for uid in (3, 8, 21) for r in _skilled_rows(uid)]
+    rows += _independent_rows(40, seed=40)
+
+    def run(enforce: bool, pct: float | None = None):
+        return score_agent_predictions(
+            metagraph=_metagraph(uids),
+            scored_predictions=rows,
+            now=NOW,
+            cluster_enforce=enforce,
+            cluster_penalty_pct=pct,
+            return_pre_pareto=True,
+        )
+
+    on = run(True)
+    cut = run(True, 25.0)
+    np.testing.assert_array_equal(on[0], run(True, 0.0)[0])  # default is 0
+    np.testing.assert_allclose(cut[0][:3], on[0][:3] * 0.75)
+    assert cut[0][3] == on[0][3]
+    assert cut[4]["penalty_pct"] == 25.0
+    assert on[4]["penalty_pct"] == 0.0
+    # Not enforced: no penalty, and the report says so.
+    off = run(False, 25.0)
+    np.testing.assert_array_equal(off[0], run(False)[0])
+    assert off[4]["penalty_pct"] == 0.0
+
+
+@pytest.mark.parametrize("pct", [-1.0, 100.5, float("nan")])
+def test_penalty_out_of_range_is_rejected(pct: float) -> None:
+    with pytest.raises(ValueError):
+        score_agent_predictions(
+            metagraph=_metagraph([3]), scored_predictions=[], now=NOW, cluster_penalty_pct=pct
+        )
+
+
 def test_clone_cluster_collapses_to_one_claim() -> None:
     clones = [3, 8, 21]
     rows = [r for uid in clones for r in _skilled_rows(uid)]

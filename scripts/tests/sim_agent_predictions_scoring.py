@@ -284,7 +284,8 @@ def _print_cluster_report(
     print(
         f"\nDuplicate-agent clusters (enforce from {enforce_from.isoformat()}; "
         f"at now={now.isoformat()} the payout rule is "
-        f"{'ENFORCED' if live else 'not enforced yet'})"
+        f"{'ENFORCED' if live else 'not enforced yet'}; "
+        f"cluster penalty {forecasting_scoring.CLUSTER_PENALTY_PCT:g}%)"
     )
     members_by_cluster: dict[int, list[int]] = {}
     for idx, cid in enumerate(clusters["cluster_id"]):

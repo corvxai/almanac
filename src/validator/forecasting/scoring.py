@@ -58,6 +58,8 @@ Post-gate scoring details:
       cluster (see ``_detect_clusters``). From ``CLUSTER_ENFORCE_FROM`` a
       cluster is paid one skill claim, split equally between its
       skill-claiming members. Before that date clusters are reported only.
+      ``CLUSTER_PENALTY_PCT`` (0 = off) additionally cuts the final share of
+      every clustered miner by that percentage, burning the difference.
     * Edge pillar blends centered Brier-difference vs market (60%) with
       winner-side PnL (40%), then scales by ``EDGE_SIGNAL_GAIN``.
 
@@ -189,9 +191,14 @@ CLUSTER_AGREE_NUM = 3                 # linked when agree * DEN >= NUM * informa
 CLUSTER_AGREE_DEN = 5
 # Notice period. Before this instant clusters are computed and reported but
 # payouts are unchanged; from it on a cluster is paid one skill claim.
-# PLACEHOLDER: set to the release date + 7 days before release, in both
-# scorers, then regenerate the gateway parity fixture.
-CLUSTER_ENFORCE_FROM = datetime(2026, 11, 18, 0, 0, 0, tzinfo=timezone.utc)
+# Changing it means changing the gateway port and regenerating its parity
+# fixture.
+CLUSTER_ENFORCE_FROM = datetime(2026, 11, 12, 0, 0, 0, tzinfo=timezone.utc)
+# Extra penalty on top of the one-claim split, as a percentage in [0, 100].
+# Once the rule is enforced, every miner in a cluster has its final slice
+# share (allowance and skill alike) cut by this much; the cut is burned, not
+# redistributed. 0 turns it off. Mirrored in the gateway port.
+CLUSTER_PENALTY_PCT = 0.0
 
 # Edge is centered at 0 (matching the market). The raw Brier-difference / PnL
 # blend is only a few hundredths in practice; mapping it through (x+1)/2 used
@@ -249,6 +256,7 @@ def score_agent_predictions(
     now: Optional[datetime] = None,
     return_pre_pareto: bool = False,
     cluster_enforce: Optional[bool] = None,
+    cluster_penalty_pct: Optional[float] = None,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray, list[str], np.ndarray, dict]:
     """Return forecasting slice shares from orchestrator ``scored-predictions`` rows.
 
@@ -261,12 +269,21 @@ def score_agent_predictions(
     rho are returned alongside, for diagnostics and simulation tooling,
     followed by a cluster report: ``cluster_id`` (smallest UID of the
     miner's duplicate-agent cluster, -1 when it has none), ``cluster_size``
-    (1 when it has none), both aligned to the metagraph, and ``enforced``.
+    (1 when it has none), both aligned to the metagraph, ``enforced``, and
+    ``penalty_pct`` (the cluster penalty applied; 0 when not enforced).
 
     ``cluster_enforce`` overrides the ``CLUSTER_ENFORCE_FROM`` date check
     (simulation and tests). ``None`` compares ``now`` against that date.
+    ``cluster_penalty_pct`` likewise overrides ``CLUSTER_PENALTY_PCT``.
     """
     _validate_weights()
+    if cluster_penalty_pct is None:
+        cluster_penalty_pct = CLUSTER_PENALTY_PCT
+    cluster_penalty_pct = float(cluster_penalty_pct)
+    if not 0.0 <= cluster_penalty_pct <= 100.0:
+        raise ValueError(
+            f"cluster penalty must be a percentage in [0, 100], got {cluster_penalty_pct}"
+        )
 
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=rolling_window_days)
@@ -441,6 +458,7 @@ def score_agent_predictions(
         effective_n_by_idx,
         gate_effective_n=gate_effective_n_by_idx,
         cluster_ids=cluster_id_by_idx if cluster_enforce else None,
+        cluster_penalty_pct=cluster_penalty_pct,
     )
     spent = float(scores.sum())
     burn = max(0.0, 1.0 - spent)
@@ -491,11 +509,12 @@ def score_agent_predictions(
             cluster_members.setdefault(int(cid), []).append(uids[idx])
     logger.info(
         "forecasting scoring: %d duplicate-agent cluster(s) covering %d miner(s); "
-        "one-claim-per-cluster payout %s (enforce from %s)%s",
+        "one-claim-per-cluster payout %s (enforce from %s); cluster penalty %g%%%s",
         len(cluster_members),
         sum(len(m) for m in cluster_members.values()),
         "ENFORCED" if cluster_enforce else "not enforced yet",
         CLUSTER_ENFORCE_FROM.isoformat(),
+        cluster_penalty_pct,
         "".join(
             f"\n  cluster {cid} ({len(members)}): {sorted(members)}"
             for cid, members in sorted(cluster_members.items())
@@ -529,6 +548,7 @@ def score_agent_predictions(
             "cluster_id": cluster_id_by_idx,
             "cluster_size": cluster_size_by_idx,
             "enforced": bool(cluster_enforce),
+            "penalty_pct": cluster_penalty_pct if cluster_enforce else 0.0,
         }
         return scores, pre_pareto, pool_by_idx, composite_by_idx, clusters
     return scores
@@ -678,6 +698,7 @@ def _allocate_slice(
     effective_n: np.ndarray,
     gate_effective_n: Optional[np.ndarray] = None,
     cluster_ids: Optional[np.ndarray] = None,
+    cluster_penalty_pct: float = 0.0,
 ) -> tuple[np.ndarray, list[str], float, float]:
     """Map pre-pool composites into forecasting-slice shares.
 
@@ -699,6 +720,11 @@ def _allocate_slice(
     allowance comparison and the oversubscription scale. Allowance shares
     are untouched, and members without a skill claim get nothing extra.
     ``None`` leaves every claim as computed.
+
+    ``cluster_penalty_pct`` applies only with ``cluster_ids``: after the
+    oversubscription scale, the allowance share and the skill excess of
+    every miner in a cluster (skill claim or not) are each multiplied by
+    ``1 - cluster_penalty_pct / 100``. What is cut is left unspent.
 
     Returns weights, pool labels, allowance spent, and skill spent.
     """
@@ -754,11 +780,15 @@ def _allocate_slice(
     if excess_total > SKILL_POOL_SHARE:
         excess *= SKILL_POOL_SHARE / excess_total
 
+    keep = 1.0 - cluster_penalty_pct / 100.0
     allowance_spent = 0.0
     skill_spent = 0.0
     for i in eligible:
         share = float(allowance_of[i])
         extra = float(excess[i])
+        if cluster_ids is not None and int(cluster_ids[i]) >= 0:
+            share *= keep
+            extra *= keep
         if extra > 0.0:
             weights[i] = share + extra
             allowance_spent += share
