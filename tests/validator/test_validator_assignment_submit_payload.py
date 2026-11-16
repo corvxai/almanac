@@ -684,3 +684,26 @@ def test_max_size_submit_payload_stays_under_gateway_ceiling() -> None:
     payload = build_prediction_submit_payload(assignment, digest, {})
     serialized = json.dumps(payload)
     assert len(serialized.encode("utf-8")) < 900_000
+
+
+def test_trace_checks_are_reported_without_changing_validity() -> None:
+    # Logging only: the stub digest has no on-topic call and unsupported
+    # reasoning, yet the prediction stays valid and the reasons stay empty.
+    assignment = _assignment(
+        outcomes=[
+            {"outcomeId": "oid_yes", "name": "Yes"},
+            {"outcomeId": "oid_no", "name": "No"},
+        ]
+    )
+    payload = build_prediction_submit_payload(assignment, _Digest(0.7, confidence=0.8), {})
+
+    exec_meta = payload["prediction"]["executionMetadata"]
+    assert exec_meta["predictionIsInvalid"] is False
+    assert exec_meta["predictionValidation"]["reasons"] == []
+    assert exec_meta["predictionValidation"]["traceChecks"] == {
+        "researchCallMissing": True,
+        "reasoningUnsupported": True,
+        "reasoningOverlap": 0,
+        "marketLookup": False,
+        "marketLookupDomains": [],
+    }

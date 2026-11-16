@@ -40,6 +40,40 @@ def default_summarise_params(call_type: str, params: dict[str, Any]) -> str:
     return f"{call_type}({', '.join(parts)})"
 
 
+# Per-call cap on text retained for the trace validity checks, so one agent
+# cannot hold or make the validator tokenise an unbounded amount of text.
+_CHECK_TEXT_MAX_CHARS = 200_000
+# Response fields that describe the call rather than carry what the agent read.
+_RESPONSE_METADATA_KEYS = frozenset(
+    {
+        "id", "model", "object", "role", "type", "name", "index", "status", "created",
+        "provider", "service_tier", "system_fingerprint", "finish_reason",
+        "native_finish_reason", "stop_reason", "stop_sequence", "signature",
+        "encrypted_content", "encrypted_index", "tool_use_id", "tool_call_id", "call_id",
+    }
+)
+
+
+def _joined_strings(value: Any, skip_keys: frozenset[str] = frozenset()) -> str:
+    """Every string in a JSON-like value, in order, joined and capped.
+
+    Iterative so a deeply nested agent-supplied payload cannot exhaust the stack.
+    """
+    parts: list[str] = []
+    size = 0
+    stack: list[Any] = [value]
+    while stack and size < _CHECK_TEXT_MAX_CHARS:
+        item = stack.pop()
+        if isinstance(item, str):
+            parts.append(item)
+            size += len(item) + 1
+        elif isinstance(item, dict):
+            stack.extend(v for k, v in reversed(list(item.items())) if k not in skip_keys)
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+    return "\n".join(parts)[:_CHECK_TEXT_MAX_CHARS]
+
+
 def build_provider_call_record(
     *,
     call_index: int,
@@ -106,6 +140,10 @@ def build_provider_call_record(
         raw_response_hash=raw_hash,
         latency_ms=latency_ms,
         cost_units=cost_units,
+        prompt_text=_joined_strings(params),
+        # All text the agent received: every content block, tool or search
+        # result, reasoning trace and citation, not just the first completion.
+        response_text=_joined_strings(raw_response, _RESPONSE_METADATA_KEYS),
     )
 
 

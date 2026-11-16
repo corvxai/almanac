@@ -24,6 +24,7 @@ from src.validator.forecasting.orchestrator_api import (
 )
 from src.validator.forecasting.orchestrator_event_mapper import assignment_to_event
 from src.validator.forecasting.polymarket_baseline import fetch_polymarket_baseline
+from src.validator.forecasting.trace_validity import compute_trace_checks
 
 MAX_ASSIGNMENT_AGENT_CODE_BYTES = 2 * 1024 * 1024  # 2MB
 INVALID_PREDICTION_SENTINEL = 0.0
@@ -326,6 +327,26 @@ def build_prediction_submit_payload(
     submitted_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
     provider_id, model = trace_primary_model_info(digest)
     invalid_reason = "; ".join(invalid_reasons) if invalid_reasons else None
+    prediction_validation: dict[str, Any] = {
+        "isValid": is_valid_prediction,
+        "reasons": invalid_reasons,
+        "rawObserved": raw_observed,
+    }
+    # Logging only: reported beside the validity verdict, not part of it. The
+    # gateway treats the key as optional, so a failure here must never cost
+    # the miner the prediction.
+    try:
+        prediction_validation["traceChecks"] = compute_trace_checks(
+            question=assignment.event.question,
+            source_market_id=assignment.event.sourceMarketId or assignment.event.marketId,
+            provider_calls=digest.provider_calls,
+            reasoning=digest.prediction_output.reasoning_summary,
+        )
+    except Exception:
+        logger.exception(
+            "Assignment id=%s trace checks failed; submitting without them",
+            assignment.agentPredictionId,
+        )
 
     return {
         "agentPredictionId": assignment.agentPredictionId,
@@ -353,11 +374,7 @@ def build_prediction_submit_payload(
                 # stats. rawObserved.confidence already carries the 'None' repr; this is
                 # the machine-readable version.
                 "confidenceOmitted": digest.prediction_output.confidence is None,
-                "predictionValidation": {
-                    "isValid": is_valid_prediction,
-                    "reasons": invalid_reasons,
-                    "rawObserved": raw_observed,
-                },
+                "predictionValidation": prediction_validation,
             },
         },
         "reasoningTrace": {
