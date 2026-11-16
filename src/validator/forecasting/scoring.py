@@ -53,6 +53,13 @@ Post-gate scoring details:
       draws the allowance share alone.
       Unspent slice weight is added to ``BURN_UID`` when that UID is in the
       metagraph. :func:`_apply_pareto` is not used for the payout.
+    * Duplicate agents: miners whose predictions are near-identical on the
+      markets where at least one of them left the market price are one
+      cluster (see ``_detect_clusters``). From ``CLUSTER_ENFORCE_FROM`` a
+      cluster is paid one skill claim, split equally between its
+      skill-claiming members. Before that date clusters are reported only.
+      ``CLUSTER_PENALTY_PCT`` (0 = off) additionally cuts the final share of
+      every clustered miner by that percentage, burning the difference.
     * Edge pillar blends centered Brier-difference vs market (60%) with
       winner-side PnL (40%), then scales by ``EDGE_SIGNAL_GAIN``.
 
@@ -167,6 +174,32 @@ SKILL_MINER_CAP = 0.40                # of the skill pool, before rho
 SKILL_MIN_EFFECTIVE_N = 50.0          # below this, positive skill draws allowance
 SKILL_GATE_FREEZE_HOURS = 48.0
 
+# Duplicate-agent clusters (Proposal 4, Layer 2). Mirrored verbatim in the
+# gateway port (apps/api/src/leaderboard/scoring.ts); change both together.
+# Two miners are linked when, over the markets both predicted where at least
+# one of the two is off-market (more than CLUSTER_TICK from the market price
+# on the resolved outcome), there are at least CLUSTER_MIN_INFORMATIVE such
+# events and they agree within one cent on at least
+# CLUSTER_AGREE_NUM / CLUSTER_AGREE_DEN of them. Clusters are the connected
+# components of that graph. A pure market echo has no off-market record, so
+# it is never linked.
+CLUSTER_TICK = 0.01
+CLUSTER_OFF_MARKET_EPS = 1e-9         # off-market: abs(p - m) > CLUSTER_TICK + this
+CLUSTER_AGREE_CENTS = 1               # agree: abs(p_cents_a - p_cents_b) <= this
+CLUSTER_MIN_INFORMATIVE = 30
+CLUSTER_AGREE_NUM = 3                 # linked when agree * DEN >= NUM * informative
+CLUSTER_AGREE_DEN = 5
+# Notice period. Before this instant clusters are computed and reported but
+# payouts are unchanged; from it on a cluster is paid one skill claim.
+# Changing it means changing the gateway port and regenerating its parity
+# fixture.
+CLUSTER_ENFORCE_FROM = datetime(2026, 11, 12, 0, 0, 0, tzinfo=timezone.utc)
+# Extra penalty on top of the one-claim split, as a percentage in [0, 100].
+# Once the rule is enforced, every miner in a cluster has its final slice
+# share (allowance and skill alike) cut by this much; the cut is burned, not
+# redistributed. 0 turns it off. Mirrored in the gateway port.
+CLUSTER_PENALTY_PCT = 0.0
+
 # Edge is centered at 0 (matching the market). The raw Brier-difference / PnL
 # blend is only a few hundredths in practice; mapping it through (x+1)/2 used
 # to pin every miner near 0.5. Gain 10 saturates the pillar at a 0.10 blended
@@ -212,6 +245,7 @@ class _Record:
     scored_at: datetime       # when this resolved prediction was scored
     market_p_win: Optional[float]   # market price on the winning outcome at prediction
     market_p_pred: Optional[float]  # market price on predicted side at prediction
+    market_id: Optional[str] = None  # orchestrator market id; clustering key
 
 
 def score_agent_predictions(
@@ -221,7 +255,9 @@ def score_agent_predictions(
     rolling_window_days: int = DEFAULT_ROLLING_WINDOW_DAYS,
     now: Optional[datetime] = None,
     return_pre_pareto: bool = False,
-) -> np.ndarray | tuple[np.ndarray, np.ndarray, list[str], np.ndarray]:
+    cluster_enforce: Optional[bool] = None,
+    cluster_penalty_pct: Optional[float] = None,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray, list[str], np.ndarray, dict]:
     """Return forecasting slice shares from orchestrator ``scored-predictions`` rows.
 
     Output is a float ``np.ndarray`` indexed by metagraph UID position.
@@ -230,9 +266,24 @@ def score_agent_predictions(
     when that UID is present. With ``return_pre_pareto`` the pre-pool
     composite (after rho and inactivity, before the pools), each miner's
     pool label (``skill``, ``allow``, or ``-``), and the composite before
-    rho are returned alongside, for diagnostics and simulation tooling.
+    rho are returned alongside, for diagnostics and simulation tooling,
+    followed by a cluster report: ``cluster_id`` (smallest UID of the
+    miner's duplicate-agent cluster, -1 when it has none), ``cluster_size``
+    (1 when it has none), both aligned to the metagraph, ``enforced``, and
+    ``penalty_pct`` (the cluster penalty applied; 0 when not enforced).
+
+    ``cluster_enforce`` overrides the ``CLUSTER_ENFORCE_FROM`` date check
+    (simulation and tests). ``None`` compares ``now`` against that date.
+    ``cluster_penalty_pct`` likewise overrides ``CLUSTER_PENALTY_PCT``.
     """
     _validate_weights()
+    if cluster_penalty_pct is None:
+        cluster_penalty_pct = CLUSTER_PENALTY_PCT
+    cluster_penalty_pct = float(cluster_penalty_pct)
+    if not 0.0 <= cluster_penalty_pct <= 100.0:
+        raise ValueError(
+            f"cluster penalty must be a percentage in [0, 100], got {cluster_penalty_pct}"
+        )
 
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=rolling_window_days)
@@ -395,6 +446,10 @@ def score_agent_predictions(
         scores[idx] = float(np.clip(composite * significance_by_idx[idx], 0.0, 1.0))
         scored_miners += 1
 
+    cluster_id_by_idx, cluster_size_by_idx = _detect_clusters(uids, records_by_idx)
+    if cluster_enforce is None:
+        cluster_enforce = now >= CLUSTER_ENFORCE_FROM
+
     pre_pareto = scores.copy()
     scores, pool_by_idx, allowance_spent, skill_spent = _allocate_slice(
         pre_pareto,
@@ -402,6 +457,8 @@ def score_agent_predictions(
         significance_by_idx,
         effective_n_by_idx,
         gate_effective_n=gate_effective_n_by_idx,
+        cluster_ids=cluster_id_by_idx if cluster_enforce else None,
+        cluster_penalty_pct=cluster_penalty_pct,
     )
     spent = float(scores.sum())
     burn = max(0.0, 1.0 - spent)
@@ -446,6 +503,23 @@ def score_agent_predictions(
         SKILL_POOL_SHARE,
         burn,
     )
+    cluster_members: dict[int, list[int]] = {}
+    for idx, cid in enumerate(cluster_id_by_idx):
+        if cid >= 0:
+            cluster_members.setdefault(int(cid), []).append(uids[idx])
+    logger.info(
+        "forecasting scoring: %d duplicate-agent cluster(s) covering %d miner(s); "
+        "one-claim-per-cluster payout %s (enforce from %s); cluster penalty %g%%%s",
+        len(cluster_members),
+        sum(len(m) for m in cluster_members.values()),
+        "ENFORCED" if cluster_enforce else "not enforced yet",
+        CLUSTER_ENFORCE_FROM.isoformat(),
+        cluster_penalty_pct,
+        "".join(
+            f"\n  cluster {cid} ({len(members)}): {sorted(members)}"
+            for cid, members in sorted(cluster_members.items())
+        ),
+    )
     if missing_last_predicted:
         logger.warning(
             "forecasting scoring: %d miner(s) missing minerLastPredictedAt; "
@@ -466,9 +540,17 @@ def score_agent_predictions(
         total_in_window=total_in_window,
         invalid_in_window=invalid_in_window,
         pool_by_idx=pool_by_idx,
+        cluster_id_by_idx=cluster_id_by_idx,
+        cluster_size_by_idx=cluster_size_by_idx,
     )
     if return_pre_pareto:
-        return scores, pre_pareto, pool_by_idx, composite_by_idx
+        clusters = {
+            "cluster_id": cluster_id_by_idx,
+            "cluster_size": cluster_size_by_idx,
+            "enforced": bool(cluster_enforce),
+            "penalty_pct": cluster_penalty_pct if cluster_enforce else 0.0,
+        }
+        return scores, pre_pareto, pool_by_idx, composite_by_idx, clusters
     return scores
 
 
@@ -518,6 +600,10 @@ def _parse_record(item, scored_at: datetime) -> Optional[_Record]:
         if predicted_outcome_id in prices_at_pred:
             market_p_pred = _coerce_prob(prices_at_pred.get(predicted_outcome_id))
 
+    market_id = getattr(item, "marketId", None)
+    if not isinstance(market_id, str) or not market_id:
+        market_id = None
+
     return _Record(
         p_win=p_win,
         p_pred=p_pred,
@@ -525,6 +611,7 @@ def _parse_record(item, scored_at: datetime) -> Optional[_Record]:
         scored_at=scored_at,
         market_p_win=market_p_win,
         market_p_pred=market_p_pred,
+        market_id=market_id,
     )
 
 
@@ -610,6 +697,8 @@ def _allocate_slice(
     significance: np.ndarray,
     effective_n: np.ndarray,
     gate_effective_n: Optional[np.ndarray] = None,
+    cluster_ids: Optional[np.ndarray] = None,
+    cluster_penalty_pct: float = 0.0,
 ) -> tuple[np.ndarray, list[str], float, float]:
     """Map pre-pool composites into forecasting-slice shares.
 
@@ -624,6 +713,18 @@ def _allocate_slice(
     exceed it. A claim that does not clear the allowance share is paid from
     the allowance pool and does not enter that scale. Caps and unused pool
     budget are not redistributed.
+
+    ``cluster_ids`` (aligned to the inputs, -1 for no cluster) turns on the
+    one-claim-per-cluster rule: the members of a cluster that hold a skill
+    claim each have it replaced by ``max(member claims) / count`` before the
+    allowance comparison and the oversubscription scale. Allowance shares
+    are untouched, and members without a skill claim get nothing extra.
+    ``None`` leaves every claim as computed.
+
+    ``cluster_penalty_pct`` applies only with ``cluster_ids``: after the
+    oversubscription scale, the allowance share and the skill excess of
+    every miner in a cluster (skill claim or not) are each multiplied by
+    ``1 - cluster_penalty_pct / 100``. What is cut is left unspent.
 
     Returns weights, pool labels, allowance spent, and skill spent.
     """
@@ -647,6 +748,18 @@ def _allocate_slice(
         else:
             pools[i] = "allow"
 
+    if cluster_ids is not None:
+        claimants: dict[int, list[int]] = {}
+        for i in eligible:
+            if pools[i] == "skill" and int(cluster_ids[i]) >= 0:
+                claimants.setdefault(int(cluster_ids[i]), []).append(i)
+        for members in claimants.values():
+            if len(members) < 2:
+                continue
+            shared = max(float(skill_claims[i]) for i in members) / len(members)
+            for i in members:
+                skill_claims[i] = shared
+
     allowance_of = np.zeros(n, dtype=float)
     if eligible:
         raw = np.array([pre_pareto[i] for i in eligible], dtype=float)
@@ -667,11 +780,15 @@ def _allocate_slice(
     if excess_total > SKILL_POOL_SHARE:
         excess *= SKILL_POOL_SHARE / excess_total
 
+    keep = 1.0 - cluster_penalty_pct / 100.0
     allowance_spent = 0.0
     skill_spent = 0.0
     for i in eligible:
         share = float(allowance_of[i])
         extra = float(excess[i])
+        if cluster_ids is not None and int(cluster_ids[i]) >= 0:
+            share *= keep
+            extra *= keep
         if extra > 0.0:
             weights[i] = share + extra
             allowance_spent += share
@@ -681,6 +798,109 @@ def _allocate_slice(
             pools[i] = "allow"
             allowance_spent += share
     return weights, pools, allowance_spent, skill_spent
+
+
+# --------------------------------------------------------------------------- #
+# Duplicate-agent clusters                                                     #
+# --------------------------------------------------------------------------- #
+
+def _detect_clusters(
+    uids: list[int],
+    records_by_idx: list[list[_Record]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Group miners whose predictions are near-identical.
+
+    Inputs are each miner's valid records in its capped window (the records
+    the pillars use) that carry a market id and a market price on the
+    resolved outcome. Per record, ``p_cents = round(p_win * 100)`` and the
+    record is off-market when ``abs(p_win - market_p_win) > CLUSTER_TICK +
+    CLUSTER_OFF_MARKET_EPS``. For a pair of miners the informative events
+    are the markets both predicted where at least one of the two records is
+    off-market; they agree on one when their ``p_cents`` differ by at most
+    ``CLUSTER_AGREE_CENTS``. The pair is linked when ``informative >=
+    CLUSTER_MIN_INFORMATIVE`` and ``agree * CLUSTER_AGREE_DEN >=
+    CLUSTER_AGREE_NUM * informative`` (integers). Clusters are the connected
+    components of the link graph.
+
+    A miner holds at most one prediction per market. Should a market repeat
+    in a window, the most recent record (first in window order) is used.
+
+    Returns ``(cluster_id, cluster_size)`` aligned to ``uids``: the smallest
+    UID in the miner's component and the component size, or ``-1`` and ``1``
+    for a miner linked to nobody. Independent of row and metagraph order.
+    """
+    n = len(uids)
+    cluster_id = np.full(n, -1, dtype=np.int64)
+    cluster_size = np.ones(n, dtype=np.int64)
+
+    market_col: dict[str, int] = {}
+    members: list[int] = []
+    per_member: list[tuple[list[int], list[int], list[bool]]] = []
+    for idx in range(n):
+        cols: list[int] = []
+        cents: list[int] = []
+        offs: list[bool] = []
+        seen: set[str] = set()
+        for r in records_by_idx[idx]:
+            if r.market_id is None or r.market_p_win is None or r.market_id in seen:
+                continue
+            seen.add(r.market_id)
+            cols.append(market_col.setdefault(r.market_id, len(market_col)))
+            cents.append(int(round(r.p_win * 100)))
+            offs.append(abs(r.p_win - r.market_p_win) > CLUSTER_TICK + CLUSTER_OFF_MARKET_EPS)
+        # Fewer usable records than the informative floor can never link.
+        if len(cols) < CLUSTER_MIN_INFORMATIVE:
+            continue
+        members.append(idx)
+        per_member.append((cols, cents, offs))
+
+    k = len(members)
+    if k < 2:
+        return cluster_id, cluster_size
+
+    m = len(market_col)
+    p_cents = np.zeros((k, m), dtype=np.int16)
+    present = np.zeros((k, m), dtype=bool)
+    off = np.zeros((k, m), dtype=bool)
+    for row, (cols, cents, offs) in enumerate(per_member):
+        p_cents[row, cols] = cents
+        present[row, cols] = True
+        off[row, cols] = offs
+
+    parent = list(range(k))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a in range(k - 1):
+        cols_a = np.flatnonzero(present[a])
+        # Markets both predicted, with at least one of the two off-market.
+        informative = present[a + 1 :, cols_a] & (off[a + 1 :, cols_a] | off[a, cols_a])
+        close = np.abs(p_cents[a + 1 :, cols_a] - p_cents[a, cols_a]) <= CLUSTER_AGREE_CENTS
+        informative_n = informative.sum(axis=1).astype(np.int64)
+        agree_n = (informative & close).sum(axis=1).astype(np.int64)
+        linked = (informative_n >= CLUSTER_MIN_INFORMATIVE) & (
+            agree_n * CLUSTER_AGREE_DEN >= CLUSTER_AGREE_NUM * informative_n
+        )
+        for b in np.flatnonzero(linked):
+            ra, rb = find(a), find(a + 1 + int(b))
+            if ra != rb:
+                parent[rb] = ra
+
+    components: dict[int, list[int]] = {}
+    for row in range(k):
+        components.setdefault(find(row), []).append(members[row])
+    for comp in components.values():
+        if len(comp) < 2:
+            continue
+        cid = min(uids[idx] for idx in comp)
+        for idx in comp:
+            cluster_id[idx] = cid
+            cluster_size[idx] = len(comp)
+    return cluster_id, cluster_size
 
 
 # --------------------------------------------------------------------------- #
@@ -946,6 +1166,8 @@ def _log_score_table(
     total_in_window: np.ndarray,
     invalid_in_window: np.ndarray,
     pool_by_idx: list[str],
+    cluster_id_by_idx: Optional[np.ndarray] = None,
+    cluster_size_by_idx: Optional[np.ndarray] = None,
 ) -> None:
     """Emit per-miner diagnostics table at INFO level every scoring tick."""
     rows: list[list[object]] = []
@@ -1016,12 +1238,21 @@ def _log_score_table(
                 age_display = f"{age_display}\u2020"
                 any_stale_age = True
 
+        cluster_display: object = "-"
+        cluster_n: object = "-"
+        if cluster_id_by_idx is not None and int(cluster_id_by_idx[idx]) >= 0:
+            cluster_display = str(int(cluster_id_by_idx[idx]))
+            if cluster_size_by_idx is not None:
+                cluster_n = str(int(cluster_size_by_idx[idx]))
+
         rows.append(
             [
                 rank,
                 uid,
                 score,
                 pool_by_idx[idx],
+                cluster_display,
+                cluster_n,
                 float(pre_pareto[idx]),
                 float(accuracy[idx]),
                 float(edge[idx]),
@@ -1044,6 +1275,8 @@ def _log_score_table(
         "uid",
         "score",
         "pool",
+        "cluster",
+        "c_size",
         "raw",
         f"acc. ({w_acc:.0f}%)",
         f"edge ({w_edge:.0f}%)",
@@ -1057,7 +1290,7 @@ def _log_score_table(
         "invalid",
     ]
     floatfmt = (
-        ".0f", ".0f", ".3f", "", ".3f", ".3f", ".3f",
+        ".0f", ".0f", ".3f", "", "", "", ".3f", ".3f", ".3f",
         "", ".3f", ".3f", ".0f", ".3f", ".0f", "", "",
     )
     table = tabulate(
