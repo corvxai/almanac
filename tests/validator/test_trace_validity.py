@@ -330,3 +330,43 @@ def test_sourced_call_count_uses_structured_source_links_only() -> None:
     assert "source_url_count" not in annotated.model_dump(mode="json")
     assert _checks([prose_only, annotated, cited, grounded])["sourcedCallCount"] == 3
     assert _checks([_call(QUESTION)])["sourcedCallCount"] == 0
+
+
+def _gateway_completion(output: str) -> dict:
+    # Shape the Sub41 gateway returns to the validator (GatewayCompletionResponse).
+    return {
+        "provider": "openrouter",
+        "model": "openai/gpt-4o-mini:online",
+        "output": output,
+        "usage": {"promptTokens": 10, "completionTokens": 0, "totalTokens": 10},
+        "costMicro": "1234",
+        "providerCostMicro": "1028",
+        "markupBps": 2000,
+        "balanceAfterMicro": "998766",
+        "finishReason": "length",
+        "upstreamId": "gen-1763398552-abcdef",
+    }
+
+
+def test_gateway_completion_with_empty_output_is_an_empty_response() -> None:
+    prompt = {"model": "openai/gpt-4o-mini:online", "messages": [{"role": "user", "content": QUESTION}]}
+    empty = _record(prompt, _gateway_completion(""))
+    assert empty.response_text == ""
+    assert _checks([empty])["researchCallMissing"] is True
+
+    filled = _record(prompt, _gateway_completion(RESPONSE))
+    assert filled.response_text == RESPONSE
+    checks = _checks([filled])
+    assert checks["researchCallMissing"] is False
+    assert checks["reasoningUnsupported"] is False
+
+
+def test_sourced_call_count_reads_the_gateway_citation_count() -> None:
+    prompt = {"model": "perplexity/sonar", "messages": [{"role": "user", "content": QUESTION}]}
+    cited = _record(prompt, {**_gateway_completion(RESPONSE), "citationCount": 28})
+    uncited = _record(prompt, {**_gateway_completion(RESPONSE), "citationCount": 0})
+    malformed = _record(prompt, {**_gateway_completion(RESPONSE), "citationCount": "many"})
+    assert (cited.source_url_count, uncited.source_url_count, malformed.source_url_count) == (28, 0, 0)
+    assert _checks([cited, uncited, malformed])["sourcedCallCount"] == 1
+    # The count is a number, not text: it must not leak into the response text.
+    assert cited.response_text == RESPONSE

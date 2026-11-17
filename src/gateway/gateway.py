@@ -50,6 +50,8 @@ _RESPONSE_METADATA_KEYS = frozenset(
         "provider", "service_tier", "system_fingerprint", "finish_reason",
         "native_finish_reason", "stop_reason", "stop_sequence", "signature",
         "encrypted_content", "encrypted_index", "tool_use_id", "tool_call_id", "call_id",
+        # The Sub41 gateway's normalised completion: text is in `output`.
+        "finishReason", "upstreamId", "costMicro", "providerCostMicro", "balanceAfterMicro",
     }
 )
 
@@ -81,6 +83,10 @@ def _source_url_count(raw_response: Any) -> int:
     """Distinct links a response returned in structured source fields
     (citation annotations, search results, grounding chunks). Links the model
     merely wrote in its prose are not counted, so a prompt cannot fake them."""
+    # The Sub41 gateway strips the provider payload and reports the count itself.
+    reported = raw_response.get("citationCount") if isinstance(raw_response, dict) else None
+    if isinstance(reported, int) and not isinstance(reported, bool) and reported > 0:
+        return reported
     urls: set[str] = set()
     stack: list[tuple[str, Any]] = [("", raw_response)]
     visited = 0
