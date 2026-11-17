@@ -408,3 +408,40 @@ def test_burn_uid_collision_rejected():
     gp = {"tokens": np.array([0.0])}
     with pytest.raises(AssertionError, match="BURN_UID"):
         calculate_weights(miner, gp, 100.0, 10.0, 0.0, [], [BURN_UID])
+
+
+@pytest.mark.parametrize("pool_share, expected_share", [(0.15, 0.15), (0.50, 0.20)])
+def test_concentration_cap_only_clips_above_twenty_percent(pool_share, expected_share):
+    """A trader below CONCENTRATION_CAP is paid pro-rata; one above is held at it."""
+    from src.validator.market.constants import CONCENTRATION_CAP
+
+    assert CONCENTRATION_CAP == 0.20
+    n_others = 49
+    whale = pool_share * n_others / (1.0 - pool_share)  # multiple of one other trader
+    volume = np.full((N_EPOCHS, n_others + 1), 20_000.0)
+    volume[:, 0] *= whale
+    out, budget = run_pool(volume, volume * 0.02)
+
+    assert out["tokens"][0] / budget == pytest.approx(expected_share, abs=1e-6)
+    assert float(out["tokens"].sum()) == pytest.approx(budget, abs=1e-6)  # excess is redistributed
+
+
+@pytest.mark.parametrize("first_day_trades, paid", [(5, True), (4, False)])
+def test_new_trader_is_paid_on_first_day_with_min_trades(first_day_trades, paid):
+    """One trading day is enough to score; the 5-trade minimum still applies."""
+    from src.validator.market.constants import (
+        MIN_EPOCHS_FOR_ELIGIBILITY,
+        MIN_TRADES_FOR_ELIGIBILITY,
+    )
+
+    assert (MIN_EPOCHS_FOR_ELIGIBILITY, MIN_TRADES_FOR_ELIGIBILITY) == (1, 5)
+    volume, pnl = honest_pool()
+    volume[:-1, 0] = 0.0  # trader 0 only shows up in the epoch being scored
+    pnl[:-1, 0] = 0.0
+    hist = make_history(volume, pnl)
+    hist["trade_counts"][-1, 0] = first_day_trades
+    budget = float(hist["fees_prev"][N_EPOCHS - 1].sum())
+    out = score_pool(hist, budget, allow_dust=False)
+
+    assert bool(out["active"][0]) is paid
+    assert bool(out["tokens"][0] > 0) is paid

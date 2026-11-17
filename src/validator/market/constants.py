@@ -25,7 +25,7 @@ EDGE_DECAY = 0.93
 
 # --- concentration ---------------------------------------------------------
 # Max share of the epoch pool any single trader can take.
-CONCENTRATION_CAP = 0.06
+CONCENTRATION_CAP = 0.20
 # A hard cap flattens the top of the distribution into equal payouts whenever
 # it binds for everyone, which is what happens in thin epochs. So the effective
 # cap never tightens below CAP_RELAX_FACTOR x the equal share of the traders who
@@ -59,7 +59,7 @@ U16_QUANT_FLOOR = 1.0 / 65535.0
 
 # --- gates -----------------------------------------------------------------
 MIN_EPOCH_VOLUME = 1.0
-MIN_EPOCHS_FOR_ELIGIBILITY = 3  # Must trade for X epochs
+MIN_EPOCHS_FOR_ELIGIBILITY = 1  # Must trade for X epochs
 MIN_TRADES_FOR_ELIGIBILITY = 5  # Must have X predictions/trades
 INACTIVITY_EPOCHS = 10
 
