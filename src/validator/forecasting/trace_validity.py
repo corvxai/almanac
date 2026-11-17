@@ -11,6 +11,7 @@ Logging only: the flags are sent to the gateway but do not yet change
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Iterable
 
 # Bump whenever the same trace could produce different values: tokeniser,
@@ -91,12 +92,35 @@ def _question_coverage(question: str, provider_calls: Iterable[Any]) -> float:
     return best
 
 
-def _market_lookup_domains(source_market_id: str | None, provider_calls: Iterable[Any]) -> list[str]:
+# Agent-controlled text decides how much work the checks do, so they run under
+# a wall-clock budget and examine a bounded number of market references.
+CHECK_TIME_BUDGET_SECONDS = 5.0
+MAX_MARKET_REFERENCES = 200
+_REFERENCE_RE = re.compile(r"[^\s\"'<>\\()\[\]{}]+")
+
+
+class TraceCheckBudgetExceeded(Exception):
+    """The checks ran out of time; the caller submits without them."""
+
+
+def _check_budget(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise TraceCheckBudgetExceeded()
+
+
+def _market_lookup_domains(
+    source_market_id: str | None,
+    provider_calls: Iterable[Any],
+    supplied_text: str,
+    deadline: float,
+) -> list[str]:
     """Market-source references the agent itself put in a prompt.
 
-    A reference that an earlier response in the same run already contained is
-    research being passed along (a search result citing the market), not a
-    lookup, so it is ignored. Calls are read in the order they were made.
+    A reference is one whitespace-delimited token: a URL or a bare domain. It
+    is ignored when the same token already appeared in text the agent was
+    given: the event's own question and description, or an earlier response
+    in the same run (a search result citing the market, passed along). Calls
+    are read in the order they were made.
     """
     market_id = (source_market_id or "").strip().lower()
     # The id must sit in a URL as a whole path/query token, so a bare number in
@@ -104,23 +128,34 @@ def _market_lookup_domains(source_market_id: str | None, provider_calls: Iterabl
     id_re = re.compile(rf"(?<![a-z0-9]){re.escape(market_id)}(?![a-z0-9])") if market_id else None
     markers: set[str] = set()
     hosts: set[str] = set()
-    earlier_responses: list[str] = []
-
-    def introduced_by_agent(text: str) -> bool:
-        return not any(text in response for response in earlier_responses)
+    given: list[str] = [supplied_text.lower()]
+    judged: set[str] = set()
 
     for call in provider_calls:
+        _check_budget(deadline)
         prompt = _text(call, "prompt_text").lower()
-        for marker in _MARKET_SOURCE_MARKERS:
-            if marker in prompt and introduced_by_agent(marker):
-                markers.add(marker)
-        if id_re is not None:
-            for url in _URL_RE.findall(prompt):
-                if id_re.search(url) and introduced_by_agent(url):
-                    host = _url_host(url)
-                    if host:
-                        hosts.add(host)
-        earlier_responses.append(_text(call, "response_text").lower())
+        for token in set(_REFERENCE_RE.findall(prompt)):
+            token = token.rstrip(".,;:!?")
+            found_markers = [m for m in _MARKET_SOURCE_MARKERS if m in token]
+            is_id_url = (
+                id_re is not None
+                and token.startswith(("http://", "https://"))
+                and id_re.search(token) is not None
+            )
+            if not (found_markers or is_id_url) or token in judged:
+                continue
+            if len(judged) >= MAX_MARKET_REFERENCES:
+                break
+            judged.add(token)
+            _check_budget(deadline)
+            if any(token in text for text in given):
+                continue
+            markers.update(found_markers)
+            if is_id_url:
+                host = _url_host(token)
+                if host:
+                    hosts.add(host)
+        given.append(_text(call, "response_text").lower())
     # Fixed markers first so the cap never drops them.
     return (sorted(markers) + sorted(hosts - markers))[:MAX_MARKET_LOOKUP_DOMAINS]
 
@@ -131,14 +166,24 @@ def compute_trace_checks(
     source_market_id: str | None,
     provider_calls: Iterable[Any],
     reasoning: str | None,
+    supplied_text: str = "",
 ) -> dict[str, Any]:
     """Return the Proposal 3 flags and their supporting numbers in the submit
-    payload's camelCase shape."""
+    payload's camelCase shape.
+
+    ``supplied_text`` is the event text the validator gave the agent (question
+    and description). Raises ``TraceCheckBudgetExceeded`` when the time budget
+    runs out.
+    """
     calls = list(provider_calls)
+    deadline = time.monotonic() + CHECK_TIME_BUDGET_SECONDS
 
     reasoning_trigrams = _trigrams(reasoning or "")
     # Per call: the reasoning 3-grams that also appear in that call's response.
-    shared = [reasoning_trigrams & _trigrams(_text(call, "response_text")) for call in calls]
+    shared = []
+    for call in calls:
+        _check_budget(deadline)
+        shared.append(reasoning_trigrams & _trigrams(_text(call, "response_text")))
     overlap = len(set().union(*shared))
     # Same count without the call that shares most with the reasoning, which
     # is the call that wrote it when the reasoning is a model's own output.
@@ -148,7 +193,8 @@ def compute_trace_checks(
         other_overlap = len(set().union(*(s for i, s in enumerate(shared) if i != writer)))
 
     coverage = _question_coverage(question, calls)
-    domains = _market_lookup_domains(source_market_id, calls)
+    _check_budget(deadline)
+    domains = _market_lookup_domains(source_market_id, calls, supplied_text, deadline)
     sourced_calls = 0
     for call in calls:
         count = getattr(call, "source_url_count", 0)

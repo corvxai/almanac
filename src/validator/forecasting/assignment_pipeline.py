@@ -341,6 +341,7 @@ def build_prediction_submit_payload(
             source_market_id=assignment.event.sourceMarketId or assignment.event.marketId,
             provider_calls=digest.provider_calls,
             reasoning=digest.prediction_output.reasoning_summary,
+            supplied_text=f"{assignment.event.question}\n{assignment.event.description or ''}",
         )
     except Exception:
         logger.exception(

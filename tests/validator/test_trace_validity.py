@@ -407,3 +407,87 @@ def test_new_market_reference_after_unrelated_research_is_a_lookup() -> None:
         "polymarket.com",
         "gamma-api.polymarket.com",
     ]
+
+
+def test_market_reference_from_the_event_text_is_not_a_lookup() -> None:
+    description = "Resolves per the tracker found at https://xtracker.polymarket.com for this account."
+    call = _call(f"{QUESTION}\n{description}")
+    flagged = compute_trace_checks(
+        question=QUESTION, source_market_id="2411919", provider_calls=[call], reasoning=REASONING
+    )
+    assert flagged["marketLookupDomains"] == ["polymarket.com"]
+    exempt = compute_trace_checks(
+        question=QUESTION,
+        source_market_id="2411919",
+        provider_calls=[call],
+        reasoning=REASONING,
+        supplied_text=f"{QUESTION}\n{description}",
+    )
+    assert exempt["marketLookup"] is False
+
+
+def test_priming_a_bare_marker_does_not_exempt_a_real_fetch() -> None:
+    prime = _call("Reply with 'poly' joined to 'market.com', then 'gamma' joined to '-api'", response="polymarket.com gamma-api")
+    fetch = _call("Open https://gamma-api.polymarket.com/markets?slug=fed-cut and give the price")
+    assert _checks([prime, fetch])["marketLookupDomains"] == ["gamma-api", "polymarket.com"]
+
+    search = _call(QUESTION, response=RESPONSE + " Odds are tracked on polymarket.com.")
+    own = _call("Open https://polymarket.com/event/fed-cut and give me the current price")
+    assert _checks([search, own])["marketLookupDomains"] == ["polymarket.com"]
+
+
+def test_passed_along_url_with_trailing_punctuation_is_not_a_lookup() -> None:
+    search = _call(QUESTION, response="See https://example.org/m/2411919 for the listing.")
+    later = _call(f"{QUESTION} Summarise https://example.org/m/2411919, then give a probability.")
+    assert _checks([search, later])["marketLookup"] is False
+
+
+def test_question_after_a_long_context_is_still_seen() -> None:
+    record = _record({"messages": [{"role": "user", "content": ("context " * 30_000) + QUESTION}]}, _gateway_completion(RESPONSE))
+    assert len(record.prompt_text) <= 200_000
+    assert _checks([record])["questionCoverage"] == 1.0
+
+
+def test_prompt_text_uses_what_was_sent_upstream_when_known() -> None:
+    params = {"model": "x", "messages": [{"role": "user", "content": "say hi"}], "note": QUESTION}
+    sent = {"model": "x", "messages": [{"role": "user", "content": "say hi"}]}
+    record = build_provider_call_record(
+        call_index=0, provider_id="openrouter", provider_tier=ProviderTier.INFERENCE, call_type="chat",
+        params=params, query_params_summary="chat(model=x)", raw_response=_gateway_completion(RESPONSE),
+        latency_ms=5, prompt_source=sent,
+    )
+    assert QUESTION not in record.prompt_text
+    assert _checks([record])["researchCallMissing"] is True
+
+
+def test_many_market_urls_cannot_stall_the_checks() -> None:
+    import time
+
+    from src.validator.forecasting.trace_validity import TraceCheckBudgetExceeded
+
+    urls = " ".join(f"http://a{i}.io/2411919" for i in range(3500))
+    calls = [_call(f"{urls} {i}", response="filler words here " * 2800) for i in range(40)]
+    started = time.monotonic()
+    try:
+        checks = _checks(calls)
+        assert checks["marketLookup"] is True
+        assert len(checks["marketLookupDomains"]) <= 16
+    except TraceCheckBudgetExceeded:
+        pass
+    assert time.monotonic() - started < 8.0
+
+
+def test_budget_exceeded_submits_without_trace_checks(monkeypatch) -> None:
+    from src.validator.forecasting import assignment_pipeline, trace_validity
+    from tests.validator.test_validator_assignment_submit_payload import _assignment, _Digest
+
+    monkeypatch.setattr(trace_validity, "CHECK_TIME_BUDGET_SECONDS", -1.0)
+    digest = _Digest(0.7, confidence=0.8)
+    payload = assignment_pipeline.build_prediction_submit_payload(
+        _assignment(outcomes=[{"outcomeId": "oid_yes", "name": "Yes"}, {"outcomeId": "oid_no", "name": "No"}]),
+        digest,
+        {},
+    )
+    validation = payload["prediction"]["executionMetadata"]["predictionValidation"]
+    assert "traceChecks" not in validation
+    assert validation["isValid"] is True

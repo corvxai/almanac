@@ -59,21 +59,38 @@ _RESPONSE_METADATA_KEYS = frozenset(
 def _joined_strings(value: Any, skip_keys: frozenset[str] = frozenset()) -> str:
     """Every string in a JSON-like value, in order, joined and capped.
 
-    Iterative so a deeply nested agent-supplied payload cannot exhaust the stack.
+    Over the cap, the head and the tail are kept, so text at either end of a
+    long prompt (context first, question last) is still seen. Iterative so a
+    deeply nested agent-supplied payload cannot exhaust the stack.
     """
     parts: list[str] = []
-    size = 0
     stack: list[Any] = [value]
-    while stack and size < _CHECK_TEXT_MAX_CHARS:
+    while stack:
         item = stack.pop()
         if isinstance(item, str):
             parts.append(item)
-            size += len(item) + 1
         elif isinstance(item, dict):
             stack.extend(v for k, v in reversed(list(item.items())) if k not in skip_keys)
         elif isinstance(item, list):
             stack.extend(reversed(item))
-    return "\n".join(parts)[:_CHECK_TEXT_MAX_CHARS]
+    if sum(len(p) + 1 for p in parts) <= _CHECK_TEXT_MAX_CHARS:
+        return "\n".join(parts)
+    half = _CHECK_TEXT_MAX_CHARS // 2
+    head: list[str] = []
+    size = 0
+    for part in parts:
+        head.append(part[: half - size])
+        size += len(head[-1]) + 1
+        if size >= half:
+            break
+    tail: list[str] = []
+    size = 0
+    for part in reversed(parts):
+        tail.append(part[-(half - size):])
+        size += len(tail[-1]) + 1
+        if size >= half:
+            break
+    return ("\n".join(head))[:half] + "\n" + ("\n".join(reversed(tail)))[-(half - 1):]
 
 
 _SOURCE_URL_KEYS = frozenset({"url", "uri", "citations"})
@@ -113,6 +130,7 @@ def build_provider_call_record(
     query_params_summary: str,
     raw_response: dict[str, Any],
     latency_ms: int,
+    prompt_source: Any = None,
 ) -> ProviderCall:
     """Build a fully-populated `ProviderCall` from a raw response.
 
@@ -169,7 +187,8 @@ def build_provider_call_record(
         raw_response_hash=raw_hash,
         latency_ms=latency_ms,
         cost_units=cost_units,
-        prompt_text=_joined_strings(params),
+        # What was actually sent upstream when the caller knows it; params otherwise.
+        prompt_text=_joined_strings(params if prompt_source is None else prompt_source),
         # All text the agent received: every content block, tool or search
         # result, reasoning trace and citation, not just the first completion.
         response_text=_joined_strings(raw_response, _RESPONSE_METADATA_KEYS),
