@@ -92,23 +92,35 @@ def _question_coverage(question: str, provider_calls: Iterable[Any]) -> float:
 
 
 def _market_lookup_domains(source_market_id: str | None, provider_calls: Iterable[Any]) -> list[str]:
+    """Market-source references the agent itself put in a prompt.
+
+    A reference that an earlier response in the same run already contained is
+    research being passed along (a search result citing the market), not a
+    lookup, so it is ignored. Calls are read in the order they were made.
+    """
     market_id = (source_market_id or "").strip().lower()
+    # The id must sit in a URL as a whole path/query token, so a bare number in
+    # prose or a longer id that merely contains it is ignored.
+    id_re = re.compile(rf"(?<![a-z0-9]){re.escape(market_id)}(?![a-z0-9])") if market_id else None
     markers: set[str] = set()
     hosts: set[str] = set()
+    earlier_responses: list[str] = []
+
+    def introduced_by_agent(text: str) -> bool:
+        return not any(text in response for response in earlier_responses)
+
     for call in provider_calls:
         prompt = _text(call, "prompt_text").lower()
         for marker in _MARKET_SOURCE_MARKERS:
-            if marker in prompt:
+            if marker in prompt and introduced_by_agent(marker):
                 markers.add(marker)
-        if market_id:
-            # The id must sit in a URL as a whole path/query token, so a bare
-            # number in prose or a longer id that merely contains it is ignored.
-            id_re = re.compile(rf"(?<![a-z0-9]){re.escape(market_id)}(?![a-z0-9])")
+        if id_re is not None:
             for url in _URL_RE.findall(prompt):
-                if id_re.search(url):
+                if id_re.search(url) and introduced_by_agent(url):
                     host = _url_host(url)
                     if host:
                         hosts.add(host)
+        earlier_responses.append(_text(call, "response_text").lower())
     # Fixed markers first so the cap never drops them.
     return (sorted(markers) + sorted(hosts - markers))[:MAX_MARKET_LOOKUP_DOMAINS]
 

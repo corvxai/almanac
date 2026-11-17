@@ -370,3 +370,40 @@ def test_sourced_call_count_reads_the_gateway_citation_count() -> None:
     assert _checks([cited, uncited, malformed])["sourcedCallCount"] == 1
     # The count is a number, not text: it must not leak into the response text.
     assert cited.response_text == RESPONSE
+
+
+def test_market_reference_passed_along_from_research_is_not_a_lookup() -> None:
+    cited = RESPONSE + " [source: polymarket.com](https://polym.trade/event/x) https://example.org/m/2411919"
+    search = _call(f"Find current facts relevant to: {QUESTION}", response=cited)
+    synthesis = _call(f"Question: {QUESTION}\nResearch:\n{cited}\nGive a probability.")
+    checks = _checks([search, synthesis])
+    assert checks["marketLookup"] is False
+    assert checks["marketLookupDomains"] == []
+
+
+def test_market_reference_the_agent_wrote_is_still_a_lookup() -> None:
+    # Written by the agent in its first prompt, then echoed back and reused.
+    fetch = _call(
+        "Open https://gamma-api.polymarket.com/markets/2411919 and report outcomePrices",
+        response="From https://gamma-api.polymarket.com/markets/2411919 the YES price is 0.63",
+    )
+    reuse = _call(f"{QUESTION} The price at gamma-api.polymarket.com is 0.63.")
+    assert _checks([fetch, reuse])["marketLookupDomains"] == [
+        "gamma-api",
+        "polymarket.com",
+        "gamma-api.polymarket.com",
+    ]
+    # Order matters: a marker in a prompt sent before the response that cites it counts.
+    early = _call("Check polymarket.com for this market", response="nothing found")
+    late = _call(QUESTION, response="See polymarket.com for odds.")
+    assert _checks([early, late])["marketLookupDomains"] == ["polymarket.com"]
+
+
+def test_new_market_reference_after_unrelated_research_is_a_lookup() -> None:
+    search = _call(QUESTION, response=RESPONSE + " See kalshi.com/markets/kxfed for odds.")
+    fetch = _call("Now open https://gamma-api.polymarket.com/markets/2411919")
+    assert _checks([search, fetch])["marketLookupDomains"] == [
+        "gamma-api",
+        "polymarket.com",
+        "gamma-api.polymarket.com",
+    ]
