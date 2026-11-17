@@ -74,6 +74,29 @@ def _joined_strings(value: Any, skip_keys: frozenset[str] = frozenset()) -> str:
     return "\n".join(parts)[:_CHECK_TEXT_MAX_CHARS]
 
 
+_SOURCE_URL_KEYS = frozenset({"url", "uri", "citations"})
+
+
+def _source_url_count(raw_response: Any) -> int:
+    """Distinct links a response returned in structured source fields
+    (citation annotations, search results, grounding chunks). Links the model
+    merely wrote in its prose are not counted, so a prompt cannot fake them."""
+    urls: set[str] = set()
+    stack: list[tuple[str, Any]] = [("", raw_response)]
+    visited = 0
+    while stack and visited < 100_000:
+        key, item = stack.pop()
+        visited += 1
+        if isinstance(item, str):
+            if key in _SOURCE_URL_KEYS and item.lower().startswith(("http://", "https://")):
+                urls.add(item)
+        elif isinstance(item, dict):
+            stack.extend((str(k), v) for k, v in item.items())
+        elif isinstance(item, list):
+            stack.extend((key, v) for v in item)
+    return len(urls)
+
+
 def build_provider_call_record(
     *,
     call_index: int,
@@ -144,6 +167,7 @@ def build_provider_call_record(
         # All text the agent received: every content block, tool or search
         # result, reasoning trace and citation, not just the first completion.
         response_text=_joined_strings(raw_response, _RESPONSE_METADATA_KEYS),
+        source_url_count=_source_url_count(raw_response),
     )
 
 

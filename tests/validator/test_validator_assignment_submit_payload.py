@@ -701,9 +701,13 @@ def test_trace_checks_are_reported_without_changing_validity() -> None:
     assert exec_meta["predictionIsInvalid"] is False
     assert exec_meta["predictionValidation"]["reasons"] == []
     assert exec_meta["predictionValidation"]["traceChecks"] == {
+        "checksVersion": 1,
         "researchCallMissing": True,
+        "questionCoverage": 0.0,
         "reasoningUnsupported": True,
         "reasoningOverlap": 0,
+        "reasoningOverlapOtherCalls": 0,
+        "sourcedCallCount": 0,
         "marketLookup": False,
         "marketLookupDomains": [],
     }

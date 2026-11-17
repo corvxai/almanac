@@ -196,6 +196,8 @@ class ProviderCall(BaseModel):
     # carry this text. Do not pickle or dict() a ProviderCall.
     prompt_text: str = Field(default="", exclude=True, repr=False)
     response_text: str = Field(default="", exclude=True, repr=False)
+    # Distinct source links the response returned in structured fields.
+    source_url_count: int = Field(default=0, exclude=True, repr=False)
 
 
 class ReasoningStep(BaseModel):

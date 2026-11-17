@@ -13,6 +13,10 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+# Bump whenever the same trace could produce different values: tokeniser,
+# stopwords, thresholds, market markers, or what counts as prompt/response text.
+CHECKS_VERSION = 1
+
 # A research call is "about the question" when its prompt contains at least
 # this share of the question's distinct content words.
 QUESTION_WORD_COVERAGE_MIN = 0.6
@@ -72,18 +76,19 @@ def _url_host(url: str) -> str:
     return re.sub(r"[^a-z0-9.-]", "", host)[:253]
 
 
-def _has_research_call(question: str, provider_calls: Iterable[Any]) -> bool:
+def _question_coverage(question: str, provider_calls: Iterable[Any]) -> float:
+    """Best share of the question's content words found in the prompt of any
+    call that got a non-empty response. 0.0 when there is no such call."""
     question_words = _content_words(question)
+    best = 0.0
     for call in provider_calls:
         if not _text(call, "response_text").strip():
             continue
         if not question_words:
-            return True
+            return 1.0
         prompt_words = set(_words(_text(call, "prompt_text")))
-        covered = len(question_words & prompt_words) / len(question_words)
-        if covered >= QUESTION_WORD_COVERAGE_MIN:
-            return True
-    return False
+        best = max(best, len(question_words & prompt_words) / len(question_words))
+    return best
 
 
 def _market_lookup_domains(source_market_id: str | None, provider_calls: Iterable[Any]) -> list[str]:
@@ -115,19 +120,36 @@ def compute_trace_checks(
     provider_calls: Iterable[Any],
     reasoning: str | None,
 ) -> dict[str, Any]:
-    """Return the three Proposal 3 flags in the submit payload's camelCase shape."""
+    """Return the Proposal 3 flags and their supporting numbers in the submit
+    payload's camelCase shape."""
     calls = list(provider_calls)
 
-    response_trigrams: set[tuple[str, str, str]] = set()
-    for call in calls:
-        response_trigrams |= _trigrams(_text(call, "response_text"))
-    overlap = len(_trigrams(reasoning or "") & response_trigrams)
+    reasoning_trigrams = _trigrams(reasoning or "")
+    # Per call: the reasoning 3-grams that also appear in that call's response.
+    shared = [reasoning_trigrams & _trigrams(_text(call, "response_text")) for call in calls]
+    overlap = len(set().union(*shared))
+    # Same count without the call that shares most with the reasoning, which
+    # is the call that wrote it when the reasoning is a model's own output.
+    other_overlap = 0
+    if len(shared) > 1:
+        writer = max(range(len(shared)), key=lambda i: len(shared[i]))
+        other_overlap = len(set().union(*(s for i, s in enumerate(shared) if i != writer)))
 
+    coverage = _question_coverage(question, calls)
     domains = _market_lookup_domains(source_market_id, calls)
+    sourced_calls = 0
+    for call in calls:
+        count = getattr(call, "source_url_count", 0)
+        if isinstance(count, int) and count > 0:
+            sourced_calls += 1
     return {
-        "researchCallMissing": not _has_research_call(question, calls),
+        "checksVersion": CHECKS_VERSION,
+        "researchCallMissing": coverage < QUESTION_WORD_COVERAGE_MIN,
+        "questionCoverage": round(coverage, 4),
         "reasoningUnsupported": overlap < REASONING_MIN_SHARED_TRIGRAMS,
         "reasoningOverlap": overlap,
+        "reasoningOverlapOtherCalls": other_overlap,
+        "sourcedCallCount": sourced_calls,
         "marketLookup": bool(domains),
         "marketLookupDomains": domains,
     }

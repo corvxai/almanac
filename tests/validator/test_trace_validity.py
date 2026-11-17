@@ -271,3 +271,62 @@ def test_trace_check_failure_never_blocks_the_submit(monkeypatch) -> None:
     validation = payload["prediction"]["executionMetadata"]["predictionValidation"]
     assert "traceChecks" not in validation
     assert validation["isValid"] is True
+
+
+def test_checks_version_is_reported() -> None:
+    assert _checks([_call(QUESTION)])["checksVersion"] == 1
+
+
+def test_question_coverage_is_the_best_call_and_drives_the_flag() -> None:
+    checks = _checks([_call("federal reserve"), _call("federal reserve cut interest"), _call(QUESTION, response="")])
+    # 4 of 7 content words; the full-question call has no response so it does not count.
+    assert checks["questionCoverage"] == round(4 / 7, 4)
+    assert checks["researchCallMissing"] is True
+    assert _checks([_call(QUESTION)])["questionCoverage"] == 1.0
+    assert _checks([])["questionCoverage"] == 0.0
+
+
+def test_overlap_other_calls_excludes_the_call_that_wrote_the_reasoning() -> None:
+    # One call: the reasoning overlaps only with its own source.
+    single = _checks([_call(QUESTION)])
+    assert single["reasoningOverlap"] >= REASONING_MIN_SHARED_TRIGRAMS
+    assert single["reasoningOverlapOtherCalls"] == 0
+
+    # A synthesis call that wrote the reasoning, plus an unrelated call: still 0.
+    writer = _call(QUESTION, response=REASONING)
+    unrelated = _call(QUESTION, response="The weather in Paris will be mild and dry all week long.")
+    assert _checks([unrelated, writer])["reasoningOverlapOtherCalls"] == 0
+
+    # A research call the reasoning really draws on is still counted.
+    drawn = _checks([_call(QUESTION), writer])
+    assert drawn["reasoningOverlap"] > drawn["reasoningOverlapOtherCalls"] >= REASONING_MIN_SHARED_TRIGRAMS
+
+
+def test_sourced_call_count_uses_structured_source_links_only() -> None:
+    prompt = {"messages": [{"role": "user", "content": QUESTION}]}
+    prose_only = _record(prompt, {"choices": [{"message": {"content": "See https://example.org/a for details."}}]})
+    annotated = _record(
+        prompt,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": RESPONSE,
+                        "annotations": [
+                            {"type": "url_citation", "url_citation": {"url": "https://example.org/a", "title": "A"}}
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+    cited = _record(prompt, {"choices": [{"message": {"content": RESPONSE}}], "citations": ["https://example.org/b"]})
+    grounded = _record(
+        prompt,
+        {"candidates": [{"content": {"parts": [{"text": RESPONSE}]}, "groundingMetadata": {"groundingChunks": [{"web": {"uri": "https://example.org/c"}}]}}]},
+    )
+    assert prose_only.source_url_count == 0
+    assert (annotated.source_url_count, cited.source_url_count, grounded.source_url_count) == (1, 1, 1)
+    assert "source_url_count" not in annotated.model_dump(mode="json")
+    assert _checks([prose_only, annotated, cited, grounded])["sourcedCallCount"] == 3
+    assert _checks([_call(QUESTION)])["sourcedCallCount"] == 0
