@@ -40,6 +40,86 @@ def default_summarise_params(call_type: str, params: dict[str, Any]) -> str:
     return f"{call_type}({', '.join(parts)})"
 
 
+# Per-call cap on text retained for the trace validity checks, so one agent
+# cannot hold or make the validator tokenise an unbounded amount of text.
+_CHECK_TEXT_MAX_CHARS = 200_000
+# Response fields that describe the call rather than carry what the agent read.
+_RESPONSE_METADATA_KEYS = frozenset(
+    {
+        "id", "model", "object", "role", "type", "name", "index", "status", "created",
+        "provider", "service_tier", "system_fingerprint", "finish_reason",
+        "native_finish_reason", "stop_reason", "stop_sequence", "signature",
+        "encrypted_content", "encrypted_index", "tool_use_id", "tool_call_id", "call_id",
+        # The Sub41 gateway's normalised completion: text is in `output`.
+        "finishReason", "upstreamId", "costMicro", "providerCostMicro", "balanceAfterMicro",
+    }
+)
+
+
+def _joined_strings(value: Any, skip_keys: frozenset[str] = frozenset()) -> str:
+    """Every string in a JSON-like value, in order, joined and capped.
+
+    Over the cap, the head and the tail are kept, so text at either end of a
+    long prompt (context first, question last) is still seen. Iterative so a
+    deeply nested agent-supplied payload cannot exhaust the stack.
+    """
+    parts: list[str] = []
+    stack: list[Any] = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            stack.extend(v for k, v in reversed(list(item.items())) if k not in skip_keys)
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
+    if sum(len(p) + 1 for p in parts) <= _CHECK_TEXT_MAX_CHARS:
+        return "\n".join(parts)
+    half = _CHECK_TEXT_MAX_CHARS // 2
+    head: list[str] = []
+    size = 0
+    for part in parts:
+        head.append(part[: half - size])
+        size += len(head[-1]) + 1
+        if size >= half:
+            break
+    tail: list[str] = []
+    size = 0
+    for part in reversed(parts):
+        tail.append(part[-(half - size):])
+        size += len(tail[-1]) + 1
+        if size >= half:
+            break
+    return ("\n".join(head))[:half] + "\n" + ("\n".join(reversed(tail)))[-(half - 1):]
+
+
+_SOURCE_URL_KEYS = frozenset({"url", "uri", "citations"})
+
+
+def _source_url_count(raw_response: Any) -> int:
+    """Distinct links a response returned in structured source fields
+    (citation annotations, search results, grounding chunks). Links the model
+    merely wrote in its prose are not counted, so a prompt cannot fake them."""
+    # The Sub41 gateway strips the provider payload and reports the count itself.
+    reported = raw_response.get("citationCount") if isinstance(raw_response, dict) else None
+    if isinstance(reported, int) and not isinstance(reported, bool) and reported > 0:
+        return reported
+    urls: set[str] = set()
+    stack: list[tuple[str, Any]] = [("", raw_response)]
+    visited = 0
+    while stack and visited < 100_000:
+        key, item = stack.pop()
+        visited += 1
+        if isinstance(item, str):
+            if key in _SOURCE_URL_KEYS and item.lower().startswith(("http://", "https://")):
+                urls.add(item)
+        elif isinstance(item, dict):
+            stack.extend((str(k), v) for k, v in item.items())
+        elif isinstance(item, list):
+            stack.extend((key, v) for v in item)
+    return len(urls)
+
+
 def build_provider_call_record(
     *,
     call_index: int,
@@ -50,6 +130,7 @@ def build_provider_call_record(
     query_params_summary: str,
     raw_response: dict[str, Any],
     latency_ms: int,
+    prompt_source: Any = None,
 ) -> ProviderCall:
     """Build a fully-populated `ProviderCall` from a raw response.
 
@@ -106,6 +187,12 @@ def build_provider_call_record(
         raw_response_hash=raw_hash,
         latency_ms=latency_ms,
         cost_units=cost_units,
+        # What was actually sent upstream when the caller knows it; params otherwise.
+        prompt_text=_joined_strings(params if prompt_source is None else prompt_source),
+        # All text the agent received: every content block, tool or search
+        # result, reasoning trace and citation, not just the first completion.
+        response_text=_joined_strings(raw_response, _RESPONSE_METADATA_KEYS),
+        source_url_count=_source_url_count(raw_response),
     )
 
 

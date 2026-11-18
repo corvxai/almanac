@@ -191,6 +191,13 @@ class ProviderCall(BaseModel):
     raw_response_hash: str
     latency_ms: int = Field(ge=0)
     cost_units: float = Field(ge=0)
+    # In-memory only, for the trace validity checks. Excluded from pydantic dumps
+    # and repr, so the trace hash, the stored trace and the submit payload never
+    # carry this text. Do not pickle or dict() a ProviderCall.
+    prompt_text: str = Field(default="", exclude=True, repr=False)
+    response_text: str = Field(default="", exclude=True, repr=False)
+    # Distinct source links the response returned in structured fields.
+    source_url_count: int = Field(default=0, exclude=True, repr=False)
 
 
 class ReasoningStep(BaseModel):

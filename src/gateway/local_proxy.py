@@ -397,6 +397,7 @@ def _forward_and_record(
             query_params_summary=summary,
             raw_response=raw_response,
             latency_ms=latency_ms,
+            prompt_source=completion_payload,
         )
         run.calls.append(call_record)
 
